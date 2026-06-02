@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	contract "github.com/MOSSV2/dimo-sdk-go/contract/v2"
-	lerror "github.com/MOSSV2/dimo-sdk-go/lib/error"
-	"github.com/MOSSV2/dimo-sdk-go/lib/key"
-	"github.com/MOSSV2/dimo-sdk-go/lib/logfs"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
-	"github.com/MOSSV2/dimo-sdk-go/sdk"
+	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	lerror "github.com/unibaseio/da-sdk-go/lib/error"
+	"github.com/unibaseio/da-sdk-go/lib/key"
+	"github.com/unibaseio/da-sdk-go/lib/logfs"
+	"github.com/unibaseio/da-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/sdk"
 	"github.com/gin-gonic/gin"
 )
 

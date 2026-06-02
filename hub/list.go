@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
-	lerror "github.com/MOSSV2/dimo-sdk-go/lib/error"
+	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/gin-gonic/gin"
 )
 

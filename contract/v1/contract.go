@@ -7,7 +7,7 @@ import (
 	"math/big"
 	"os"
 
-	com "github.com/MOSSV2/dimo-sdk-go/contract/common"
+	com "github.com/unibaseio/da-sdk-go/contract/common"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"

@@ -7,10 +7,10 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/MOSSV2/dimo-sdk-go/build"
-	lerror "github.com/MOSSV2/dimo-sdk-go/lib/error"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
-	"github.com/MOSSV2/dimo-sdk-go/sdk"
+	"github.com/unibaseio/da-sdk-go/build"
+	lerror "github.com/unibaseio/da-sdk-go/lib/error"
+	"github.com/unibaseio/da-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/sdk"
 	"github.com/gin-gonic/gin"
 )
 

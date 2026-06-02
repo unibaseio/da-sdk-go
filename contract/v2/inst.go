@@ -3,17 +3,17 @@ package contract
 import (
 	"context"
 
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/epoch"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/eproof"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/everify"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/node"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/piece"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/plonk/add"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/plonk/kzg"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/plonk/mul"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/plonk/rsone"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/rsproof"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/token"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/epoch"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/eproof"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/everify"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/node"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/piece"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/plonk/add"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/plonk/kzg"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/plonk/mul"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/plonk/rsone"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/rsproof"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/token"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 )

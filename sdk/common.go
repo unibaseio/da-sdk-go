@@ -17,12 +17,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MOSSV2/dimo-sdk-go/build"
-	"github.com/MOSSV2/dimo-sdk-go/lib/bls"
-	"github.com/MOSSV2/dimo-sdk-go/lib/bls/erasure"
-	"github.com/MOSSV2/dimo-sdk-go/lib/log"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
-	"github.com/MOSSV2/dimo-sdk-go/lib/utils"
+	"github.com/unibaseio/da-sdk-go/build"
+	"github.com/unibaseio/da-sdk-go/lib/bls"
+	"github.com/unibaseio/da-sdk-go/lib/bls/erasure"
+	"github.com/unibaseio/da-sdk-go/lib/log"
+	"github.com/unibaseio/da-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/utils"
 
 	"github.com/consensys/gnark-crypto/hash"
 	"github.com/ethereum/go-ethereum/common"

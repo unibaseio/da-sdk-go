@@ -9,11 +9,11 @@ import (
 	"os"
 	"path/filepath"
 
-	com "github.com/MOSSV2/dimo-sdk-go/contract/common"
-	contract "github.com/MOSSV2/dimo-sdk-go/contract/v2"
-	"github.com/MOSSV2/dimo-sdk-go/lib/key"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
-	"github.com/MOSSV2/dimo-sdk-go/sdk"
+	com "github.com/unibaseio/da-sdk-go/contract/common"
+	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	"github.com/unibaseio/da-sdk-go/lib/key"
+	"github.com/unibaseio/da-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/sdk"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/mitchellh/go-homedir"
 )

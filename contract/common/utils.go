@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/bls"
+	"github.com/unibaseio/da-sdk-go/lib/bls"
 )
 
 func G1ToString(g bls.G1) string {

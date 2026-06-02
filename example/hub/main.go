@@ -5,9 +5,9 @@ import (
 	"log"
 	"math/rand"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/key"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
-	"github.com/MOSSV2/dimo-sdk-go/sdk"
+	"github.com/unibaseio/da-sdk-go/lib/key"
+	"github.com/unibaseio/da-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/sdk"
 )
 
 func main() {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/lighthash"
+	"github.com/unibaseio/da-sdk-go/lib/lighthash"
 )
 
 func SlothEncode(in, v []byte) error {

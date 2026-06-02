@@ -7,7 +7,7 @@ import (
 	"io"
 	"math/big"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 
 	"github.com/consensys/gnark-crypto/ecc/bls12-377/kzg"
 )

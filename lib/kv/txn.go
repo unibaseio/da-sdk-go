@@ -5,7 +5,7 @@ import (
 
 	"github.com/dgraph-io/badger/v2"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 var _ types.ITxnStore = (*txn)(nil)

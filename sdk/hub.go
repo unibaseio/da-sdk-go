@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 func ListAccountHub(baseUrl string) error {

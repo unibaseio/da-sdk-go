@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/log"
+	"github.com/unibaseio/da-sdk-go/lib/log"
 
 	"github.com/mitchellh/go-homedir"
 	"github.com/schollz/progressbar/v3"

@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"testing"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/utils"
+	"github.com/unibaseio/da-sdk-go/lib/utils"
 )
 
 var segSize = 32

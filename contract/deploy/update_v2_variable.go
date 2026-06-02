@@ -7,11 +7,11 @@ import (
 	"math/big"
 	"os"
 
-	contract "github.com/MOSSV2/dimo-sdk-go/contract/common"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/epoch"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/eproof"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/node"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v2/go/rsproof"
+	contract "github.com/unibaseio/da-sdk-go/contract/common"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/epoch"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/eproof"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/node"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/rsproof"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
