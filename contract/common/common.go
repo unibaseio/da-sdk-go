@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/MOSSV2/dimo-sdk-go/build"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v1/go/token"
-	dlog "github.com/MOSSV2/dimo-sdk-go/lib/log"
-	"github.com/MOSSV2/dimo-sdk-go/lib/utils"
+	"github.com/unibaseio/da-sdk-go/build"
+	"github.com/unibaseio/da-sdk-go/contract/v1/go/token"
+	dlog "github.com/unibaseio/da-sdk-go/lib/log"
+	"github.com/unibaseio/da-sdk-go/lib/utils"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"

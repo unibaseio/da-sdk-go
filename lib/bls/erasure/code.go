@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"math/big"
 
-	bls "github.com/MOSSV2/dimo-sdk-go/lib/bls"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	bls "github.com/unibaseio/da-sdk-go/lib/bls"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 var _ types.IErasure = (*RS)(nil)

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/kv"
-	"github.com/MOSSV2/dimo-sdk-go/lib/utils"
+	"github.com/unibaseio/da-sdk-go/lib/kv"
+	"github.com/unibaseio/da-sdk-go/lib/utils"
 	"github.com/alecthomas/units"
 	"github.com/mitchellh/go-homedir"
 )

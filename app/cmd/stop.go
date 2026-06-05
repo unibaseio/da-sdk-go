@@ -5,7 +5,7 @@ import (
 	"os"
 	"path"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/utils"
+	"github.com/unibaseio/da-sdk-go/lib/utils"
 	"github.com/mitchellh/go-homedir"
 	"github.com/urfave/cli/v2"
 )

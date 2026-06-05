@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	com "github.com/MOSSV2/dimo-sdk-go/contract/common"
+	com "github.com/unibaseio/da-sdk-go/contract/common"
 
-	"github.com/MOSSV2/dimo-sdk-go/build"
+	"github.com/unibaseio/da-sdk-go/build"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/merkle"
+	"github.com/unibaseio/da-sdk-go/lib/merkle"
 )
 
 func TestHashSpeed(t *testing.T) {

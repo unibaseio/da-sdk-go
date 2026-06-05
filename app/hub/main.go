@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/MOSSV2/dimo-sdk-go/app/cmd"
-	"github.com/MOSSV2/dimo-sdk-go/build"
+	"github.com/unibaseio/da-sdk-go/app/cmd"
+	"github.com/unibaseio/da-sdk-go/build"
 	"github.com/urfave/cli/v2"
 )
 

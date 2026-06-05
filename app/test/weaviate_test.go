@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MOSSV2/dimo-sdk-go/sdk"
+	"github.com/unibaseio/da-sdk-go/sdk"
 	"github.com/weaviate/weaviate-go-client/v4/weaviate"
 	"github.com/weaviate/weaviate-go-client/v4/weaviate/auth"
 	"github.com/weaviate/weaviate/entities/models"

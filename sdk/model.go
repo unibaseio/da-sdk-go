@@ -12,11 +12,11 @@ import (
 	"path"
 	"strings"
 
-	com "github.com/MOSSV2/dimo-sdk-go/contract/common"
-	contract "github.com/MOSSV2/dimo-sdk-go/contract/v1"
-	"github.com/MOSSV2/dimo-sdk-go/lib/archive"
-	"github.com/MOSSV2/dimo-sdk-go/lib/bls"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	com "github.com/unibaseio/da-sdk-go/contract/common"
+	contract "github.com/unibaseio/da-sdk-go/contract/v1"
+	"github.com/unibaseio/da-sdk-go/lib/archive"
+	"github.com/unibaseio/da-sdk-go/lib/bls"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 func SubmitModelRepo(baseUrl string, auth types.Auth, mr types.RepoCore) error {

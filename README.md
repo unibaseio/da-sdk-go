@@ -33,7 +33,7 @@ note: 启动时会从服务器自动获取 0.002 gas token 和 100 UB token
 
 ```shell
 > export CHAIN_TYPE=<your CHAIN_TYPE>
-> git clone https://github.com/MOSSV2/dimo-sdk-go.git
+> git clone https://github.com/unibaseio/da-sdk-go.git
 > cd example/upload
 > go build
 # if sk not set, will generate a new key, model means upload model or regualr file/dir

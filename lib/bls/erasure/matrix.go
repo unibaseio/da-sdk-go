@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math/big"
 
-	bls "github.com/MOSSV2/dimo-sdk-go/lib/bls"
+	bls "github.com/unibaseio/da-sdk-go/lib/bls"
 )
 
 type matrix []bls.Fr
