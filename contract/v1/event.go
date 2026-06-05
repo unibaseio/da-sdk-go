@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"math/big"
 
-	com "github.com/MOSSV2/dimo-sdk-go/contract/common"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	com "github.com/unibaseio/da-sdk-go/contract/common"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"

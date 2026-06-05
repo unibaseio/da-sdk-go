@@ -7,7 +7,7 @@ import (
 	"math/big"
 	"os"
 
-	com "github.com/MOSSV2/dimo-sdk-go/contract/common"
+	com "github.com/unibaseio/da-sdk-go/contract/common"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -55,7 +55,7 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 			cm.RPC = chainRPC
 		}
 	default:
-		return nil, fmt.Errorf("unsupportted chain type: %s, use 'bnb-testnet-v2', 'op-sepolia' or 'opbnb-testnet'", chainType)
+		return nil, fmt.Errorf("unsupportted chain type: %s, use 'bnb-testnet', 'op-sepolia' or 'opbnb-testnet'", chainType)
 	}
 
 	chainRPC := os.Getenv("CHAIN_RPC")

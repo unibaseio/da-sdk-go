@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 func SubmitGPU(baseUrl string, auth types.Auth, mr types.GPUCore) error {

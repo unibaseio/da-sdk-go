@@ -1,6 +1,6 @@
 package error
 
-import "github.com/MOSSV2/dimo-sdk-go/lib/log"
+import "github.com/unibaseio/da-sdk-go/lib/log"
 
 var logger = log.Logger("lerror")
 

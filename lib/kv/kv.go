@@ -10,9 +10,9 @@ import (
 	"github.com/dgraph-io/badger/v2"
 	"go.uber.org/zap"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/log"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
-	"github.com/MOSSV2/dimo-sdk-go/lib/utils"
+	"github.com/unibaseio/da-sdk-go/lib/log"
+	"github.com/unibaseio/da-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/utils"
 )
 
 var logger = log.Logger("badger")

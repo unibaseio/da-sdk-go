@@ -1,9 +1,9 @@
 package repo
 
 import (
-	"github.com/MOSSV2/dimo-sdk-go/lib/config"
-	"github.com/MOSSV2/dimo-sdk-go/lib/key"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/config"
+	"github.com/unibaseio/da-sdk-go/lib/key"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 type Repo interface {

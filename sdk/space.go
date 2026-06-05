@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 func SubmitSpace(baseUrl string, auth types.Auth, msm types.SpaceMeta) (types.SpaceMeta, error) {

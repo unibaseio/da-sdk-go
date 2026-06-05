@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/MOSSV2/dimo-sdk-go/build"
-	"github.com/MOSSV2/dimo-sdk-go/contract/v1/go/token"
-	dlog "github.com/MOSSV2/dimo-sdk-go/lib/log"
-	"github.com/MOSSV2/dimo-sdk-go/lib/utils"
+	"github.com/unibaseio/da-sdk-go/build"
+	"github.com/unibaseio/da-sdk-go/contract/v1/go/token"
+	dlog "github.com/unibaseio/da-sdk-go/lib/log"
+	"github.com/unibaseio/da-sdk-go/lib/utils"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -55,7 +55,7 @@ var (
 	//https://sepolia-optimism.etherscan.io/
 	//DevChain   = "https://11155420.rpc.thirdweb.com"
 
-	DefaultGasLimit = 90_000_000
+	DefaultGasLimit = 10_000_000
 	DefaultGasPrice = 100_000_000 // 0.1gwei
 
 	DefaultStreamPrice  = 1e12
@@ -169,6 +169,35 @@ var (
 	BNBTestnetKZGAddr   = common.HexToAddress("0xE78Eb0B875772E0C464DaAa2054AE8D7F4a7c06A")
 	BNBTestnetAddAddr   = common.HexToAddress("0x37222C0a687079968a039874748218e0C43BFf65")
 	BNBTestnetMulAddr   = common.HexToAddress("0x7581C27FC358208F3d64A0cd2E5733290D7C0CD9")
+)
+
+// bnb-testnet-dao
+var (
+	BNBTestnetDAO                     = build.BNBTestnetDAO
+	BNBTestnetDAOExplorer             = "https://testnet.bscscan.com/"
+	BNBTestnetDAOChainRPC             = "https://bsc-testnet-dataseed.bnbchain.org"
+	BNBTestnetDAOChainRPCForFilterLog = "https://bsc-prebsc-dataseed.bnbchain.org"
+	BNBTestnetDAOChainID              = int64(97)
+	BNBTestnetDAOBankAddr             = common.HexToAddress("0x5903805A3a50Fab318c8650bABC71F58900EE34e")
+	BNBTestnetDAOTokenAddr            = common.HexToAddress("0x7c5AC49563d7046906333AC2CA28E602327CFe1A")
+	BNBTestnetDAOSyncHeight           = 108_347_000
+
+	BNBTestnetDAOEpochAddr   = common.HexToAddress("0xfBF8CbDCFb200eD20e69e4F89b39CbC7A18855E6")
+	BNBTestnetDAONodeAddr    = common.HexToAddress("0xAF83D927C968eDC0E50232536Aac2245b4E048d9")
+	BNBTestnetDAOPieceAddr   = common.HexToAddress("0x0b03B50c5A65051F0b33b1155f6370b3EE8394c6")
+	BNBTestnetDAORSProofAddr = common.HexToAddress("0x97Ce0b5006CD830a38635FE7001C0b988536f398")
+	BNBTestnetDAOEProofAddr  = common.HexToAddress("0x8F4FfA5FbDA95762DF1B6aC19272DA6aa78A3860")
+	BNBTestnetDAOEVerifyAddr = common.HexToAddress("0xe8a6b34880828329A2371d43184f6Cb6298C1d20")
+	BNBTestnetDAOStatAddr    = common.HexToAddress("")
+
+	BNBTestnetDAORSOneAddr = common.HexToAddress("0xFe01d13E43d9f551Acc4469c3FF4da3e2FF3e3C7")
+	BNBTestnetDAOKZGAddr   = common.HexToAddress("0x804D9F4AEAa3A44B03A28c35c522c6E1cf7c371c")
+	BNBTestnetDAOAddAddr   = common.HexToAddress("0x5E87B084d8A7207664aE408280D2BdEdA4F7f30D")
+	BNBTestnetDAOMulAddr   = common.HexToAddress("0x9e0fb9415ED4306EB331532c130f896350765A0F")
+
+	BNBTestnetDAOTimelockAddr = common.HexToAddress("0xfbEc1a00623d01AfFbBE68cca021c3f6fe08fD2a")
+	BNBTestnetDAOGovernorAddr = common.HexToAddress("0x8c760975545030CEBF16C0f6E109d90Bc77B5Ed9")
+	BNBTestnetDAOERC20Addr    = common.HexToAddress("0x53B5bC1cDc844B02F4BFeA71429657e5078c0349")
 )
 
 var Logger = dlog.Logger("contract")

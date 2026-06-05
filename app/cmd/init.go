@@ -3,9 +3,9 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/MOSSV2/dimo-sdk-go/build"
-	"github.com/MOSSV2/dimo-sdk-go/lib/config"
-	"github.com/MOSSV2/dimo-sdk-go/lib/repo"
+	"github.com/unibaseio/da-sdk-go/build"
+	"github.com/unibaseio/da-sdk-go/lib/config"
+	"github.com/unibaseio/da-sdk-go/lib/repo"
 	"github.com/mitchellh/go-homedir"
 	"github.com/urfave/cli/v2"
 )

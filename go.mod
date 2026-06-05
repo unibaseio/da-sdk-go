@@ -1,8 +1,8 @@
-module github.com/MOSSV2/dimo-sdk-go
+module github.com/unibaseio/da-sdk-go
 
-go 1.22.0
+go 1.24.0
 
-toolchain go1.22.2
+toolchain go1.24.6
 
 require (
 	github.com/alecthomas/units v0.0.0-20240927000941-0f3dac36c52b

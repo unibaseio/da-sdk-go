@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 
 	"github.com/ethereum/go-ethereum/common"
 )

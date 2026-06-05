@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/log"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/log"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 
 	"github.com/ethereum/go-ethereum/common"
 )

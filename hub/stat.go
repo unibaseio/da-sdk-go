@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )

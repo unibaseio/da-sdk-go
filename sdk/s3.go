@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
 	"github.com/minio/minio-go/v7"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 func CreateBucket(baseUrl string, auth types.Auth, bn string) (minio.BucketInfo, error) {

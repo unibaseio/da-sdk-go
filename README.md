@@ -33,8 +33,6 @@ Current DA solutions (EigenDA, Celestia, Avail, etc.) were designed for rollup t
 
 ## 📦 Features
 
-### ✅ High Performance
-
 - **Write Throughput:** 100 GB/s+
 - **Encoding Speed:** 100 MB/s
 - **Low-Latency Access:** Built for real-time AI/DePIN scenarios
@@ -73,7 +71,7 @@ Unibase DA follows a multi-layer architecture to ensure speed, reliability, and 
 ## 📦 Installation
 
 ```bash
-git clone https://github.com/unibaseio/unibase-sdk-go.git
+git clone https://github.com/unibaseio/da-sdk-go.git
 cd unibase-sdk-go
 go build
 ```

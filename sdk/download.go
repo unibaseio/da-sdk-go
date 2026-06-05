@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/bls"
-	"github.com/MOSSV2/dimo-sdk-go/lib/bls/erasure"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/bls"
+	"github.com/unibaseio/da-sdk-go/lib/bls/erasure"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 
 	"github.com/ethereum/go-ethereum/common"
 	"golang.org/x/sync/semaphore"

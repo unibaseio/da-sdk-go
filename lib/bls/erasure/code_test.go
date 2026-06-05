@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
-	bls "github.com/MOSSV2/dimo-sdk-go/lib/bls"
+	bls "github.com/unibaseio/da-sdk-go/lib/bls"
 )
 
 func TestMatrix(t *testing.T) {

@@ -9,14 +9,15 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
-	contract "github.com/MOSSV2/dimo-sdk-go/contract/v2"
-	lerror "github.com/MOSSV2/dimo-sdk-go/lib/error"
-	"github.com/MOSSV2/dimo-sdk-go/lib/key"
-	"github.com/MOSSV2/dimo-sdk-go/lib/logfs"
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
-	"github.com/MOSSV2/dimo-sdk-go/sdk"
+	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	lerror "github.com/unibaseio/da-sdk-go/lib/error"
+	"github.com/unibaseio/da-sdk-go/lib/key"
+	"github.com/unibaseio/da-sdk-go/lib/logfs"
+	"github.com/unibaseio/da-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/sdk"
 	"github.com/gin-gonic/gin"
 )
 
@@ -279,6 +280,7 @@ func (s *Server) uploadTo() {
 
 	for {
 		time.Sleep(time.Minute)
+		logger.Info("check uploaded info")
 		err := cm.CheckBalance(au.Addr)
 		if err != nil {
 			time.Sleep(time.Minute)
@@ -323,6 +325,13 @@ func (s *Server) uploadTo() {
 				fr, err := sdk.GetFileReceipt(sdk.ServerURL, au, fname)
 				if err == nil {
 					logger.Infof("%s/%d.vol is already uploaded, check its piece onchain", key, i)
+					if fr.ChainType != s.rp.Repo().Config().Chain.Type {
+						buf := make([]byte, 8)
+						binary.BigEndian.PutUint64(buf, i+1)
+						s.rp.MetaStore().Put(dsKey, buf)
+						logger.Warnf("new chain type detected, ignore previous one")
+						continue
+					}
 					er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
 					if err != nil {
 						break
@@ -350,11 +359,15 @@ func (s *Server) uploadTo() {
 						s.rp.MetaStore().Put(dsKey, buf)
 						continue
 					}
-					break
+					continue
 				}
 				// upload to stream and submit to gateway
 				res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fp, fname)
 				if err != nil {
+					if strings.Contains(err.Error(), "already has piece") {
+						logger.Warnf("piece of file %s found on server, skip", fp)
+						continue
+					}
 					break
 				}
 				pcs, err := sdk.CheckFileFull(res, streamer, fp)

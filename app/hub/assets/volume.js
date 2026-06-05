@@ -82,7 +82,7 @@ function createCard(meta) {
 
   if (meta.TxHash) {
     let rurl = "https://sepolia-optimism.etherscan.io/tx/"
-    if (meta.ChainType == "bnb-testnet" || meta.ChainType == "bnb-testnet-v2") {
+    if (meta.ChainType == "bnb-testnet" || meta.ChainType == "bnb-testnet-v2" || meta.ChainType == "bnb-testnet-dao") {
       rurl = "https://testnet.bscscan.com/tx/"
     } else if (meta.ChainType == "opbnb-testnet") {
       rurl = "https://opbnb-testnet.bscscan.com/tx/"

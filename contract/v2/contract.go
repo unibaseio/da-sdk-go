@@ -7,7 +7,7 @@ import (
 	"math/big"
 	"os"
 
-	com "github.com/MOSSV2/dimo-sdk-go/contract/common"
+	com "github.com/unibaseio/da-sdk-go/contract/common"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -111,6 +111,26 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 		if chainRPC != "" {
 			cm.RPC = chainRPC
 		}
+	case com.BNBTestnetDAO:
+		cm.RPC = com.BNBTestnetDAOChainRPC
+		cm.RPCForFilterLog = com.BNBTestnetDAOChainRPCForFilterLog
+		cm.ChainID = big.NewInt(int64(com.BNBTestnetDAOChainID))
+		cm.SyncHeight = com.BNBTestnetDAOSyncHeight
+
+		cm.TokenAddr = com.BNBTestnetDAOTokenAddr
+
+		cm.EpochAddr = com.BNBTestnetDAOEpochAddr
+		cm.NodeAddr = com.BNBTestnetDAONodeAddr
+		cm.PieceAddr = com.BNBTestnetDAOPieceAddr
+		cm.RSProofAddr = com.BNBTestnetDAORSProofAddr
+		cm.EProofAddr = com.BNBTestnetDAOEProofAddr
+		cm.EVerifyAddr = com.BNBTestnetDAOEVerifyAddr
+		cm.StatAddr = com.BNBTestnetDAOStatAddr
+
+		cm.RSOneAddr = com.BNBTestnetDAORSOneAddr
+		cm.KZGAddr = com.BNBTestnetDAOKZGAddr
+		cm.AddAddr = com.BNBTestnetDAOAddAddr
+		cm.MulAddr = com.BNBTestnetDAOMulAddr
 	case com.LocalAnvil:
 		cm.RPC = com.LocalAnvilChainRPC
 		cm.RPCForFilterLog = com.LocalAnvilChainRPCForFilterLog
@@ -132,7 +152,7 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 		cm.AddAddr = com.LocalAnvilAddAddr
 		cm.MulAddr = com.LocalAnvilMulAddr
 	default:
-		return nil, fmt.Errorf("unsupportted chain type: %s, use 'bnb-testnet-v2', 'op-sepolia' or 'opbnb-testnet'", chainType)
+		return nil, fmt.Errorf("unsupportted chain type: %s, use 'bnb-testnet-dao', 'op-sepolia' or 'opbnb-testnet'", chainType)
 	}
 
 	chainRPC := os.Getenv("CHAIN_RPC")

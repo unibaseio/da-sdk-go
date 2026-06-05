@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/MOSSV2/dimo-sdk-go/lib/types"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 func UploadFileMeta(baseUrl string, auth types.Auth, fcws types.FileReceipt) error {
