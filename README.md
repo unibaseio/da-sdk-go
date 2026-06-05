@@ -1,98 +1,131 @@
-# intro
 
-go sdk，include file and contract operations, hub usage
+# Unibase DA
 
-## network
+**Unibase DA** is a high-performance, decentralized data availability (DA) and storage layer optimized for AI and DePIN workloads. Built with zk-based on-chain verification, it supports massive data throughput and EB-scale capacity while ensuring trust and transparency via Ethereum-based settlement.
 
-note: 启动时会从服务器自动获取 0.002 gas token 和 100 UB token
+---
 
-### BNB testnet
+## 🔍 Why Unibase DA?
 
-- CHAIN_TYPE: bnb-testnet
-- Explorer: https://testnet.bscscan.com/
-- RPC: https://bsc-testnet-rpc.publicnode.com
-- Faucet: https://docs.bnbchain.org/bnb-opbnb/developers/network-faucet/
+Current DA solutions (EigenDA, Celestia, Avail, etc.) were designed for rollup transaction data, not the large-scale, real-time data workloads required by AI and DePIN. Unibase DA solves this by offering:
 
-### OP Sepolia
+- 🔐 On-chain verifiability with ZK Proofs
+- ⚡️ 100GB/s write throughput & 100MB/s encoding
+- 🌐 Horizontal scaling to millions of devices
+- 🧠 Native support for AI/DePIN memory + model data
+- 📦 Modular storage APIs for files, models, blobs, and streams
 
-- CHAIN_TYPE: op-sepolia
-- Explorer: https://sepolia-optimistic.etherscan.io
-- RPC: https://optimism-sepolia-rpc.publicnode.com
-- Faucet: https://docs.optimism.io/builders/tools/build/faucets
+---
 
-### OPBNB testnet
+## 📊 DA Protocol Comparison
 
-- CHAIN_TYPE: opbnb-testnet
-- Explorer: https://opbnb-testnet.bscscan.com
-- RPC: https://opbnb-testnet-rpc.publicnode.com
-- Faucet: https://docs.bnbchain.org/bnb-opbnb/developers/network-faucet/
+| Feature                      | Ethereum | EigenDA | Celestia | Avail | 0G | **Unibase DA** |
+|-----------------------------|----------|---------|----------|-------|----|----------------|
+| **Data Verification**       | —        | Off-chain | Off-chain | Off-chain | Off-chain | ✅ **On-chain (ZK Proofs)** |
+| **Data Security Model**     | Honest Majority | Honest Majority | Honest Majority | Honest Majority | Honest Majority | ✅ **Honest One (On-chain)** |
+| **Data Throughput**         | 0.083 MB/s | 10 MB/s | 1.5–10 MB/s | — | 50 GB/s | ✅ **100 GB/s** |
+| **Consensus**               | Casper   | None    | Tendermint | BABE + GRANDPA | Tendermint | None |
+| **DAS Support**             | ❌        | ❌      | ✅        | ✅     | ✅  | ✅ |
+| **Proof Type**              | Validity Proof | Validity Proof | Fraud Proof | Validity Proof | Validity Proof | ✅ **Fraud Proof** |
+| **DA Settlement Layer**     | Ethereum | Ethereum | Celestia | Avail | 0G | ✅ **Ethereum** |
 
-## usage
+---
 
-### upload file/directory
+## 📦 Features
 
-```shell
-> export CHAIN_TYPE=<your CHAIN_TYPE>
-> git clone https://github.com/unibaseio/da-sdk-go.git
-> cd example/upload
-> go build
-# if sk not set, will generate a new key, model means upload model or regualr file/dir
-> ./upload --model=false --sk=<your secret key> --path=<your local file/dir path>
-# example, upload file
-> ./upload --sk=4215875d8ac13ac4fb0876a0ecd0384aca0ce16b627bf975c8084915aad79470 --path=./upload
+- **Write Throughput:** 100 GB/s+
+- **Encoding Speed:** 100 MB/s
+- **Low-Latency Access:** Built for real-time AI/DePIN scenarios
+
+### ✅ High Scalability
+
+- **Capacity:** EB+
+- **Nodes:** 1M+ edge/DePIN nodes
+- **Storage Pools:** Public & private options
+
+### ✅ Programmable
+
+- **Ownership & Access Control:** On-chain via smart contracts
+- **ZK Proofs:** Enable verifiable data integrity
+- **Assetization:** Built-in support for data NFTs & streams
+
+---
+
+## 🧠 Architecture
+
+Unibase DA follows a multi-layer architecture to ensure speed, reliability, and transparency:
+
+- **Smart Contract Layer:** Receives commitment, validates encode proofs, settles data
+- **Storage Nodes:** Store encoded data blocks
+- **ZK Verifier:** Validates submitted proofs
+- **Client SDK:** Uploads files, generates proofs, interacts with contracts
+
+![Unibase DA Verification Diagram](https://path-to-image/da-verification.png)
+
+---
+
+## 🚀 SDK Quickstart
+
+```bash
+
+## 📦 Installation
+
+```bash
+git clone https://github.com/unibaseio/da-sdk-go.git
+cd unibase-sdk-go
+go build
 ```
 
-### download file/directory
+---
 
-```shell
-> export CHAIN_TYPE=<your CHAIN_TYPE>
-> cd example/download
-> go build
-# if sk not set, will generate a new key, model means upload model or regualr file/dir
-> ./download --model=false --sk=<your secret key>  --name=<file name> --path=<your local file/dir path to save>
-# example, upload file
-> ./download --sk=4215875d8ac13ac4fb0876a0ecd0384aca0ce16b627bf975c8084915aad79470 --name=4b59a3a5fa50d178dc4594c400097d497a206cff98865e815333ed7504558336 --path=./upload
+## 📚 Quick Usage
+
+### Upload a file/directory
+
+```bash
+export CHAIN_TYPE=bnb-testnet
+cd example/upload
+go build
+./upload --model=false --sk=<your_secret_key> --path=<your_local_path>
 ```
 
-## hub
+### Download a file/directory
 
-upload/download small files, small files are aggregated into large file, and submit to chain
-
-### public hub
-
-#### download
-
-- web browser: http://54.151.130.2:8080/api/download?name=\<your file name\>&owner=\<your file owne\>
-
-- shell
-
-```shell
-> wget http://54.151.130.2:8080/api/download?name=<your file name>\&owner=<your file owner> -O <saved name>
-# or display
-> curl http://54.151.130.2:8080/api/download?name=<your file name>\&owner=<your file owner>
-
+```bash
+export CHAIN_TYPE=bnb-testnet
+cd example/download
+go build
+./download --model=false --sk=<your_secret_key> --name=<file_name> --path=<your_save_path>
 ```
 
-#### upload
+### Public Hub (Optional)
 
-- upload using json
+- Download:
 
-```shell
-# output: {"File":"0xabcd-0.vol","Start":0,"Size":41}
-> curl -X POST http://54.151.130.2:8080/api/upload -d '{
-    "id": "test1",
-    "owner":"0xabcd",
-    "message":"Here is a story about llamas eating grass"
-  }'
-```
+  ```bash
+  wget http://54.151.130.2:8080/api/download?name=<your_file_name>&owner=<your_owner_address> -O <save_as_name>
+  ```
 
-### private hub
+- Upload:
 
-```shell
-> export CHAIN_TYPE=<your CHAIN_TYPE>
-> cd app/hub
-> go build
-> ./hub init
-# run
-> ./hub daemon run -b 0.0.0.0:8086
-```
+  ```bash
+  curl -X POST http://54.151.130.2:8080/api/upload -d '{"id":"test1","owner":"0xabcd","message":"sample message"}'
+  ```
+
+Public Hub API available for lightweight storage and retrieval.
+
+---
+
+## 🔗 Links
+
+- 🌐 Website: [https://www.unibase.com](https://www.unibase.com)
+- 📖 GitBook: [Unibase Docs](https://openos-labs.gitbook.io/unibase-docs/)
+- 🧠 GitHub: [github.com/unibaseio](https://github.com/unibaseio)
+- 🐦 Twitter: [@Unibase_AI](https://twitter.com/Unibase_AI)
+- 📢 Telegram: [@unibase_ai](https://t.me/unibase_ai)
+
+---
+
+## 📜 License
+
+MIT License
