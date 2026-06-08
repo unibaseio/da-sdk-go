@@ -154,7 +154,12 @@ func (s *Server) registRoute() {
 
 	s.Router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
+	// /api group: body-size cap → auth → per-owner+per-ip rate limit.
+	// AuthMiddleware skips /api/info (see authBypassPaths) so /info stays open.
 	r := s.Router.Group("/api")
+	r.Use(MaxBodySize())
+	r.Use(AuthMiddleware())
+	r.Use(RateLimit())
 
 	s.addInfo(r)
 	s.addDownload(r)

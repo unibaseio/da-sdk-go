@@ -25,7 +25,10 @@ func (s *Server) downloadByGET(c *gin.Context) {
 	if mn == "" {
 		mn = c.Query("id")
 	}
-	addr := c.Query("owner")
+	addr, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 
 	head := fmt.Sprintf("attachment; filename=\"%s\"", mn)
 	extraHeaders := map[string]string{
@@ -48,7 +51,10 @@ func (s *Server) downloadByPOST(c *gin.Context) {
 	if mn == "" {
 		mn = c.PostForm("id")
 	}
-	addr := c.PostForm("owner")
+	addr, ok := ResolveOwnerForList(c, c.PostForm("owner"))
+	if !ok {
+		return
+	}
 
 	head := fmt.Sprintf("attachment; filename=\"%s\"", mn)
 	extraHeaders := map[string]string{

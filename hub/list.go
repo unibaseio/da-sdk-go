@@ -39,7 +39,10 @@ func (s *Server) addList(g *gin.RouterGroup) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/getAccount [get]
 func (s *Server) getAccountByGet(c *gin.Context) {
-	owner := c.Query("owner")
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	res, err := s.getAccount(owner)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
@@ -118,7 +121,10 @@ func (s *Server) listAccountByPost(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError			"Internal server error"
 //	@Router			/api/getBucket [get]
 func (s *Server) getBucketByGet(c *gin.Context) {
-	owner := c.Query("owner")
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	bucket := c.Query("bucket")
 	if bucket == "" {
 		bucket = c.Query("name")
@@ -149,7 +155,10 @@ func (s *Server) getBucketByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError			"Internal server error"
 //	@Router			/api/listBucket [get]
 func (s *Server) listBucketByGet(c *gin.Context) {
-	owner := c.Query("owner")
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	offset, _ := strconv.Atoi(c.Query("offset"))
 	length, _ := strconv.Atoi(c.Query("length"))
 	if length == 0 {
@@ -180,7 +189,10 @@ func (s *Server) listBucketByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError			"Internal server error"
 //	@Router			/api/listBucket [post]
 func (s *Server) listBucketByPost(c *gin.Context) {
-	owner := c.PostForm("owner")
+	owner, ok := ResolveOwnerForList(c, c.PostForm("owner"))
+	if !ok {
+		return
+	}
 	offset, _ := strconv.Atoi(c.PostForm("offset"))
 	length, _ := strconv.Atoi(c.PostForm("length"))
 	if length == 0 {
@@ -210,7 +222,10 @@ func (s *Server) listBucketByPost(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/getNeedle [get]
 func (s *Server) getNeedleByGet(c *gin.Context) {
-	owner := c.Query("owner")
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	bucket := c.Query("bucket")
 	name := c.Query("name")
 	res, err := s.getNeedleDisplay(owner, bucket, name)
@@ -237,7 +252,10 @@ func (s *Server) getNeedleByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listNeedle [get]
 func (s *Server) listNeedleByGet(c *gin.Context) {
-	addr := c.Query("owner")
+	addr, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	bucket := c.Query("bucket")
 	offset, _ := strconv.Atoi(c.Query("offset"))
 	length, _ := strconv.Atoi(c.Query("length"))
@@ -279,7 +297,10 @@ func (s *Server) listNeedleByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listNeedle [post]
 func (s *Server) listNeedleByPost(c *gin.Context) {
-	owner := c.PostForm("owner")
+	owner, ok := ResolveOwnerForList(c, c.PostForm("owner"))
+	if !ok {
+		return
+	}
 	bucket := c.PostForm("bucket")
 	offset, _ := strconv.Atoi(c.PostForm("offset"))
 	length, _ := strconv.Atoi(c.PostForm("length"))
@@ -318,7 +339,10 @@ func (s *Server) listNeedleByPost(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listVolume [get]
 func (s *Server) listVolumeByGet(c *gin.Context) {
-	addr := c.Query("owner")
+	addr, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	offset, _ := strconv.Atoi(c.Query("offset"))
 	length, _ := strconv.Atoi(c.Query("length"))
 	if length == 0 {
@@ -347,7 +371,10 @@ func (s *Server) listVolumeByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listVolume [post]
 func (s *Server) listVolumeByPost(c *gin.Context) {
-	addr := c.PostForm("owner")
+	addr, ok := ResolveOwnerForList(c, c.PostForm("owner"))
+	if !ok {
+		return
+	}
 	offset, _ := strconv.Atoi(c.PostForm("offset"))
 	length, _ := strconv.Atoi(c.PostForm("length"))
 	if length == 0 {
@@ -375,7 +402,10 @@ func (s *Server) listVolumeByPost(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/getVolume [get]
 func (s *Server) getVolumeByGet(c *gin.Context) {
-	owner := c.Query("owner")
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	fid, _ := strconv.Atoi(c.Query("file"))
 	res, err := s.getVolume(owner, uint64(fid))
 	if err != nil {
