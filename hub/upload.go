@@ -28,8 +28,7 @@ func (s *Server) addUpload(g *gin.RouterGroup) {
 
 func (s *Server) uploadData(c *gin.Context) {
 	addr := c.PostForm("owner")
-	if addr == "" {
-		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("owner is required")))
+	if !RequireOwnerMatch(c, addr) {
 		return
 	}
 	bucket := c.PostForm("bucket")
@@ -72,6 +71,10 @@ func (s *Server) upload(c *gin.Context) {
 	err := c.ShouldBindJSON(&mjson)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+
+	if !RequireOwnerMatch(c, mjson.Owner) {
 		return
 	}
 

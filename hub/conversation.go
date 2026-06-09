@@ -37,7 +37,10 @@ func (s *Server) conversationByPost(c *gin.Context) {
 	if mn == "" {
 		mn = c.PostForm("id")
 	}
-	addr := c.PostForm("owner")
+	addr, ok := ResolveOwnerForList(c, c.PostForm("owner"))
+	if !ok {
+		return
+	}
 	bucket := c.PostForm("bucket")
 
 	offset, _ := strconv.Atoi(c.PostForm("offset"))
@@ -83,7 +86,10 @@ func (s *Server) conversationByGet(c *gin.Context) {
 	if mn == "" {
 		mn = c.Query("id")
 	}
-	addr := c.Query("owner")
+	addr, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	bucket := c.Query("bucket")
 	offset, _ := strconv.Atoi(c.Query("offset"))
 	length, _ := strconv.Atoi(c.Query("length"))
@@ -122,7 +128,10 @@ func (s *Server) conversationByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listConversation [get]
 func (s *Server) listConversationByGet(c *gin.Context) {
-	addr := c.Query("owner")
+	addr, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	bucket := c.Query("bucket")
 	offset, _ := strconv.Atoi(c.Query("offset"))
 	length, _ := strconv.Atoi(c.Query("length"))
@@ -151,7 +160,10 @@ func (s *Server) listConversationByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/getConversation [get]
 func (s *Server) getConversationByGet(c *gin.Context) {
-	addr := c.Query("owner")
+	addr, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
 	bucket := c.Query("bucket")
 	mn := c.Query("name")
 	res, err := s.getConversationDisplay(addr, bucket, mn)
