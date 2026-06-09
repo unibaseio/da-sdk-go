@@ -214,6 +214,65 @@ func TestResolveOwnerForList_DefaultsToSigner(t *testing.T) {
 	}
 }
 
+// newPublicTestRouter mirrors the public, read-only /api group in server.go:
+// body-size cap + rate limit, but NO AuthMiddleware.
+func newPublicTestRouter() *gin.Engine {
+	r := gin.New()
+	g := r.Group("/api")
+	g.Use(MaxBodySize())
+	g.Use(RateLimit())
+
+	// fake list endpoint that exercises ResolveOwnerForList on the public path
+	g.GET("/listBucket", func(c *gin.Context) {
+		owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+		if !ok {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "owner": owner})
+	})
+	return r
+}
+
+const otherAddr = "0x1111111111111111111111111111111111111111"
+
+func TestPublicList_NoAuthAcceptsExplicitOwner(t *testing.T) {
+	r := newPublicTestRouter()
+	w := httptest.NewRecorder()
+	// No Authorization header, explicit owner (someone else's) — must succeed.
+	req := httptest.NewRequest("GET", "/api/listBucket?owner="+otherAddr, nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200 on public list, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(strings.ToLower(w.Body.String()), strings.ToLower(otherAddr)) {
+		t.Errorf("expected owner addr in response, got %s", w.Body.String())
+	}
+}
+
+func TestPublicList_NoAuthRequiresOwner(t *testing.T) {
+	r := newPublicTestRouter()
+	w := httptest.NewRecorder()
+	// No auth and no owner: there's no signer to default to → 400, not 401.
+	req := httptest.NewRequest("GET", "/api/listBucket", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 when owner missing on public list, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestPublicList_NoAuthRejectsBadOwner(t *testing.T) {
+	r := newPublicTestRouter()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/listBucket?owner=not-an-address", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 on malformed owner, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestInfoBypass(t *testing.T) {
 	r := newTestRouter()
 	w := httptest.NewRecorder()

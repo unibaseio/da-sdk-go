@@ -149,6 +149,12 @@ func abortWithAuthError(c *gin.Context, err error) {
 	c.AbortWithStatusJSON(http.StatusUnauthorized, lerror.ToAPIError("hub", err))
 }
 
+// abortWithBadRequest is for client errors on public (unauthenticated) reads —
+// e.g. a missing or malformed owner — where a 401 would be misleading.
+func abortWithBadRequest(c *gin.Context, err error) {
+	c.AbortWithStatusJSON(http.StatusBadRequest, lerror.ToAPIError("hub", err))
+}
+
 // ----------------------------------------------------------------------------
 // Owner ownership check (signer must own the namespace they're touching)
 // ----------------------------------------------------------------------------
@@ -196,17 +202,28 @@ func RequireOwnerMatch(c *gin.Context, owner string) bool {
 }
 
 // ResolveOwnerForList is the read-side variant used by list/get endpoints.
-// Behavior:
-//   - if owner is empty, default to the signer's own address
-//   - if owner is provided, it must equal the signer (and be a valid ETH addr)
+// These run on the public (unauthenticated) /api group, so the common case
+// has no signer. Behavior:
+//   - no signer (public read): an explicit, valid owner is required — anyone
+//     may browse a given owner's listing, but there's no signer to default to.
+//   - signer present (e.g. if a route is ever moved to the authed group):
+//     empty owner defaults to the signer; an explicit owner must match it.
 //
 // Returns (resolvedOwner, ok). When ok is false, the response has already
 // been written and the handler must return.
 func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 	signer := CtxAuthAddr(c)
+
 	if signer == "" {
-		abortWithAuthError(c, fmt.Errorf("no signer in context"))
-		return "", false
+		if owner == "" {
+			abortWithBadRequest(c, fmt.Errorf("owner is required"))
+			return "", false
+		}
+		if !common.IsHexAddress(owner) {
+			abortWithBadRequest(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
+			return "", false
+		}
+		return strings.ToLower(owner), true
 	}
 
 	if owner == "" {
@@ -214,7 +231,7 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 	}
 
 	if !common.IsHexAddress(owner) {
-		abortWithAuthError(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
+		abortWithBadRequest(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
 		return "", false
 	}
 
