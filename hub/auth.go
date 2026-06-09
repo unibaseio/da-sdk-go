@@ -204,20 +204,27 @@ func RequireOwnerMatch(c *gin.Context, owner string) bool {
 // ResolveOwnerForList is the read-side variant used by list/get endpoints.
 // These run on the public (unauthenticated) /api group, so the common case
 // has no signer. Behavior:
-//   - no signer (public read): an explicit, valid owner is required — anyone
-//     may browse a given owner's listing, but there's no signer to default to.
+//   - no signer (public read): owner is OPTIONAL. Empty means "no filter —
+//     list everything", which the explorer's global /agents and /memory
+//     browse views rely on. A provided owner must be a valid address and
+//     simply scopes the listing to that owner.
 //   - signer present (e.g. if a route is ever moved to the authed group):
 //     empty owner defaults to the signer; an explicit owner must match it.
 //
+// Stored content is client-encrypted, so an unscoped listing exposes only
+// ciphertext plus public metadata (bucket / needle names) — the same data
+// a block explorer shows.
+//
 // Returns (resolvedOwner, ok). When ok is false, the response has already
-// been written and the handler must return.
+// been written and the handler must return. An empty resolvedOwner with
+// ok==true means "list all" — the gorm queries omit a zero-value owner from
+// the WHERE clause, so this is the correct unscoped query.
 func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 	signer := CtxAuthAddr(c)
 
 	if signer == "" {
 		if owner == "" {
-			abortWithBadRequest(c, fmt.Errorf("owner is required"))
-			return "", false
+			return "", true
 		}
 		if !common.IsHexAddress(owner) {
 			abortWithBadRequest(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
