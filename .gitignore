@@ -27,4 +27,8 @@ example/test/test
 
 app/hub/hub
 
+# stray binary from `go build ./cmd/hub-mock/...` at repo root
+/hub-mock
+cmd/hub-mock/hub-mock
+
 bin/*
