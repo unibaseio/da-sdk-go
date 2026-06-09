@@ -250,15 +250,21 @@ func TestPublicList_NoAuthAcceptsExplicitOwner(t *testing.T) {
 	}
 }
 
-func TestPublicList_NoAuthRequiresOwner(t *testing.T) {
+func TestPublicList_NoAuthNoOwnerListsAll(t *testing.T) {
 	r := newPublicTestRouter()
 	w := httptest.NewRecorder()
-	// No auth and no owner: there's no signer to default to → 400, not 401.
+	// No auth and no owner: owner is optional on public reads — this is the
+	// explorer's global browse view, which lists every owner's entries.
+	// Resolves to "" (no filter → list all), so the handler runs and 200s.
 	req := httptest.NewRequest("GET", "/api/listBucket", nil)
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("want 400 when owner missing on public list, got %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200 (list-all) when owner omitted on public list, got %d body=%s", w.Code, w.Body.String())
+	}
+	// resolved owner is empty in the response — the unscoped query marker.
+	if !strings.Contains(w.Body.String(), `"owner":""`) {
+		t.Errorf("expected empty resolved owner (list-all) in response, got %s", w.Body.String())
 	}
 }
 
