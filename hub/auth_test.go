@@ -248,6 +248,23 @@ func TestPublicList_NoAuthAcceptsExplicitOwner(t *testing.T) {
 	}
 }
 
+func TestPublicList_PreservesOwnerCase(t *testing.T) {
+	// Storage keys on the exact owner string used at write time (EIP-55
+	// mixed case). ResolveOwnerForList must return it verbatim — lower-casing
+	// here would look up a different key and 404 every mixed-case-owner read.
+	r := newPublicTestRouter()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/listBucket?owner="+testAddr, nil) // testAddr is EIP-55 mixed case
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"owner":"`+testAddr+`"`) {
+		t.Errorf("owner case was altered; want verbatim %s, got %s", testAddr, w.Body.String())
+	}
+}
+
 func TestPublicList_NoAuthNoOwnerListsAll(t *testing.T) {
 	r := newPublicTestRouter()
 	w := httptest.NewRecorder()

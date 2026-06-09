@@ -187,6 +187,13 @@ func RequireOwnerMatch(c *gin.Context, owner string) bool {
 // ciphertext plus public metadata (bucket / needle names) — the same data
 // a block explorer shows.
 //
+// IMPORTANT: the owner is returned VERBATIM — its case is never altered. The
+// storage layer keys LogFS instances, needle metadata and MetaStore entries on
+// the exact owner string used at write time, which is usually an EIP-55
+// mixed-case address (e.g. 0x6370eF2f...). Lower-casing here would look up a
+// different key than was written, breaking read-after-write and making all
+// existing mixed-case-owner data un-downloadable.
+//
 // Returns (resolvedOwner, ok). When ok is false, the response has already
 // been written and the handler must return. An empty resolvedOwner with
 // ok==true means "list all" — the gorm queries omit a zero-value owner from
@@ -202,7 +209,7 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 			abortWithBadRequest(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
 			return "", false
 		}
-		return strings.ToLower(owner), true
+		return owner, true
 	}
 
 	if owner == "" {
@@ -219,5 +226,5 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 		return "", false
 	}
 
-	return strings.ToLower(owner), true
+	return owner, true
 }
