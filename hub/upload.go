@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/sdk"
-	"github.com/gin-gonic/gin"
 )
 
 func (s *Server) addUpload(g *gin.RouterGroup) {
@@ -109,6 +109,11 @@ func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader)
 	var err error
 	if addr == "" {
 		addr = s.local.String()
+	} else {
+		// Canonicalize the client-provided owner to lowercase so the same
+		// wallet always lands in one namespace regardless of the case it was
+		// sent in (EIP-55 checksum vs lowercase).
+		addr = CanonOwner(addr)
 	}
 
 	if bucket == "" {
@@ -177,16 +182,33 @@ func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader)
 }
 
 func (s *Server) logFSRead(addr string, key string, w io.Writer) (int64, error) {
-	var err error
 	if addr == "" {
 		ns, err := s.getNeedleByName(key)
 		if err != nil || len(ns) == 0 {
 			return 0, fmt.Errorf("no such needle %s", key)
-		} else {
-			addr = ns[0].Owner
 		}
+		// Found the exact owner the needle was stored under — read it directly.
+		return s.logFSReadOne(ns[0].Owner, key, w)
 	}
 
+	// Client-supplied owner: try the canonical lowercase form first, then the
+	// EIP-55 checksum form (legacy data was stored under the mixed-case
+	// address). logFSReadOne only writes to w on success, so failed candidates
+	// leave w untouched.
+	var firstErr error
+	for _, cand := range ownerCandidates(addr) {
+		n, err := s.logFSReadOne(cand, key, w)
+		if err == nil {
+			return n, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return 0, firstErr
+}
+
+func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, error) {
 	s.Lock()
 	fs, ok := s.lfs[addr]
 	if !ok {

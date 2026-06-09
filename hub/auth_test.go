@@ -248,10 +248,11 @@ func TestPublicList_NoAuthAcceptsExplicitOwner(t *testing.T) {
 	}
 }
 
-func TestPublicList_PreservesOwnerCase(t *testing.T) {
-	// Storage keys on the exact owner string used at write time (EIP-55
-	// mixed case). ResolveOwnerForList must return it verbatim — lower-casing
-	// here would look up a different key and 404 every mixed-case-owner read.
+func TestPublicList_CanonicalizesOwnerToLowercase(t *testing.T) {
+	// Ethereum addresses are case-insensitive (EIP-55 case is just a UI
+	// checksum). The hub canonicalizes owner to lowercase so a wallet can't
+	// split into mixed-case vs lowercase namespaces; reads then match the
+	// stored rows via LOWER(owner) and the legacy-checksum fallback.
 	r := newPublicTestRouter()
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/listBucket?owner="+testAddr, nil) // testAddr is EIP-55 mixed case
@@ -260,8 +261,8 @@ func TestPublicList_PreservesOwnerCase(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"owner":"`+testAddr+`"`) {
-		t.Errorf("owner case was altered; want verbatim %s, got %s", testAddr, w.Body.String())
+	if !strings.Contains(w.Body.String(), `"owner":"`+strings.ToLower(testAddr)+`"`) {
+		t.Errorf("owner not canonicalized to lowercase; want %s, got %s", strings.ToLower(testAddr), w.Body.String())
 	}
 }
 
