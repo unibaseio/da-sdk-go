@@ -1,7 +1,7 @@
-// hub-mock is a tiny standalone server that mounts ONLY the three /api
-// middlewares (MaxBodySize, AuthMiddleware, RateLimit) plus dummy handlers,
-// so you can exercise the auth/rate/size rejection paths with curl without
-// running a real hub (no chain, no LogFS, no SQLite).
+// hub-mock is a tiny standalone server that mounts ONLY the /api middlewares
+// (MaxBodySize, AuthMiddleware) plus dummy handlers, so you can exercise the
+// auth/size rejection paths with curl without running a real hub (no chain,
+// no LogFS, no SQLite).
 //
 // Usage:
 //
@@ -30,7 +30,6 @@ func main() {
 	g := r.Group("/api")
 	g.Use(hub.MaxBodySize())
 	g.Use(hub.AuthMiddleware())
-	g.Use(hub.RateLimit())
 
 	// bypassed
 	g.GET("/info", func(c *gin.Context) {

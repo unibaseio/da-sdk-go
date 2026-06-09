@@ -154,13 +154,18 @@ func (s *Server) registRoute() {
 
 	s.Router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
-	// Public, read-only /api group: body-size cap + per-IP rate limit, but NO
-	// Authorization required — these endpoints are browsable like a block
-	// explorer. Stored content is client-encrypted, so listing/downloading
-	// exposes only ciphertext plus metadata.
+	// Public, read-only /api group: body-size cap, but NO Authorization
+	// required — these endpoints are browsable like a block explorer. Stored
+	// content is client-encrypted, so listing/downloading exposes only
+	// ciphertext plus metadata.
+	//
+	// No application-level rate limiting: the hub sits behind a reverse proxy
+	// (explorer api_hub), so every request arrives from the proxy's single IP
+	// and a per-IP limiter collapses into a global one that 429s legitimate
+	// traffic. Rate limiting, if needed, belongs at the proxy where the real
+	// client IP is visible.
 	pub := s.Router.Group("/api")
 	pub.Use(MaxBodySize())
-	pub.Use(RateLimit())
 
 	s.addInfo(pub)
 	s.addDownload(pub)
@@ -168,13 +173,12 @@ func (s *Server) registRoute() {
 	s.addConversation(pub)
 	s.addStat(pub)
 
-	// Mutating /api group: body-size cap → auth → rate limit. AuthMiddleware
-	// requires a valid signed Authorization header, and each handler further
-	// enforces owner == signer (RequireOwnerMatch).
+	// Mutating /api group: body-size cap → auth. AuthMiddleware requires a
+	// valid signed Authorization header, and each handler further enforces
+	// owner == signer (RequireOwnerMatch).
 	authed := s.Router.Group("/api")
 	authed.Use(MaxBodySize())
 	authed.Use(AuthMiddleware())
-	authed.Use(RateLimit())
 
 	s.addUpload(authed)
 }

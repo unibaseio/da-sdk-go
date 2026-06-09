@@ -68,7 +68,6 @@ func newTestRouter() *gin.Engine {
 	g := r.Group("/api")
 	g.Use(MaxBodySize())
 	g.Use(AuthMiddleware())
-	g.Use(RateLimit())
 
 	// fake info endpoint (bypassed)
 	g.GET("/info", func(c *gin.Context) {
@@ -215,12 +214,11 @@ func TestResolveOwnerForList_DefaultsToSigner(t *testing.T) {
 }
 
 // newPublicTestRouter mirrors the public, read-only /api group in server.go:
-// body-size cap + rate limit, but NO AuthMiddleware.
+// body-size cap only, NO AuthMiddleware (and no rate limiting).
 func newPublicTestRouter() *gin.Engine {
 	r := gin.New()
 	g := r.Group("/api")
 	g.Use(MaxBodySize())
-	g.Use(RateLimit())
 
 	// fake list endpoint that exercises ResolveOwnerForList on the public path
 	g.GET("/listBucket", func(c *gin.Context) {
@@ -307,30 +305,5 @@ func TestMaxBodySize_RejectsHugePayload(t *testing.T) {
 	// the important thing is it doesn't succeed as 200.
 	if w.Code == http.StatusOK {
 		t.Fatalf("expected non-200 (body too large), got 200 body=%s", w.Body.String())
-	}
-}
-
-func TestRateLimit_PerOwnerKicks(t *testing.T) {
-	t.Setenv("HUB_RATE_OWNER_RPS", "1")
-	t.Setenv("HUB_RATE_OWNER_BURST", "2")
-	t.Setenv("HUB_RATE_IP_RPS", "1000") // make IP limiter effectively no-op
-	t.Setenv("HUB_RATE_IP_BURST", "1000")
-	r := newTestRouter()
-	hdr := buildHeader(t, testSK, "upload", time.Now().Unix())
-
-	hits := 0
-	for i := 0; i < 6; i++ {
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/upload",
-			strings.NewReader(`{"owner":"`+testAddr+`","id":"x","message":"y"}`))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", hdr)
-		r.ServeHTTP(w, req)
-		if w.Code == http.StatusTooManyRequests {
-			hits++
-		}
-	}
-	if hits == 0 {
-		t.Fatalf("expected at least one 429 in 6 rapid requests")
 	}
 }

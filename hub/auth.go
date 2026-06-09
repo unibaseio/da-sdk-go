@@ -6,12 +6,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
-	"golang.org/x/time/rate"
 
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/sdk"
@@ -30,37 +28,11 @@ const (
 	// body size caps
 	defaultMaxJSONBytes      int64 = 4 << 20  // 4 MB for /upload (JSON message)
 	defaultMaxMultipartBytes int64 = 64 << 20 // 64 MB for /uploadData (file)
-
-	// rate limit defaults
-	defaultIPReqPerSec    = 10.0
-	defaultIPBurst        = 30
-	defaultOwnerReqPerSec = 5.0
-	defaultOwnerBurst     = 15
 )
 
 func envInt64(key string, fallback int64) int64 {
 	if v := os.Getenv(key); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
-		if err == nil {
-			return n
-		}
-	}
-	return fallback
-}
-
-func envFloat(key string, fallback float64) float64 {
-	if v := os.Getenv(key); v != "" {
-		f, err := strconv.ParseFloat(v, 64)
-		if err == nil {
-			return f
-		}
-	}
-	return fallback
-}
-
-func envInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		n, err := strconv.Atoi(v)
 		if err == nil {
 			return n
 		}
@@ -248,70 +220,4 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 	}
 
 	return strings.ToLower(owner), true
-}
-
-// ----------------------------------------------------------------------------
-// Rate limiting (two-tier: per-IP and per-owner)
-// ----------------------------------------------------------------------------
-
-type limiterRegistry struct {
-	mu       sync.Mutex
-	limiters map[string]*rate.Limiter
-	r        rate.Limit
-	burst    int
-}
-
-func newLimiterRegistry(rps float64, burst int) *limiterRegistry {
-	return &limiterRegistry{
-		limiters: make(map[string]*rate.Limiter),
-		r:        rate.Limit(rps),
-		burst:    burst,
-	}
-}
-
-func (lr *limiterRegistry) get(key string) *rate.Limiter {
-	lr.mu.Lock()
-	defer lr.mu.Unlock()
-	if l, ok := lr.limiters[key]; ok {
-		return l
-	}
-	l := rate.NewLimiter(lr.r, lr.burst)
-	lr.limiters[key] = l
-	return l
-}
-
-// RateLimit produces a middleware that enforces:
-//   - per-IP rate (DOS protection, applies before auth-recovered identity)
-//   - per-owner rate (applied when AuthMiddleware has set ctxAuthAddrKey)
-//
-// Returns 429 on either tier exceedance.
-func RateLimit() gin.HandlerFunc {
-	ipRPS := envFloat("HUB_RATE_IP_RPS", defaultIPReqPerSec)
-	ipBurst := envInt("HUB_RATE_IP_BURST", defaultIPBurst)
-	ownerRPS := envFloat("HUB_RATE_OWNER_RPS", defaultOwnerReqPerSec)
-	ownerBurst := envInt("HUB_RATE_OWNER_BURST", defaultOwnerBurst)
-
-	ipReg := newLimiterRegistry(ipRPS, ipBurst)
-	ownerReg := newLimiterRegistry(ownerRPS, ownerBurst)
-
-	return func(c *gin.Context) {
-		// per-IP first
-		ip := c.ClientIP()
-		if ip != "" && !ipReg.get(ip).Allow() {
-			logger.Warnf("rate limit hit (ip) from %s %s", ip, c.Request.URL.Path)
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, lerror.ToAPIError("hub", fmt.Errorf("rate limit exceeded (ip)")))
-			return
-		}
-
-		// per-owner if available (set by AuthMiddleware in the chain before us)
-		if addr := CtxAuthAddr(c); addr != "" {
-			if !ownerReg.get(addr).Allow() {
-				logger.Warnf("rate limit hit (owner) from %s %s", addr, c.Request.URL.Path)
-				c.AbortWithStatusJSON(http.StatusTooManyRequests, lerror.ToAPIError("hub", fmt.Errorf("rate limit exceeded (owner)")))
-				return
-			}
-		}
-
-		c.Next()
-	}
 }
