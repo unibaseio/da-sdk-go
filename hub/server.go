@@ -154,19 +154,29 @@ func (s *Server) registRoute() {
 
 	s.Router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
-	// /api group: body-size cap → auth → per-owner+per-ip rate limit.
-	// AuthMiddleware skips /api/info (see authBypassPaths) so /info stays open.
-	r := s.Router.Group("/api")
-	r.Use(MaxBodySize())
-	r.Use(AuthMiddleware())
-	r.Use(RateLimit())
+	// Public, read-only /api group: body-size cap + per-IP rate limit, but NO
+	// Authorization required — these endpoints are browsable like a block
+	// explorer. Stored content is client-encrypted, so listing/downloading
+	// exposes only ciphertext plus metadata.
+	pub := s.Router.Group("/api")
+	pub.Use(MaxBodySize())
+	pub.Use(RateLimit())
 
-	s.addInfo(r)
-	s.addDownload(r)
-	s.addUpload(r)
-	s.addList(r)
-	s.addConversation(r)
-	s.addStat(r)
+	s.addInfo(pub)
+	s.addDownload(pub)
+	s.addList(pub)
+	s.addConversation(pub)
+	s.addStat(pub)
+
+	// Mutating /api group: body-size cap → auth → rate limit. AuthMiddleware
+	// requires a valid signed Authorization header, and each handler further
+	// enforces owner == signer (RequireOwnerMatch).
+	authed := s.Router.Group("/api")
+	authed.Use(MaxBodySize())
+	authed.Use(AuthMiddleware())
+	authed.Use(RateLimit())
+
+	s.addUpload(authed)
 }
 
 // ListenAndServe starts the HTTP server
