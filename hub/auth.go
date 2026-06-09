@@ -131,6 +131,31 @@ func abortWithBadRequest(c *gin.Context, err error) {
 // Owner ownership check (signer must own the namespace they're touching)
 // ----------------------------------------------------------------------------
 
+// CanonOwner normalizes an owner to the canonical lowercase storage form.
+// Ethereum addresses are case-insensitive — EIP-55 mixed case is only a UI
+// checksum — so keying storage on lowercase stops one wallet from splitting
+// into separate mixed-case vs lowercase namespaces. Non-address owners
+// (legacy string ids) are lowercased too, which is harmless for matching.
+func CanonOwner(owner string) string {
+	return strings.ToLower(owner)
+}
+
+// ownerCandidates returns the owner forms to try when reading, newest-scheme
+// first: the canonical lowercase form (how we store going forward), then the
+// EIP-55 checksum form (how legacy data was stored). Deduped.
+func ownerCandidates(owner string) []string {
+	lc := strings.ToLower(owner)
+	out := []string{lc}
+	if common.IsHexAddress(owner) {
+		if cs := common.HexToAddress(owner).Hex(); cs != lc {
+			out = append(out, cs)
+		}
+	} else if owner != lc {
+		out = append(out, owner)
+	}
+	return out
+}
+
 // CtxAuthAddr returns the lowercased 0x... address stored by AuthMiddleware,
 // or "" if auth wasn't applied (e.g. on bypass routes).
 func CtxAuthAddr(c *gin.Context) string {
@@ -187,6 +212,13 @@ func RequireOwnerMatch(c *gin.Context, owner string) bool {
 // ciphertext plus public metadata (bucket / needle names) — the same data
 // a block explorer shows.
 //
+// The owner is returned in canonical lowercase form (CanonOwner). Ethereum
+// addresses are case-insensitive, so callers must match it case-insensitively
+// (the gorm queries use LOWER(owner)=?, and logFSRead also tries the EIP-55
+// checksum form for legacy data). This keeps a single wallet from splitting
+// into mixed-case vs lowercase namespaces regardless of what case the client
+// sent.
+//
 // Returns (resolvedOwner, ok). When ok is false, the response has already
 // been written and the handler must return. An empty resolvedOwner with
 // ok==true means "list all" — the gorm queries omit a zero-value owner from
@@ -202,7 +234,7 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 			abortWithBadRequest(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
 			return "", false
 		}
-		return strings.ToLower(owner), true
+		return CanonOwner(owner), true
 	}
 
 	if owner == "" {
@@ -219,5 +251,5 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 		return "", false
 	}
 
-	return strings.ToLower(owner), true
+	return CanonOwner(owner), true
 }
