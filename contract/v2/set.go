@@ -136,7 +136,7 @@ func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
 	val.Mul(val, pc.Price)
 	val.Add(val, big.NewInt(int64(com.DefaultStreamPrice)))
 	val.Mul(val, big.NewInt(int64(pc.Policy.N)))
-	fmt.Println("submitpiece val: ", utils.FormatEth(val))
+	com.Logger.Debug("submitpiece val: ", utils.FormatEth(val))
 
 	au, err := c.MakeAuth()
 	if err != nil {
@@ -149,7 +149,7 @@ func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
 	}
 
 	gtoken := c.BalanceOf(au.From)
-	fmt.Println("submitpiece0: ", gtoken)
+	com.Logger.Debug("submitpiece0: ", gtoken)
 	tx, err := ti.IncreaseAllowance(au, c.PieceAddr, val)
 	if err != nil {
 		return "", err
@@ -170,7 +170,7 @@ func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
 	}
 
 	com.Logger.Debug("add piece: ", pc)
-	fmt.Println("submitpiece1: ", c.BalanceOf(au.From))
+	com.Logger.Debug("submitpiece1: ", c.BalanceOf(au.From))
 	tx, err = fi.AddPiece(au, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
 	if err != nil {
 		return "", err
@@ -179,8 +179,8 @@ func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fmt.Println("submitpiece2: ", c.BalanceOf(au.From))
-	fmt.Println("submitpiece cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(au.From))))
+	com.Logger.Debug("submitpiece2: ", c.BalanceOf(au.From))
+	com.Logger.Debug("submitpiece cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(au.From))))
 
 	return tx.Hash().String(), nil
 }
@@ -227,7 +227,7 @@ func (c *ContractManage) AddReplica(rc types.ReplicaCore, pf []byte) error {
 
 	gtoken := c.BalanceOf(au.From)
 	com.Logger.Debug("add replica: ", _pi, rc)
-	fmt.Println("submitreplica0: ", c.BalanceOf(au.From))
+	com.Logger.Debug("submitreplica0: ", c.BalanceOf(au.From))
 	tx, err := fi.AddReplica(au, rb, _pi, rc.Index, pf)
 	if err != nil {
 		return err
@@ -236,8 +236,8 @@ func (c *ContractManage) AddReplica(rc types.ReplicaCore, pf []byte) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("submitreplica1: ", c.BalanceOf(au.From))
-	fmt.Println("submitreplica cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(au.From))))
+	com.Logger.Debug("submitreplica1: ", c.BalanceOf(au.From))
+	com.Logger.Debug("submitreplica cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(au.From))))
 
 	return nil
 }
@@ -440,7 +440,7 @@ func (c *ContractManage) SubmitProof(_ep uint64, _pf bls.EpochProof) error {
 
 	gtoken := c.BalanceOf(au.From)
 	com.Logger.Debug("submit epoch proof: ", au.From, _ep)
-	fmt.Println("submitproof0: ", c.BalanceOf(au.From))
+	com.Logger.Debug("submitproof0: ", c.BalanceOf(au.From))
 	tx, err := pi.Submit(au, _ep, _sum, _pfb)
 	if err != nil {
 		return err
@@ -450,8 +450,8 @@ func (c *ContractManage) SubmitProof(_ep uint64, _pf bls.EpochProof) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("submitproof1: ", c.BalanceOf(au.From))
-	fmt.Println("submitproof cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(au.From))))
+	com.Logger.Debug("submitproof1: ", c.BalanceOf(au.From))
+	com.Logger.Debug("submitproof cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(au.From))))
 	return nil
 }
 

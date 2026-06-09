@@ -94,7 +94,8 @@ func (k *pieceStore) GetReplica(ctx context.Context, name string, w io.Writer, o
 	}
 
 	if w != nil {
-		dskey := types.NewKey(types.DsReplica, name)
+		// blob lives under DsFile (matches PutReplica/DeleteData + the piece-blob convention)
+		dskey := types.NewKey(types.DsFile, name)
 		data, err := k.fs.Get(dskey)
 		if err != nil {
 			return *res, err

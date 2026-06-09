@@ -106,11 +106,6 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 		cm.KZGAddr = com.BNBTestnetKZGAddr
 		cm.AddAddr = com.BNBTestnetAddAddr
 		cm.MulAddr = com.BNBTestnetMulAddr
-
-		chainRPC := os.Getenv("CHAIN_RPC_97")
-		if chainRPC != "" {
-			cm.RPC = chainRPC
-		}
 	case com.BNBTestnetDAO:
 		cm.RPC = com.BNBTestnetDAOChainRPC
 		cm.RPCForFilterLog = com.BNBTestnetDAOChainRPCForFilterLog
@@ -155,9 +150,20 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 		return nil, fmt.Errorf("unsupportted chain type: %s, use 'bnb-testnet-dao', 'op-sepolia' or 'opbnb-testnet'", chainType)
 	}
 
-	chainRPC := os.Getenv("CHAIN_RPC")
-	if chainRPC != "" {
-		cm.RPC = chainRPC
+	// RPC endpoint env overrides. Per-chain-id keys (CHAIN_RPC_<id> /
+	// CHAIN_RPC_FILTER_<id>) avoid collisions when several chains run in one
+	// process (e.g. the gateway); the generic CHAIN_RPC / CHAIN_RPC_FILTER are
+	// kept as a fallback for single-chain deployments.
+	idStr := cm.ChainID.String()
+	if v := os.Getenv("CHAIN_RPC_" + idStr); v != "" {
+		cm.RPC = v
+	} else if v := os.Getenv("CHAIN_RPC"); v != "" {
+		cm.RPC = v
+	}
+	if v := os.Getenv("CHAIN_RPC_FILTER_" + idStr); v != "" {
+		cm.RPCForFilterLog = v
+	} else if v := os.Getenv("CHAIN_RPC_FILTER"); v != "" {
+		cm.RPCForFilterLog = v
 	}
 
 	// check chain RPC is connected
