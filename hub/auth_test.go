@@ -325,3 +325,26 @@ func TestMaxBodySize_RejectsHugePayload(t *testing.T) {
 		t.Fatalf("expected non-200 (body too large), got 200 body=%s", w.Body.String())
 	}
 }
+
+func TestRateLimit_PerIPKicks(t *testing.T) {
+	t.Setenv("HUB_RATE_IP_RPS", "1")
+	t.Setenv("HUB_RATE_IP_BURST", "3")
+	r := gin.New()
+	g := r.Group("/api")
+	g.Use(RateLimit())
+	g.GET("/listBucket", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+
+	hits429 := 0
+	for i := 0; i < 10; i++ {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/listBucket", nil)
+		req.RemoteAddr = "203.0.113.7:1234" // same IP each time → shared bucket
+		r.ServeHTTP(w, req)
+		if w.Code == http.StatusTooManyRequests {
+			hits429++
+		}
+	}
+	if hits429 == 0 {
+		t.Fatalf("expected at least one 429 from a single IP doing 10 rapid requests (burst=3)")
+	}
+}
