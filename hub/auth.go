@@ -6,10 +6,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/sdk"
@@ -28,11 +30,40 @@ const (
 	// body size caps
 	defaultMaxJSONBytes      int64 = 4 << 20  // 4 MB for /upload (JSON message)
 	defaultMaxMultipartBytes int64 = 64 << 20 // 64 MB for /uploadData (file)
+
+	// rate limit defaults. Per-IP is generous on purpose: legitimate explorer
+	// traffic all arrives from the explorer's reverse-proxy IP (one IP, many
+	// users), so the cap must clear their aggregate while still throttling a
+	// single abusive host hammering hundreds of req/s from its own IP.
+	defaultIPReqPerSec    = 50.0
+	defaultIPBurst        = 100
+	defaultOwnerReqPerSec = 20.0
+	defaultOwnerBurst     = 40
 )
 
 func envInt64(key string, fallback int64) int64 {
 	if v := os.Getenv(key); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err == nil {
+			return f
+		}
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		n, err := strconv.Atoi(v)
 		if err == nil {
 			return n
 		}
@@ -252,4 +283,80 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 	}
 
 	return CanonOwner(owner), true
+}
+
+// ----------------------------------------------------------------------------
+// Rate limiting (per-IP + per-owner)
+// ----------------------------------------------------------------------------
+//
+// Reinstated as a per-IP guard. It works correctly when abusive hosts connect
+// from their own IP (the case we observed: a bot hammering /api/download from
+// a dedicated IP). Legitimate explorer traffic arrives from the explorer's
+// reverse-proxy IP — one IP shared by many users — so the per-IP cap is set
+// generously (see defaults above) to clear that aggregate while still cutting
+// off a single host doing hundreds of req/s.
+//
+// NOTE: behind a proxy, c.ClientIP() reflects the proxy IP unless gin is told
+// to trust it (SetTrustedProxies) and the proxy forwards X-Forwarded-For. We
+// deliberately do NOT trust-all + read XFF here, because that lets any client
+// spoof its IP and dodge the limit. So this throttles per *connecting* IP,
+// which is exactly right for direct abusers and safe (just coarse) for proxied
+// traffic. The download negative cache is the primary flood absorber; this is
+// defense-in-depth.
+
+type limiterRegistry struct {
+	mu       sync.Mutex
+	limiters map[string]*rate.Limiter
+	r        rate.Limit
+	burst    int
+}
+
+func newLimiterRegistry(rps float64, burst int) *limiterRegistry {
+	return &limiterRegistry{
+		limiters: make(map[string]*rate.Limiter),
+		r:        rate.Limit(rps),
+		burst:    burst,
+	}
+}
+
+func (lr *limiterRegistry) get(key string) *rate.Limiter {
+	lr.mu.Lock()
+	defer lr.mu.Unlock()
+	if l, ok := lr.limiters[key]; ok {
+		return l
+	}
+	l := rate.NewLimiter(lr.r, lr.burst)
+	lr.limiters[key] = l
+	return l
+}
+
+// RateLimit enforces a per-IP token bucket, plus a per-owner bucket once
+// AuthMiddleware has recovered a signer. Returns 429 on either tier.
+func RateLimit() gin.HandlerFunc {
+	ipRPS := envFloat("HUB_RATE_IP_RPS", defaultIPReqPerSec)
+	ipBurst := envInt("HUB_RATE_IP_BURST", defaultIPBurst)
+	ownerRPS := envFloat("HUB_RATE_OWNER_RPS", defaultOwnerReqPerSec)
+	ownerBurst := envInt("HUB_RATE_OWNER_BURST", defaultOwnerBurst)
+
+	ipReg := newLimiterRegistry(ipRPS, ipBurst)
+	ownerReg := newLimiterRegistry(ownerRPS, ownerBurst)
+
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		if ip != "" && !ipReg.get(ip).Allow() {
+			logger.Warnf("rate limit hit (ip) from %s %s", ip, c.Request.URL.Path)
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, lerror.ToAPIError("hub", fmt.Errorf("rate limit exceeded")))
+			return
+		}
+
+		if addr := CtxAuthAddr(c); addr != "" {
+			if !ownerReg.get(addr).Allow() {
+				logger.Warnf("rate limit hit (owner) from %s %s", addr, c.Request.URL.Path)
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, lerror.ToAPIError("hub", fmt.Errorf("rate limit exceeded")))
+				return
+			}
+		}
+
+		c.Next()
+	}
 }
