@@ -69,6 +69,9 @@ type Server struct {
 	bucketDisplayLock sync.RWMutex
 	bucketDisplay     map[string]types.BucketDisplay
 
+	// negative cache of download keys confirmed missing (download-flood guard)
+	missCache *missCache
+
 	httpServer *http.Server
 
 	// Add channels for graceful shutdown
@@ -103,6 +106,8 @@ func NewServer(rp repo.Repo) (*Server, error) {
 
 		bucketDisplay: make(map[string]types.BucketDisplay),
 		lfs:           make(map[string]*logfs.LogFS),
+
+		missCache: newMissCache(),
 
 		shutdownChan:   make(chan struct{}),
 		checkpointStop: make(chan struct{}),
