@@ -20,7 +20,7 @@ import (
 
 func TestTransfer(t *testing.T) {
 	admin := common.HexToAddress("0xE251825869b2262e82AA843feea29B7E308764CC")
-	cm, err := NewContractManage(nil, build.OPBNBTestnet)
+	cm, err := NewContractManage(nil, build.BNBTestnetV2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestFakeReplica(t *testing.T) {
 
 	pkey, paddr := makeAccount()
 
-	cm, err := NewContractManage(pkey, "op-sepolia")
+	cm, err := NewContractManage(pkey, build.BNBTestnetV2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestReward(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cm, err := NewContractManage(sk, "op-sepolia")
+	cm, err := NewContractManage(sk, build.BNBTestnetV2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestReward(t *testing.T) {
 }
 
 func TestTotalReward(t *testing.T) {
-	cm, err := NewContractManage(nil, "op-sepolia")
+	cm, err := NewContractManage(nil, build.BNBTestnetV2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestTotalReward(t *testing.T) {
 
 func TestNodeCheck(t *testing.T) {
 	psk, paddr := makeAccount()
-	cm, err := NewContractManage(psk, "op-sepolia")
+	cm, err := NewContractManage(psk, build.BNBTestnetV2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func testtransfer(to common.Address, val, valt *big.Int) error {
 	if err != nil {
 		return err
 	}
-	cm, err := NewContractManage(sk, "op-sepolia")
+	cm, err := NewContractManage(sk, build.BNBTestnetV2)
 	if err != nil {
 		return err
 	}
@@ -222,7 +222,7 @@ func makeAccount() (*ecdsa.PrivateKey, common.Address) {
 
 func TestBlock(t *testing.T) {
 	sk, _ := makeAccount()
-	cm, err := NewContractManage(sk, "op-sepolia")
+	cm, err := NewContractManage(sk, build.BNBTestnetV2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestBlock(t *testing.T) {
 
 func TestChoose(t *testing.T) {
 	sk, addr := makeAccount()
-	cm, err := NewContractManage(sk, "op-sepolia")
+	cm, err := NewContractManage(sk, build.BNBTestnetV2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestChoose(t *testing.T) {
 
 func TestOrder(t *testing.T) {
 	sk, _ := makeAccount()
-	cm, err := NewContractManage(sk, "op-sepolia")
+	cm, err := NewContractManage(sk, build.BNBTestnetV2)
 	if err != nil {
 		t.Fatal(err)
 	}

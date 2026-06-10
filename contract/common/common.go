@@ -95,55 +95,107 @@ var (
 	LocalAnvilMulAddr   = common.HexToAddress("0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9")
 )
 
-// op-sepolia
+// base-sepolia (first deployment target; DA contract addresses TBD — fill in
+// after deployment, together with the chain's KZGVKRoot)
 var (
-	OPSepolia                     = build.OPSepolia
-	OPSepoliaExplorer             = "https://sepolia-optimism.etherscan.io/"
-	OPSepoliaChainRPC             = "https://optimism-sepolia-rpc.publicnode.com"
-	OPSepoliaChainRPCForFilterLog = "https://optimism-sepolia-rpc.publicnode.com"
-	OPSepoliaChainID              = 11155420
-	OPSepoliaBankAddr             = common.HexToAddress("0xd1B90aFa21e749f99b2d20d57B31aD96108E4CB1")
-	OPSepoliaTokenAddr            = common.HexToAddress("0x96A711D4C093e4BCa8E12653014a9A15530399A1")
-	OPSepoliaSyncHeight           = 21_696_900
+	BaseSepolia                     = build.BaseSepolia
+	BaseSepoliaExplorer             = "https://sepolia.basescan.org/"
+	BaseSepoliaChainRPC             = "https://base-sepolia-rpc.publicnode.com"
+	BaseSepoliaChainRPCForFilterLog = "https://base-sepolia-rpc.publicnode.com"
+	BaseSepoliaChainID              = int64(84532)
+	BaseSepoliaTokenAddr            = common.HexToAddress("") // TODO: test UB/ERC20 on base-sepolia
+	BaseSepoliaSyncHeight           = 0                       // TODO: set to deployment height
 
-	OPSepoliaEpochAddr   = common.HexToAddress("")
-	OPSepoliaNodeAddr    = common.HexToAddress("")
-	OPSepoliaPieceAddr   = common.HexToAddress("")
-	OPSepoliaRSProofAddr = common.HexToAddress("")
-	OPSepoliaEProofAddr  = common.HexToAddress("")
-	OPSepoliaEVerifyAddr = common.HexToAddress("")
-	OPSepoliaStatAddr    = common.HexToAddress("")
+	BaseSepoliaEpochAddr   = common.HexToAddress("")
+	BaseSepoliaNodeAddr    = common.HexToAddress("")
+	BaseSepoliaPieceAddr   = common.HexToAddress("")
+	BaseSepoliaRSProofAddr = common.HexToAddress("")
+	BaseSepoliaEProofAddr  = common.HexToAddress("")
+	BaseSepoliaEVerifyAddr = common.HexToAddress("")
+	BaseSepoliaStatAddr    = common.HexToAddress("")
 
-	OPSepoliaRSOneAddr = common.HexToAddress("")
-	OPSepoliaKZGAddr   = common.HexToAddress("")
-	OPSepoliaAddAddr   = common.HexToAddress("")
-	OPSepoliaMulAddr   = common.HexToAddress("")
+	BaseSepoliaRSOneAddr = common.HexToAddress("")
+	BaseSepoliaKZGAddr   = common.HexToAddress("")
+	BaseSepoliaAddAddr   = common.HexToAddress("")
+	BaseSepoliaMulAddr   = common.HexToAddress("")
 )
 
-// opbnb-testnet
+// base mainnet (deploy order #1; DA contracts + UB OFT bridge addr TBD)
 var (
-	//https://opbnb-testnet-rpc.bnbchain.org
-	OPBNBTestnet                     = build.OPBNBTestnet
-	OPBNBTestnetExplorer             = "https://opbnb-testnet.bscscan.com/"
-	OPBNBTestnetChainRPC             = "https://opbnb-testnet-rpc.publicnode.com"
-	OPBNBTestnetChainRPCForFilterLog = "https://opbnb-testnet-rpc.publicnode.com"
-	OPBNBTestnetChainID              = 5611
-	OPBNBTestnetBankAddr             = common.HexToAddress("0x7560B3a48952A05B989C7e2956e12a7f4b534cF5")
-	OPBNBTestnetTokenAddr            = common.HexToAddress("0x1600D17EBBB5135837FCA958c1804A249716F393")
-	OPBNBTestnetSyncHeight           = 48_317_500
+	BaseMainnet                     = build.BaseMainnet
+	BaseMainnetExplorer             = "https://basescan.org/"
+	BaseMainnetChainRPC             = "https://base-rpc.publicnode.com"
+	BaseMainnetChainRPCForFilterLog = "https://base-rpc.publicnode.com"
+	BaseMainnetChainID              = int64(8453)
+	BaseMainnetTokenAddr            = common.HexToAddress("") // TODO: UB LayerZero OFT on BASE (bridge deployment pending)
+	BaseMainnetSyncHeight           = 0                       // TODO: set to deployment height
 
-	OPBNBTestnetEpochAddr   = common.HexToAddress("")
-	OPBNBTestnetNodeAddr    = common.HexToAddress("")
-	OPBNBTestnetPieceAddr   = common.HexToAddress("")
-	OPBNBTestnetRSProofAddr = common.HexToAddress("")
-	OPBNBTestnetEProofAddr  = common.HexToAddress("")
-	OPBNBTestnetEVerifyAddr = common.HexToAddress("")
-	OPBNBTestnetStatAddr    = common.HexToAddress("")
+	BaseMainnetEpochAddr   = common.HexToAddress("")
+	BaseMainnetNodeAddr    = common.HexToAddress("")
+	BaseMainnetPieceAddr   = common.HexToAddress("")
+	BaseMainnetRSProofAddr = common.HexToAddress("")
+	BaseMainnetEProofAddr  = common.HexToAddress("")
+	BaseMainnetEVerifyAddr = common.HexToAddress("")
+	BaseMainnetStatAddr    = common.HexToAddress("")
 
-	OPBNBTestnetRSOneAddr = common.HexToAddress("")
-	OPBNBTestnetKZGAddr   = common.HexToAddress("")
-	OPBNBTestnetAddAddr   = common.HexToAddress("")
-	OPBNBTestnetMulAddr   = common.HexToAddress("")
+	BaseMainnetRSOneAddr = common.HexToAddress("")
+	BaseMainnetKZGAddr   = common.HexToAddress("")
+	BaseMainnetAddAddr   = common.HexToAddress("")
+	BaseMainnetMulAddr   = common.HexToAddress("")
+)
+
+// bsc mainnet (deploy order #2)
+// ⚠️ TokenAddr: UB LayerZero OFT bridge on BSC. Two conflicting deployment
+// records exist for mainnet UB — verify the canonical address before any
+// mainnet use of this table.
+var (
+	BSCMainnet                     = build.BSCMainnet
+	BSCMainnetExplorer             = "https://bscscan.com/"
+	BSCMainnetChainRPC             = "https://bsc-rpc.publicnode.com"
+	BSCMainnetChainRPCForFilterLog = "https://bsc-rpc.publicnode.com"
+	BSCMainnetChainID              = int64(56)
+	BSCMainnetTokenAddr            = common.HexToAddress("0x40b8129B786D766267A7a118cF8C07E31CDB6Fde")
+	BSCMainnetSyncHeight           = 0 // TODO: set to deployment height
+
+	BSCMainnetEpochAddr   = common.HexToAddress("")
+	BSCMainnetNodeAddr    = common.HexToAddress("")
+	BSCMainnetPieceAddr   = common.HexToAddress("")
+	BSCMainnetRSProofAddr = common.HexToAddress("")
+	BSCMainnetEProofAddr  = common.HexToAddress("")
+	BSCMainnetEVerifyAddr = common.HexToAddress("")
+	BSCMainnetStatAddr    = common.HexToAddress("")
+
+	BSCMainnetRSOneAddr = common.HexToAddress("")
+	BSCMainnetKZGAddr   = common.HexToAddress("")
+	BSCMainnetAddAddr   = common.HexToAddress("")
+	BSCMainnetMulAddr   = common.HexToAddress("")
+)
+
+// eth mainnet (deploy order #3)
+// ⚠️ TokenAddr: UB canonical ledger on ETH. Two conflicting deployment
+// records exist for mainnet UB — verify the canonical address before any
+// mainnet use of this table.
+var (
+	ETHMainnet                     = build.ETHMainnet
+	ETHMainnetExplorer             = "https://etherscan.io/"
+	ETHMainnetChainRPC             = "https://ethereum-rpc.publicnode.com"
+	ETHMainnetChainRPCForFilterLog = "https://ethereum-rpc.publicnode.com"
+	ETHMainnetChainID              = int64(1)
+	ETHMainnetTokenAddr            = common.HexToAddress("0x6944E1DF6Bf5972305f9Ab25dF47ef10De01bcc8")
+	ETHMainnetSyncHeight           = 0 // TODO: set to deployment height
+
+	ETHMainnetEpochAddr   = common.HexToAddress("")
+	ETHMainnetNodeAddr    = common.HexToAddress("")
+	ETHMainnetPieceAddr   = common.HexToAddress("")
+	ETHMainnetRSProofAddr = common.HexToAddress("")
+	ETHMainnetEProofAddr  = common.HexToAddress("")
+	ETHMainnetEVerifyAddr = common.HexToAddress("")
+	ETHMainnetStatAddr    = common.HexToAddress("")
+
+	ETHMainnetRSOneAddr = common.HexToAddress("")
+	ETHMainnetKZGAddr   = common.HexToAddress("")
+	ETHMainnetAddAddr   = common.HexToAddress("")
+	ETHMainnetMulAddr   = common.HexToAddress("")
 )
 
 // bnb-testnet-v2

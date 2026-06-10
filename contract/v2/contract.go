@@ -46,46 +46,86 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 	}
 
 	switch chainType {
-	case com.OPSepolia:
-		cm.RPC = com.OPSepoliaChainRPC
-		cm.RPCForFilterLog = com.OPSepoliaChainRPCForFilterLog
-		cm.ChainID = big.NewInt(int64(com.OPSepoliaChainID))
-		cm.SyncHeight = com.OPSepoliaSyncHeight
+	case com.BaseSepolia:
+		cm.RPC = com.BaseSepoliaChainRPC
+		cm.RPCForFilterLog = com.BaseSepoliaChainRPCForFilterLog
+		cm.ChainID = big.NewInt(com.BaseSepoliaChainID)
+		cm.SyncHeight = com.BaseSepoliaSyncHeight
 
-		cm.TokenAddr = com.OPSepoliaTokenAddr
+		cm.TokenAddr = com.BaseSepoliaTokenAddr
 
-		cm.EpochAddr = com.OPSepoliaEpochAddr
-		cm.NodeAddr = com.OPSepoliaNodeAddr
-		cm.PieceAddr = com.OPSepoliaPieceAddr
-		cm.RSProofAddr = com.OPSepoliaRSProofAddr
-		cm.EProofAddr = com.OPSepoliaEProofAddr
-		cm.EVerifyAddr = com.OPSepoliaEVerifyAddr
-		cm.StatAddr = com.OPSepoliaStatAddr
+		cm.EpochAddr = com.BaseSepoliaEpochAddr
+		cm.NodeAddr = com.BaseSepoliaNodeAddr
+		cm.PieceAddr = com.BaseSepoliaPieceAddr
+		cm.RSProofAddr = com.BaseSepoliaRSProofAddr
+		cm.EProofAddr = com.BaseSepoliaEProofAddr
+		cm.EVerifyAddr = com.BaseSepoliaEVerifyAddr
+		cm.StatAddr = com.BaseSepoliaStatAddr
 
-		cm.RSOneAddr = com.OPSepoliaRSOneAddr
-		cm.KZGAddr = com.OPSepoliaKZGAddr
-		cm.AddAddr = com.OPSepoliaAddAddr
-		cm.MulAddr = com.OPSepoliaMulAddr
-	case com.OPBNBTestnet:
-		cm.RPC = com.OPBNBTestnetChainRPC
-		cm.RPCForFilterLog = com.OPBNBTestnetChainRPCForFilterLog
-		cm.ChainID = big.NewInt(int64(com.OPBNBTestnetChainID))
-		cm.SyncHeight = com.OPBNBTestnetSyncHeight
+		cm.RSOneAddr = com.BaseSepoliaRSOneAddr
+		cm.KZGAddr = com.BaseSepoliaKZGAddr
+		cm.AddAddr = com.BaseSepoliaAddAddr
+		cm.MulAddr = com.BaseSepoliaMulAddr
+	case com.BaseMainnet:
+		cm.RPC = com.BaseMainnetChainRPC
+		cm.RPCForFilterLog = com.BaseMainnetChainRPCForFilterLog
+		cm.ChainID = big.NewInt(com.BaseMainnetChainID)
+		cm.SyncHeight = com.BaseMainnetSyncHeight
 
-		cm.TokenAddr = com.OPBNBTestnetTokenAddr
+		cm.TokenAddr = com.BaseMainnetTokenAddr
 
-		cm.EpochAddr = com.OPBNBTestnetEpochAddr
-		cm.NodeAddr = com.OPBNBTestnetNodeAddr
-		cm.PieceAddr = com.OPBNBTestnetPieceAddr
-		cm.RSProofAddr = com.OPBNBTestnetRSProofAddr
-		cm.EProofAddr = com.OPBNBTestnetEProofAddr
-		cm.EVerifyAddr = com.OPBNBTestnetEVerifyAddr
-		cm.StatAddr = com.OPBNBTestnetStatAddr
+		cm.EpochAddr = com.BaseMainnetEpochAddr
+		cm.NodeAddr = com.BaseMainnetNodeAddr
+		cm.PieceAddr = com.BaseMainnetPieceAddr
+		cm.RSProofAddr = com.BaseMainnetRSProofAddr
+		cm.EProofAddr = com.BaseMainnetEProofAddr
+		cm.EVerifyAddr = com.BaseMainnetEVerifyAddr
+		cm.StatAddr = com.BaseMainnetStatAddr
 
-		cm.RSOneAddr = com.OPBNBTestnetRSOneAddr
-		cm.KZGAddr = com.OPBNBTestnetKZGAddr
-		cm.AddAddr = com.OPBNBTestnetAddAddr
-		cm.MulAddr = com.OPBNBTestnetMulAddr
+		cm.RSOneAddr = com.BaseMainnetRSOneAddr
+		cm.KZGAddr = com.BaseMainnetKZGAddr
+		cm.AddAddr = com.BaseMainnetAddAddr
+		cm.MulAddr = com.BaseMainnetMulAddr
+	case com.BSCMainnet:
+		cm.RPC = com.BSCMainnetChainRPC
+		cm.RPCForFilterLog = com.BSCMainnetChainRPCForFilterLog
+		cm.ChainID = big.NewInt(com.BSCMainnetChainID)
+		cm.SyncHeight = com.BSCMainnetSyncHeight
+
+		cm.TokenAddr = com.BSCMainnetTokenAddr
+
+		cm.EpochAddr = com.BSCMainnetEpochAddr
+		cm.NodeAddr = com.BSCMainnetNodeAddr
+		cm.PieceAddr = com.BSCMainnetPieceAddr
+		cm.RSProofAddr = com.BSCMainnetRSProofAddr
+		cm.EProofAddr = com.BSCMainnetEProofAddr
+		cm.EVerifyAddr = com.BSCMainnetEVerifyAddr
+		cm.StatAddr = com.BSCMainnetStatAddr
+
+		cm.RSOneAddr = com.BSCMainnetRSOneAddr
+		cm.KZGAddr = com.BSCMainnetKZGAddr
+		cm.AddAddr = com.BSCMainnetAddAddr
+		cm.MulAddr = com.BSCMainnetMulAddr
+	case com.ETHMainnet:
+		cm.RPC = com.ETHMainnetChainRPC
+		cm.RPCForFilterLog = com.ETHMainnetChainRPCForFilterLog
+		cm.ChainID = big.NewInt(com.ETHMainnetChainID)
+		cm.SyncHeight = com.ETHMainnetSyncHeight
+
+		cm.TokenAddr = com.ETHMainnetTokenAddr
+
+		cm.EpochAddr = com.ETHMainnetEpochAddr
+		cm.NodeAddr = com.ETHMainnetNodeAddr
+		cm.PieceAddr = com.ETHMainnetPieceAddr
+		cm.RSProofAddr = com.ETHMainnetRSProofAddr
+		cm.EProofAddr = com.ETHMainnetEProofAddr
+		cm.EVerifyAddr = com.ETHMainnetEVerifyAddr
+		cm.StatAddr = com.ETHMainnetStatAddr
+
+		cm.RSOneAddr = com.ETHMainnetRSOneAddr
+		cm.KZGAddr = com.ETHMainnetKZGAddr
+		cm.AddAddr = com.ETHMainnetAddAddr
+		cm.MulAddr = com.ETHMainnetMulAddr
 	case com.BNBTestnetV2:
 		cm.RPC = com.BNBTestnetChainRPC
 		cm.RPCForFilterLog = com.BNBTestnetChainRPCForFilterLog
@@ -147,7 +187,7 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 		cm.AddAddr = com.LocalAnvilAddAddr
 		cm.MulAddr = com.LocalAnvilMulAddr
 	default:
-		return nil, fmt.Errorf("unsupportted chain type: %s, use 'bnb-testnet-dao', 'op-sepolia' or 'opbnb-testnet'", chainType)
+		return nil, fmt.Errorf("unsupported chain type: %s, use 'base', 'base-sepolia', 'bsc-mainnet', 'eth-mainnet', 'bnb-testnet-v2', 'bnb-testnet-dao' or 'local-anvil'", chainType)
 	}
 
 	// RPC endpoint env overrides. Per-chain-id keys (CHAIN_RPC_<id> /

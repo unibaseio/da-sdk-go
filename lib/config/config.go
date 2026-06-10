@@ -45,7 +45,7 @@ type ChainConfig struct {
 
 func newDefaultChainConfig() ChainConfig {
 	return ChainConfig{
-		Type: build.OPSepolia,
+		Type: build.BaseSepolia,
 	}
 }
 

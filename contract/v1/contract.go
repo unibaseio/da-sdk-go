@@ -32,18 +32,6 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 	}
 
 	switch chainType {
-	case com.OPSepolia:
-		cm.RPC = com.OPSepoliaChainRPC
-		cm.ChainID = big.NewInt(int64(com.OPSepoliaChainID))
-		cm.BankAddr = com.OPSepoliaBankAddr
-		cm.TokenAddr = com.OPSepoliaTokenAddr
-		cm.SyncHeight = com.OPSepoliaSyncHeight
-	case com.OPBNBTestnet:
-		cm.RPC = com.OPBNBTestnetChainRPC
-		cm.ChainID = big.NewInt(int64(com.OPBNBTestnetChainID))
-		cm.BankAddr = com.OPBNBTestnetBankAddr
-		cm.TokenAddr = com.OPBNBTestnetTokenAddr
-		cm.SyncHeight = com.OPBNBTestnetSyncHeight
 	case com.BNBTestnetV2:
 		cm.RPC = com.BNBTestnetChainRPC
 		cm.ChainID = big.NewInt(int64(com.BNBTestnetChainID))
@@ -55,7 +43,7 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 			cm.RPC = chainRPC
 		}
 	default:
-		return nil, fmt.Errorf("unsupportted chain type: %s, use 'bnb-testnet', 'op-sepolia' or 'opbnb-testnet'", chainType)
+		return nil, fmt.Errorf("unsupported chain type: %s, use 'bnb-testnet-v2'", chainType)
 	}
 
 	chainRPC := os.Getenv("CHAIN_RPC")
