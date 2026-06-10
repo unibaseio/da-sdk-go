@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"sync"
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
 
@@ -37,6 +38,28 @@ type ContractManage struct {
 	KZGAddr   common.Address
 	AddAddr   common.Address
 	MulAddr   common.Address
+
+	// shared RPC client for c.RPC, created lazily and reused by all contract
+	// bindings/calls (P2: one client instead of a dial per call)
+	clientMu sync.Mutex
+	client   *ethclient.Client
+}
+
+// Client returns the shared ethclient for c.RPC, dialing it on first use.
+// The endpoints are HTTP, so the client needs no liveness management —
+// each request rides Go's pooled HTTP transport.
+func (c *ContractManage) Client(ctx context.Context) (*ethclient.Client, error) {
+	c.clientMu.Lock()
+	defer c.clientMu.Unlock()
+	if c.client != nil {
+		return c.client, nil
+	}
+	client, err := ethclient.DialContext(ctx, c.RPC)
+	if err != nil {
+		return nil, err
+	}
+	c.client = client
+	return client, nil
 }
 
 func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage, error) {
@@ -207,12 +230,11 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 	}
 
 	// check chain RPC is connected
-	// check chain id
-	client, err := ethclient.Dial(cm.RPC)
+	// check chain id; the validated client is kept as the shared client
+	client, err := cm.Client(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	defer client.Close()
 
 	chainID, err := client.ChainID(context.Background())
 	if err != nil {

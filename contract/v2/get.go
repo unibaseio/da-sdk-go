@@ -18,7 +18,6 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 func (c *ContractManage) getOrder(count, pcnt uint64) (uint8, error) {
@@ -86,13 +85,12 @@ func Choose(addr common.Address, seed [32]byte, count, pcnt uint64, index uint64
 }
 
 func (c *ContractManage) GetBlockNumber() (uint64, error) {
-	client, err := ethclient.Dial(c.RPC)
+	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	defer cancle()
+	client, err := c.Client(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer client.Close()
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
-	defer cancle()
 	return client.BlockNumber(ctx)
 }
 
