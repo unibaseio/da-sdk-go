@@ -300,6 +300,8 @@ func MakeAuthBySk(ep string, chainID *big.Int, sk *ecdsa.PrivateKey) (*bind.Tran
 	}
 
 	auth.Value = big.NewInt(0)
+	// TODO(P1): switch proof-heavy txs to EstimateGas + safety margin once the
+	// margin ratio is confirmed; a fixed limit either wastes or underprovisions.
 	auth.GasLimit = uint64(DefaultGasLimit)
 	client, err := ethclient.Dial(ep)
 	if err != nil {
@@ -307,21 +309,45 @@ func MakeAuthBySk(ep string, chainID *big.Int, sk *ecdsa.PrivateKey) (*bind.Tran
 	}
 	defer client.Close()
 
-	header, err := client.HeaderByNumber(context.TODO(), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	header, err := client.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	Logger.Debugf("height: %d, basefee: %d, blob: %d", header.Number, header.BaseFee, header.BlobGasUsed)
 
-	if header.BaseFee.BitLen() == 0 {
-		//auth.GasTipCap = big.NewInt(int64(DefaultGasPrice))
-		//auth.GasFeeCap = big.NewInt(int64(DefaultGasPrice))
+	if header.BaseFee == nil || header.BaseFee.BitLen() == 0 {
+		// pre-1559 chain, or zero base fee (e.g. BSC): keep legacy pricing
 		auth.GasPrice = big.NewInt(int64(DefaultGasPrice))
-		Logger.Debugf("no basefee, set gas price to %d", DefaultGasPrice)
-	} else {
-		auth.GasPrice = header.BaseFee.Mul(header.BaseFee, big.NewInt(6)).Div(header.BaseFee, big.NewInt(5))
-		Logger.Debugf("set gas price to basefee * 1.2 = %d", auth.GasPrice)
+		Logger.Debugf("no basefee, set legacy gas price to %d", DefaultGasPrice)
+		return auth, nil
 	}
+
+	// EIP-1559 chain (ETH/BASE): dynamic-fee tx. The old baseFee*1.2 GasPrice
+	// implied a tiny priority fee when baseFee is low and the tx could sit
+	// unmined; price tip and fee cap separately instead.
+	tip, err := client.SuggestGasTipCap(ctx)
+	if err != nil || tip.Sign() == 0 {
+		tip = big.NewInt(int64(DefaultGasPrice)) // fallback floor (0.1 gwei default)
+		Logger.Debugf("suggest tip unavailable, fallback to %d", tip)
+	}
+	if v := os.Getenv("GAS_TIP"); v != "" {
+		if t, ok := new(big.Int).SetString(v, 10); ok {
+			tip = t
+		} else {
+			Logger.Warn("invalid GAS_TIP: ", v)
+		}
+	}
+	// feeCap = 2*baseFee + tip: survives a doubling of baseFee while pending;
+	// only the actual baseFee+tip is paid, the cap is not.
+	feeCap := new(big.Int).Mul(header.BaseFee, big.NewInt(2))
+	feeCap.Add(feeCap, tip)
+
+	auth.GasTipCap = tip
+	auth.GasFeeCap = feeCap
+	Logger.Debugf("set 1559 fees: tip %d, feeCap %d (basefee %d)", tip, feeCap, header.BaseFee)
 
 	return auth, nil
 }
