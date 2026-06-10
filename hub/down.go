@@ -76,6 +76,13 @@ func (s *Server) download(ctx context.Context, name, owner string, w io.Writer) 
 		return size, nil
 	}
 
+	// Local miss. If this key was very recently confirmed absent, skip the
+	// expensive remote fallback chain below — this absorbs download floods for
+	// keys that don't exist (each full miss otherwise costs remote round-trips).
+	if s.missCache.has(owner, name) {
+		return 0, fmt.Errorf("no such file: %s at %s", name, owner)
+	}
+
 	fr, err := sdk.GetFileReceipt(build.ServerURL, s.auth, name)
 	if err == nil {
 		err = sdk.Download(build.ServerURL, s.auth, name, s.ps, w)
@@ -102,5 +109,7 @@ func (s *Server) download(ctx context.Context, name, owner string, w io.Writer) 
 		return res.Size, nil
 	}
 
+	// Fully missing everywhere — remember so repeat requests stay cheap.
+	s.missCache.add(owner, name)
 	return 0, fmt.Errorf("no such file: %s at %s", name, owner)
 }

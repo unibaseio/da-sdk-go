@@ -165,6 +165,9 @@ func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader)
 		return types.MemeMeta{}, err
 	}
 
+	// Drop any stale "missing" marker so this key is immediately downloadable.
+	s.missCache.del(addr, key)
+
 	lm, err := fs.GetMeta([]byte(key))
 	if err != nil {
 		return types.MemeMeta{}, err
