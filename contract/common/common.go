@@ -66,7 +66,11 @@ var (
 	DefaultSpacePrice = 1e10
 	DefaultSpaceEpoch = 201
 
-	DefaultPenalty = 1e18
+	// DefaultPenalty is the fraud-proof challenge stake / slash amount:
+	// 10000 UB (decimals 18). Must match basePenalty in RSProof.sol/
+	// EProof.sol, and Node minPledge(type 1) must be >= it. The value
+	// exceeds int64, so it is a *big.Int — treat it as read-only.
+	DefaultPenalty = new(big.Int).Mul(big.NewInt(10_000), big.NewInt(1e18))
 
 	Base = common.HexToAddress("0x61Ea24745A3F7Bcbb67eD95B674fEcfbb331ABd0")
 )

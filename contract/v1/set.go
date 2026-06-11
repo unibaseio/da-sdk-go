@@ -309,7 +309,7 @@ func (c *ContractManage) ChallengeRS(_pn, _rn string, _pri uint8) error {
 		return err
 	}
 
-	tx, err := ti.IncreaseAllowance(au, c.BankAddr, big.NewInt(int64(com.DefaultPenalty)))
+	tx, err := ti.IncreaseAllowance(au, c.BankAddr, com.DefaultPenalty)
 	if err != nil {
 		return err
 	}
@@ -494,7 +494,7 @@ func (c *ContractManage) ChallengeKZG(addr common.Address, _ep uint64) error {
 		return err
 	}
 
-	tx, err := ti.IncreaseAllowance(au, c.BankAddr, big.NewInt(int64(com.DefaultPenalty)))
+	tx, err := ti.IncreaseAllowance(au, c.BankAddr, com.DefaultPenalty)
 	if err != nil {
 		return err
 	}
@@ -569,7 +569,7 @@ func (c *ContractManage) ChallengeSum(addr common.Address, _ep uint64, _qIndex u
 	}
 
 	if len(sum) > 0 {
-		tx, err := ti.IncreaseAllowance(au, c.BankAddr, big.NewInt(int64(com.DefaultPenalty)))
+		tx, err := ti.IncreaseAllowance(au, c.BankAddr, com.DefaultPenalty)
 		if err != nil {
 			return err
 		}
@@ -631,7 +631,7 @@ func (c *ContractManage) ProveSum(_ep uint64, coms []bls.G1, _pf []byte) error {
 		return err
 	}
 
-	tx, err := ti.IncreaseAllowance(au, c.BankAddr, big.NewInt(int64(com.DefaultPenalty)))
+	tx, err := ti.IncreaseAllowance(au, c.BankAddr, com.DefaultPenalty)
 	if err != nil {
 		return err
 	}
