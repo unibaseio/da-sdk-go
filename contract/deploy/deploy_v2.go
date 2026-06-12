@@ -606,3 +606,40 @@ func SetMinPledgeV2(client *ethclient.Client, sk string, _typ uint8, val *big.In
 	log.Printf("set nodeType:%d minpledge:%s success\n", _typ, val.String())
 	return nil
 }
+
+// SetBasePenaltyV2 sets the fraud-proof penalty on both proof contracts.
+// The proxies initialize basePenalty to 1e18; the dev-confirmed value is
+// contract.DefaultPenalty (10000 UB), set post-deploy via the GOVERNOR_ROLE.
+func SetBasePenaltyV2(client *ethclient.Client, sk string, rsproofAddr, eproofAddr common.Address, penalty *big.Int) error {
+	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	if err != nil {
+		return err
+	}
+
+	ri, err := rsproof.NewRSProof(rsproofAddr, client)
+	if err != nil {
+		return err
+	}
+	tx, err := ri.SetBasePenalty(au, penalty)
+	if err != nil {
+		return err
+	}
+	if err := contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+		return err
+	}
+	log.Printf("rsproof basePenalty set to %s\n", penalty.String())
+
+	ei, err := eproof.NewEProof(eproofAddr, client)
+	if err != nil {
+		return err
+	}
+	tx, err = ei.SetBasePenalty(au, penalty)
+	if err != nil {
+		return err
+	}
+	if err := contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+		return err
+	}
+	log.Printf("eproof basePenalty set to %s\n", penalty.String())
+	return nil
+}

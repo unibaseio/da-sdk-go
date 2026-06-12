@@ -22,9 +22,10 @@ var (
 	ChainURL = contract.BNBTestnetChainRPC
 	ChainID  = contract.BNBTestnetChainID
 
-	blockInterval = uint64(3)
-	bankAddr      = contract.BNBTestnetBankAddr
-	tokenAddr     = contract.BNBTestnetTokenAddr
+	blockInterval  = uint64(3)
+	bankAddr       = contract.BNBTestnetBankAddr
+	tokenAddr      = contract.BNBTestnetTokenAddr
+	deployDAOPhase = true
 )
 
 // V2 deployment configuration
@@ -41,12 +42,12 @@ var (
 	minProveTime    = big.NewInt(8000) // Minimum prove time for RS/E proofs, 1 hour
 	challengeWindow = uint64(7)        // Challenge window in epochs for EProof
 	minPledgeMap    = map[uint8]*big.Int{
-		// 1: new(big.Int).Mul(big.NewInt(1e18), big.NewInt(10)), // 10 tokens for type 1
-		// 2: new(big.Int).Mul(big.NewInt(1e18), big.NewInt(10)), // 10 tokens for type 2
-		// 3: new(big.Int).Mul(big.NewInt(1e18), big.NewInt(10)), // 10 tokens for type 3
-		1: new(big.Int).Mul(big.NewInt(1e15), big.NewInt(10)), // test
-		2: new(big.Int).Mul(big.NewInt(1e15), big.NewInt(10)), // test
-		3: new(big.Int).Mul(big.NewInt(1e15), big.NewInt(10)), // test
+		// type 1 (store) min pledge must cover the fraud-proof penalty
+		// (challenge() locks basePenalty of the defender's stake — an
+		// under-pledged store could not even be challenged)
+		1: new(big.Int).Mul(contract.DefaultPenalty, big.NewInt(2)), // 2x penalty = 20000 UB
+		2: new(big.Int).Mul(big.NewInt(1e15), big.NewInt(10)),       // test
+		3: new(big.Int).Mul(big.NewInt(1e15), big.NewInt(10)),       // test
 	}
 
 	baseAddr = common.HexToAddress("0xE0AD379735ba88B323298D091ff3b67Dd6C79852")
@@ -69,10 +70,29 @@ func init() {
 }
 
 func main() {
-	fmt.Println("connect to: ", ChainURL)
 	sk := flag.String("sk", "", "private key for sending transaction")
+	rpc := flag.String("rpc", "", "chain rpc endpoint (default: bnb-testnet)")
+	chainID := flag.Int64("chainid", 0, "chain id (default: bnb-testnet)")
+	skipDAO := flag.Bool("skip-dao", false, "skip phase-2 DAO governance deployment")
+	slotsFlag := flag.Uint64("slots", 0, "epoch length in blocks (default 16000; use a small value on local anvil)")
+	mptFlag := flag.Int64("min-prove-time", 0, "min prove time in blocks (default 8000)")
 	flag.Parse()
 
+	if *rpc != "" {
+		ChainURL = *rpc
+	}
+	if *chainID != 0 {
+		ChainID = *chainID
+	}
+	if *slotsFlag != 0 {
+		slots = *slotsFlag
+	}
+	if *mptFlag != 0 {
+		minProveTime = big.NewInt(*mptFlag)
+	}
+	deployDAOPhase = !*skipDAO
+
+	fmt.Println("connect to: ", ChainURL)
 	client, err := ethclient.DialContext(context.TODO(), ChainURL)
 	if err != nil {
 		return
@@ -449,6 +469,14 @@ func deployall_v2(client *ethclient.Client, sk string) {
 		log.Printf("Set min pledge for node type %d to %s", nodeType, pledge.String())
 	}
 
+	// Step 6: set the fraud-proof penalty (initialize defaults to 1e18;
+	// dev-confirmed value is DefaultPenalty = 10000 UB)
+	log.Println("=== Setting Base Penalty ===")
+	if err := SetBasePenaltyV2(client, sk, rsproofProxy, eproofProxy, contract.DefaultPenalty); err != nil {
+		log.Println("Failed to set base penalty:", err)
+		return
+	}
+
 	log.Println("=== V2 Deployment Complete ===")
 	log.Printf("Summary:\n")
 	log.Printf("  EpochProxy: %s\n", epochProxy.Hex())
@@ -459,7 +487,9 @@ func deployall_v2(client *ethclient.Client, sk string) {
 	log.Printf("  EProofProxy: %s\n", eproofProxy.Hex())
 
 	// Phase 2: DAO governance
-	log.Println("")
-	log.Println("=== Phase 2: DAO Governance Deployment ===")
-	deployDAO(client, sk, owner, epochProxy, nodeProxy, pieceProxy, rsproofProxy, everifyProxy, eproofProxy)
+	if deployDAOPhase {
+		log.Println("")
+		log.Println("=== Phase 2: DAO Governance Deployment ===")
+		deployDAO(client, sk, owner, epochProxy, nodeProxy, pieceProxy, rsproofProxy, everifyProxy, eproofProxy)
+	}
 }
