@@ -1,5 +1,8 @@
-# dimo
+# Unibase DA 节点运维
 
+> 节点部署的权威文档在 **da-go 仓库**（README + install.md + contract/test-v2/README），
+> 本文为运维命令速查。启动前先设 `CHAIN_TYPE`（默认 base-sepolia）并完成充值
+> （UB 质押 ≥ 3×罚金；原生 gas ≥ 0.1，1559 交易按 GasLimit×feeCap 预扣）。
 
 ## stream
 
