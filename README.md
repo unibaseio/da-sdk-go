@@ -159,10 +159,15 @@ Notes from the local-Anvil integration run:
 
 - Addresses are deterministic in deploy order; the `LocalAnvil` table in
   `contract/common/common.go` matches the current sequence — don't reorder.
-- The proxies initialize `basePenalty` to 1e18; the tool sets the production
-  value (**10000 UB**, `contract/common.DefaultPenalty`) post-deploy via the
-  governance setter, and `minPledge(type 1) = 2× penalty` so stores always have
-  enough locked stake to be challengeable.
+- The tool sets `basePenalty` to the production value (**10000 UB**,
+  `contract/common.DefaultPenalty`) post-deploy via the governance setter, and
+  `minPledge(type 1) = 2× penalty` so stores always have enough locked stake to
+  be challengeable. Order matters: the min pledge is set first — `setBasePenalty`
+  in current `da-contract` requires `minStakeOf(1) >= penalty`.
+- ⚠️ The bindings under `contract/v2/go` embed the **bytecode that gets
+  deployed**. After changing `da-contract` impls, regenerate the affected
+  bindings (forge artifact → abigen) before deploying/upgrading, or the tool
+  ships stale contracts.
 - After any redeploy on a public chain, update the per-chain address table in
   `contract/common/common.go` (and the chain's `KZGVKRoot` if the SRS changed).
 

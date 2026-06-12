@@ -185,7 +185,7 @@ func UploadModelFiles(url string, sk *ecdsa.PrivateKey, au types.Auth, fp string
 		}
 
 		sfp := path.Join(fp, k)
-		ff, streamer, err := Upload(url, au, types.Policy{6, 4}, sfp, "")
+		ff, streamer, err := Upload(url, au, types.Policy{N: 6, K: 4}, sfp, "")
 		if err != nil {
 			return mrm, err
 		}
