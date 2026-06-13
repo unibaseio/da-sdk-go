@@ -20,6 +20,7 @@ import (
 	"github.com/unibaseio/da-sdk-go/build"
 	"github.com/unibaseio/da-sdk-go/lib/bls"
 	"github.com/unibaseio/da-sdk-go/lib/bls/erasure"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
@@ -40,11 +41,9 @@ func init() {
 	// local test
 	//os.Setenv("CHAIN_TYPE", ChainType)
 	CheckENV()
-	logLevel := os.Getenv("LogLevel")
-	if logLevel == "" {
-		logLevel = "DEBUG"
-	}
-	log.SetLogLevel(logLevel)
+	// was os.Getenv("LogLevel") — wrong name (the log pkg reads LOG_LEVEL),
+	// so this never took effect; use the same key now.
+	log.SetLogLevel(env.Str(env.LogLevel, "DEBUG"))
 }
 
 var ServerURL = build.ServerURL
@@ -52,9 +51,8 @@ var ServerURL = build.ServerURL
 const InHashID = hash.MIMC_BW6_761
 
 func CheckENV() {
-	ct := os.Getenv("CHAIN_TYPE")
-	if ct == "" {
-		os.Setenv("CHAIN_TYPE", ChainType)
+	if env.Str(env.ChainType, "") == "" {
+		os.Setenv(env.ChainType, ChainType)
 	}
 	chaintype = build.CheckChain()
 	logger.Warn("connect to chain: ", chaintype)

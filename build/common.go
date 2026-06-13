@@ -1,6 +1,6 @@
 package build
 
-import "os"
+import "github.com/unibaseio/da-sdk-go/lib/env"
 
 const (
 	ServerURL = "http://54.251.11.180:8080"
@@ -20,7 +20,7 @@ const (
 const chainTypeHint = "please set env 'CHAIN_TYPE' to one of 'base', 'base-sepolia', 'bsc-mainnet', 'eth-mainnet', 'bnb-testnet-v2' or 'bnb-testnet-dao'"
 
 func CheckChain() string {
-	ct := os.Getenv("CHAIN_TYPE")
+	ct := env.Str(env.ChainType, "")
 	if ct == "" {
 		panic(chainTypeHint)
 	}

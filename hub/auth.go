@@ -3,8 +3,6 @@ package hub
 import (
 	"fmt"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/sdk"
 )
@@ -38,35 +37,8 @@ const (
 	defaultOwnerBurst     = 15
 )
 
-func envInt64(key string, fallback int64) int64 {
-	if v := os.Getenv(key); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err == nil {
-			return n
-		}
-	}
-	return fallback
-}
-
-func envFloat(key string, fallback float64) float64 {
-	if v := os.Getenv(key); v != "" {
-		f, err := strconv.ParseFloat(v, 64)
-		if err == nil {
-			return f
-		}
-	}
-	return fallback
-}
-
-func envInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		n, err := strconv.Atoi(v)
-		if err == nil {
-			return n
-		}
-	}
-	return fallback
-}
+// env helpers now live in lib/env (Int64/Float/Int); HUB_* keys stay local
+// string literals since they're hub-specific.
 
 // authBypassPaths are exempted from AuthMiddleware. Keep this list tiny.
 var authBypassPaths = map[string]bool{
@@ -80,8 +52,8 @@ var authBypassPaths = map[string]bool{
 // MaxBodySize wraps r.Body with http.MaxBytesReader using a per-route cap.
 // /uploadData (multipart) gets the larger cap, everything else gets the JSON cap.
 func MaxBodySize() gin.HandlerFunc {
-	jsonCap := envInt64("HUB_MAX_JSON_BYTES", defaultMaxJSONBytes)
-	multipartCap := envInt64("HUB_MAX_MULTIPART_BYTES", defaultMaxMultipartBytes)
+	jsonCap := env.Int64("HUB_MAX_JSON_BYTES", defaultMaxJSONBytes)
+	multipartCap := env.Int64("HUB_MAX_MULTIPART_BYTES", defaultMaxMultipartBytes)
 
 	return func(c *gin.Context) {
 		var capBytes int64 = jsonCap
@@ -103,7 +75,7 @@ func MaxBodySize() gin.HandlerFunc {
 //
 // Any /api/* request that isn't in authBypassPaths must carry a valid signature.
 func AuthMiddleware() gin.HandlerFunc {
-	drift := envInt64("HUB_AUTH_DRIFT_SEC", defaultAuthDriftSec)
+	drift := env.Int64("HUB_AUTH_DRIFT_SEC", defaultAuthDriftSec)
 
 	return func(c *gin.Context) {
 		if authBypassPaths[c.Request.URL.Path] {
@@ -262,10 +234,10 @@ func (lr *limiterRegistry) get(key string) *rate.Limiter {
 //
 // Returns 429 on either tier exceedance.
 func RateLimit() gin.HandlerFunc {
-	ipRPS := envFloat("HUB_RATE_IP_RPS", defaultIPReqPerSec)
-	ipBurst := envInt("HUB_RATE_IP_BURST", defaultIPBurst)
-	ownerRPS := envFloat("HUB_RATE_OWNER_RPS", defaultOwnerReqPerSec)
-	ownerBurst := envInt("HUB_RATE_OWNER_BURST", defaultOwnerBurst)
+	ipRPS := env.Float("HUB_RATE_IP_RPS", defaultIPReqPerSec)
+	ipBurst := env.Int("HUB_RATE_IP_BURST", defaultIPBurst)
+	ownerRPS := env.Float("HUB_RATE_OWNER_RPS", defaultOwnerReqPerSec)
+	ownerBurst := env.Int("HUB_RATE_OWNER_BURST", defaultOwnerBurst)
 
 	ipReg := newLimiterRegistry(ipRPS, ipBurst)
 	ownerReg := newLimiterRegistry(ownerRPS, ownerBurst)

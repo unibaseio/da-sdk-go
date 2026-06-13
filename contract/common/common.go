@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"log"
 	"math/big"
-	"os"
-	"strconv"
 	"time"
 
 	"github.com/unibaseio/da-sdk-go/build"
 	"github.com/unibaseio/da-sdk-go/contract/v1/go/token"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	dlog "github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
 
@@ -259,25 +258,8 @@ var (
 var Logger = dlog.Logger("contract")
 
 func init() {
-	gasPrice := os.Getenv("GAS_PRICE")
-	if gasPrice != "" {
-		gasPriceInt, err := strconv.Atoi(gasPrice)
-		if err != nil {
-			Logger.Warn("invalid gas price: ", gasPrice)
-		} else {
-			DefaultGasPrice = gasPriceInt
-		}
-	}
-
-	gasLimit := os.Getenv("GAS_LIMIT")
-	if gasLimit != "" {
-		gasLimitInt, err := strconv.Atoi(gasLimit)
-		if err != nil {
-			Logger.Warn("invalid gas limit: ", gasLimit)
-		} else {
-			DefaultGasLimit = gasLimitInt
-		}
-	}
+	DefaultGasPrice = env.Int(env.GasPrice, DefaultGasPrice)
+	DefaultGasLimit = env.Int(env.GasLimit, DefaultGasLimit)
 
 	Logger.Infof("gas price: %d", DefaultGasPrice)
 	Logger.Infof("gas limit: %d", DefaultGasLimit)
@@ -337,7 +319,7 @@ func MakeAuthBySk(ep string, chainID *big.Int, sk *ecdsa.PrivateKey) (*bind.Tran
 		tip = big.NewInt(int64(DefaultGasPrice)) // fallback floor (0.1 gwei default)
 		Logger.Debugf("suggest tip unavailable, fallback to %d", tip)
 	}
-	if v := os.Getenv("GAS_TIP"); v != "" {
+	if v := env.Str(env.GasTip, ""); v != "" {
 		if t, ok := new(big.Int).SetString(v, 10); ok {
 			tip = t
 		} else {

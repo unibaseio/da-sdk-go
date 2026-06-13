@@ -2,9 +2,9 @@ package log
 
 import (
 	"fmt"
-	"os"
 	"sync"
 
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -30,7 +30,7 @@ func init() {
 		panic(fmt.Sprintf("unable to open logging output: %v", err))
 	}
 
-	lf := os.Getenv("LOG_FILE")
+	lf := env.Str(env.LogFile, "")
 	if lf != "" {
 		debugWriter = getLogWriter(lf)
 	}
@@ -44,7 +44,7 @@ func init() {
 
 	mLogger = logger.Sugar()
 
-	l := getLogLevel(os.Getenv("LOG_LEVEL"))
+	l := getLogLevel(env.Str(env.LogLevel, ""))
 
 	mLoglevel.SetLevel(l)
 }
