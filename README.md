@@ -161,9 +161,10 @@ Notes from the local-Anvil integration run:
   `contract/common/common.go` matches the current sequence — don't reorder.
 - The tool sets `basePenalty` to the production value (**10000 UB**,
   `contract/common.DefaultPenalty`) post-deploy via the governance setter, and
-  `minPledge(type 1) = 2× penalty` so stores always have enough locked stake to
-  be challengeable. Order matters: the min pledge is set first — `setBasePenalty`
-  in current `da-contract` requires `minStakeOf(1) >= penalty`.
+  `minPledge(type 1) = 5× penalty` (concurrent-challenge capacity = 5) so stores
+  always have enough locked stake to be challengeable. Order matters: the min
+  pledge is set first — `setBasePenalty` in current `da-contract` requires
+  `minStakeOf(1) >= penalty`.
 - ⚠️ The bindings under `contract/v2/go` embed the **bytecode that gets
   deployed**. After changing `da-contract` impls, regenerate the affected
   bindings (forge artifact → abigen) before deploying/upgrading, or the tool

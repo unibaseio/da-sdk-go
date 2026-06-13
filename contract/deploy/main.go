@@ -45,7 +45,7 @@ var (
 		// type 1 (store) min pledge must cover the fraud-proof penalty
 		// (challenge() locks basePenalty of the defender's stake — an
 		// under-pledged store could not even be challenged)
-		1: new(big.Int).Mul(contract.DefaultPenalty, big.NewInt(2)), // 2x penalty = 20000 UB
+		1: new(big.Int).Mul(contract.DefaultPenalty, big.NewInt(5)), // 5x penalty = 50000 UB (A2: concurrent-challenge capacity = 5)
 		2: new(big.Int).Mul(big.NewInt(1e15), big.NewInt(10)),       // test
 		3: new(big.Int).Mul(big.NewInt(1e15), big.NewInt(10)),       // test
 	}
