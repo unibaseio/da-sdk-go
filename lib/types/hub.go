@@ -104,4 +104,8 @@ type FileStat struct {
 	TotalEdges int64 // total edges until this day
 	TotalFiles int64 // total files until this day
 	TotalSize  int64 // total size until this day
+
+	StoreNodes     int64 // total store nodes until this day
+	StreamNodes    int64 // total stream nodes until this day
+	ValidatorNodes int64 // total validator nodes until this day
 }

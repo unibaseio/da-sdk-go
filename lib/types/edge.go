@@ -27,6 +27,17 @@ type EdgeReceipt struct {
 	Last    time.Time
 }
 
+// StoreStat is the per-node storage summary the gateway aggregates from its
+// GormReplica mirror (what a store node currently holds on one chain).
+type StoreStat struct {
+	Store        common.Address
+	ChainType    string
+	ReplicaCount int64 // live (non-fake) replicas stored on this node
+	FakeCount    int64 // replicas flagged fake (Forge/EPFake)
+	PieceCount   int64 // distinct pieces this node contributes a replica to
+	TotalSize    int64 // bytes of live replicas (sum of replica Size)
+}
+
 type EdgeMeta struct {
 	ChainType string
 	Type      string // "store", "compute"
