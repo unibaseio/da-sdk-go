@@ -41,6 +41,11 @@ const (
 	GatewayDBDriver  = "GATEWAY_DB_DRIVER"
 	GatewayDBDSN     = "GATEWAY_DB_DSN"
 	GatewayRedisAddr = "GATEWAY_REDIS_ADDR"
+
+	// service endpoints (hardcoded defaults, env-overridable for deployments)
+	ServerURL   = "SERVER_URL"   // default DA server the SDK talks to
+	ParamSource = "PARAM_SOURCE" // base URL for the shared SRS/param download
+	HubURL      = "HUB_URL"      // default hub server
 )
 
 // Str returns the env value or def if unset/empty.

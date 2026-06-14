@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 
 	"github.com/mitchellh/go-homedir"
@@ -19,10 +20,13 @@ import (
 var logger = log.Logger("param")
 
 const (
-	gateway   = "https://unibase-params.s3.ap-southeast-1.amazonaws.com/"
 	chunkSize = 8 * 1024 * 1024
 	paramdir  = "~/.plonk"
 )
+
+// gateway is the base URL for the shared SRS/param download; override with
+// PARAM_SOURCE (e.g. an internal mirror/cache).
+var gateway = env.Str(env.ParamSource, "https://unibase-params.s3.ap-southeast-1.amazonaws.com/")
 
 func CheckAll() error {
 	for pn, pi := range paramMap {

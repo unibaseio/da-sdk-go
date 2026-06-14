@@ -3,8 +3,6 @@ package build
 import "github.com/unibaseio/da-sdk-go/lib/env"
 
 const (
-	ServerURL = "http://54.251.11.180:8080"
-
 	// mainnet chains (deploy order: BASE first, then BSC, then ETH)
 	ETHMainnet  = "eth-mainnet"
 	BSCMainnet  = "bsc-mainnet"
@@ -16,6 +14,10 @@ const (
 	BNBTestnetV2  = "bnb-testnet-v2"
 	BNBTestnetDAO = "bnb-testnet-dao"
 )
+
+// ServerURL is the default DA server the SDK/CLI talks to; override with
+// SERVER_URL for other deployments.
+var ServerURL = env.Str(env.ServerURL, "http://54.251.11.180:8080")
 
 const chainTypeHint = "please set env 'CHAIN_TYPE' to one of 'base', 'base-sepolia', 'bsc-mainnet', 'eth-mainnet', 'bnb-testnet-v2' or 'bnb-testnet-dao'"
 
