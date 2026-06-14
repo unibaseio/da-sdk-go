@@ -7,14 +7,25 @@ import (
 	"math/big"
 	"os"
 	"sync"
+	"time"
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
+
+// nonceStuckTimeout: if our locally-tracked nonce stays ahead of the chain's
+// pending nonce (i.e. we have in-flight txs) and the chain pending nonce makes
+// NO forward progress for this long, a prior submit likely failed and left a
+// nonce gap that blocks everything above it. We then resync down to the chain's
+// view to heal it. The window is set well above normal mine time so a merely
+// slow-but-pending tx (which keeps the chain nonce frozen too) is never mistaken
+// for a gap until it is genuinely stuck.
+const nonceStuckTimeout = 5 * time.Minute
 
 type ContractManage struct {
 	Type            string
@@ -43,6 +54,73 @@ type ContractManage struct {
 	// bindings/calls (P2: one client instead of a dial per call)
 	clientMu sync.Mutex
 	client   *ethclient.Client
+
+	// nonce management: this key is used concurrently (a store node submits
+	// epoch proofs, adds replicas and answers challenges from different
+	// goroutines). Without serialization each goroutine fetched PendingNonceAt
+	// independently and two could pick the SAME nonce, so one tx silently
+	// replaced/dropped the other. MakeAuth now hands out a monotonic, mutex-
+	// guarded nonce per call. See nextNonce.
+	nonceMu         sync.Mutex
+	localNonce      uint64    // next nonce to hand out
+	nonceReady      bool      // false = re-sync from chain on next allocation
+	lastChainNonce  uint64    // last chain pending nonce observed (progress tracking)
+	nonceProgressAt time.Time // when the chain pending nonce last advanced
+}
+
+// From is the address of this manager's signing key, for read-only CallOpts.
+func (c *ContractManage) From() common.Address {
+	return crypto.PubkeyToAddress(c.sk.PublicKey)
+}
+
+// nextNonce returns the next transaction nonce for this key, serialized across
+// goroutines. It tracks a local monotonic counter so concurrently-built txs get
+// distinct nonces (instead of all reading the same PendingNonceAt), syncs UP to
+// the chain when the chain has advanced past us (txs mined, or the key was used
+// elsewhere), and self-heals a stuck nonce gap by syncing DOWN after
+// nonceStuckTimeout of no on-chain progress. A PendingNonceAt error returns
+// before consuming a nonce, so a transient RPC failure never creates a gap.
+func (c *ContractManage) nextNonce() (uint64, error) {
+	c.nonceMu.Lock()
+	defer c.nonceMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cl, err := c.Client(ctx)
+	if err != nil {
+		return 0, err
+	}
+	chainNonce, err := cl.PendingNonceAt(ctx, c.From())
+	if err != nil {
+		return 0, err
+	}
+
+	now := time.Now()
+	switch {
+	case !c.nonceReady || chainNonce > c.localNonce:
+		// first use, or the chain is ahead of our tracking (our in-flight txs
+		// all mined, or the key signed elsewhere): adopt the chain's view.
+		c.localNonce = chainNonce
+		c.nonceReady = true
+		c.lastChainNonce = chainNonce
+		c.nonceProgressAt = now
+	case chainNonce > c.lastChainNonce:
+		// forward progress observed (some in-flight tx mined): not stuck.
+		c.lastChainNonce = chainNonce
+		c.nonceProgressAt = now
+	case chainNonce < c.localNonce && now.Sub(c.nonceProgressAt) > nonceStuckTimeout:
+		// we are ahead of the chain and it has not advanced for too long — a
+		// prior submit likely failed, leaving a gap that stalls every later
+		// nonce. Resync down to the chain to heal it.
+		com.Logger.Warnf("nonce gap suspected (local %d, chain %d), resync to chain", c.localNonce, chainNonce)
+		c.localNonce = chainNonce
+		c.lastChainNonce = chainNonce
+		c.nonceProgressAt = now
+	}
+
+	n := c.localNonce
+	c.localNonce++
+	return n, nil
 }
 
 // Client returns the shared ethclient for c.RPC, dialing it on first use.
@@ -250,7 +328,20 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 }
 
 func (c *ContractManage) MakeAuth() (*bind.TransactOpts, error) {
-	return com.MakeAuthBySk(c.RPC, c.ChainID, c.sk)
+	au, err := com.MakeAuthBySk(c.RPC, c.ChainID, c.sk)
+	if err != nil {
+		return nil, err
+	}
+	// Pin an explicit, serialized nonce instead of letting go-ethereum fetch
+	// PendingNonceAt at send time (which races across goroutines). Each send
+	// needs its OWN MakeAuth — reusing one auth for multiple sends would reuse
+	// this fixed nonce and self-collide.
+	n, err := c.nextNonce()
+	if err != nil {
+		return nil, err
+	}
+	au.Nonce = new(big.Int).SetUint64(n)
+	return au, nil
 }
 
 func (c *ContractManage) GetTransactionReceipt(hash common.Hash) (*types.Receipt, error) {

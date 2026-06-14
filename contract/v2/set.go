@@ -99,6 +99,10 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	if err != nil {
 		return err
 	}
+	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
+	if err != nil {
+		return err
+	}
 	tx, err = ni.Stake(au, _typ, val)
 	if err != nil {
 		return err
@@ -171,6 +175,10 @@ func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
 
 	com.Logger.Debug("add piece: ", pc)
 	com.Logger.Debug("submitpiece1: ", c.BalanceOf(au.From))
+	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
+	if err != nil {
+		return "", err
+	}
 	tx, err = fi.AddPiece(au, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
 	if err != nil {
 		return "", err
@@ -314,6 +322,10 @@ func (c *ContractManage) ChallengeRS(_pn, _rn string, _pri uint8) error {
 	}
 
 	com.Logger.Debug("challenge rs proof: ", _rn, _pn, _pri)
+	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
+	if err != nil {
+		return err
+	}
 	tx, err = rsp.Challenge(au, pname, rname, _pri)
 	if err != nil {
 		return err
@@ -484,6 +496,10 @@ func (c *ContractManage) ChallengeKZG(addr common.Address, _ep uint64) error {
 	}
 
 	com.Logger.Debug("challenge eproof: ", addr, _ep)
+	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
+	if err != nil {
+		return err
+	}
 	tx, err = pi.ChalKZG(au, addr, _ep)
 	if err != nil {
 		return err
@@ -568,6 +584,10 @@ func (c *ContractManage) ChallengeSum(addr common.Address, _ep uint64, _qIndex u
 			}
 		}
 		com.Logger.Debug("challenge eproof sum0: ", addr, _ep)
+		au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
+		if err != nil {
+			return err
+		}
 		tx, err := pi.Challenge(au, addr, _ep, _sum)
 		if err != nil {
 			return err
@@ -626,6 +646,10 @@ func (c *ContractManage) ProveSum(_ep uint64, coms []bls.G1, _pf []byte) error {
 	}
 
 	com.Logger.Debug("prove eproof sum: ", au.From, _ep)
+	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
+	if err != nil {
+		return err
+	}
 	tx, err = pi.ProveCom(au, _ep, _coms, _pf)
 	if err != nil {
 		return err
