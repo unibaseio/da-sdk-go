@@ -3,14 +3,17 @@ package contract
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
 
+	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -54,6 +57,16 @@ type ContractManage struct {
 	// bindings/calls (P2: one client instead of a dial per call)
 	clientMu sync.Mutex
 	client   *ethclient.Client
+
+	// RPC failover: CHAIN_RPC[_<id>] may list several comma-separated endpoints.
+	// rpcs holds them; rpcIdx is the active one (mirrored into RPC for the com.*
+	// helpers that take an endpoint string). On a transport-level failure a
+	// caller (CheckTx) calls rotateRPC, which advances rpcIdx and drops the
+	// shared client so the next Client() re-dials the next endpoint — and since
+	// every binding shares that client, the whole manager follows to it.
+	rpcMu  sync.Mutex
+	rpcs   []string
+	rpcIdx int
 
 	// nonce management: this key is used concurrently (a store node submits
 	// epoch proofs, adds replicas and answers challenges from different
@@ -123,21 +136,50 @@ func (c *ContractManage) nextNonce() (uint64, error) {
 	return n, nil
 }
 
-// Client returns the shared ethclient for c.RPC, dialing it on first use.
-// The endpoints are HTTP, so the client needs no liveness management —
-// each request rides Go's pooled HTTP transport.
+// Client returns the shared ethclient for the active endpoint, dialing it on
+// first use. The endpoints are HTTP, so the client needs no liveness management
+// — each request rides Go's pooled HTTP transport.
 func (c *ContractManage) Client(ctx context.Context) (*ethclient.Client, error) {
 	c.clientMu.Lock()
 	defer c.clientMu.Unlock()
 	if c.client != nil {
 		return c.client, nil
 	}
-	client, err := ethclient.DialContext(ctx, c.RPC)
+	client, err := ethclient.DialContext(ctx, c.activeRPC())
 	if err != nil {
 		return nil, err
 	}
 	c.client = client
 	return client, nil
+}
+
+// activeRPC is the currently-selected endpoint.
+func (c *ContractManage) activeRPC() string {
+	c.rpcMu.Lock()
+	defer c.rpcMu.Unlock()
+	return c.RPC
+}
+
+// rotateRPC advances to the next configured endpoint (if more than one) and
+// drops the cached shared client so the next Client() re-dials the new active
+// endpoint. Called on a transport-level failure; a contract revert must NOT
+// call this (it is a real result, not an endpoint problem). With a single
+// endpoint it just drops the client to force a clean re-dial.
+func (c *ContractManage) rotateRPC() {
+	c.rpcMu.Lock()
+	if len(c.rpcs) > 1 {
+		c.rpcIdx = (c.rpcIdx + 1) % len(c.rpcs)
+		c.RPC = c.rpcs[c.rpcIdx]
+		com.Logger.Warn("rpc failover -> ", c.RPC)
+	}
+	c.rpcMu.Unlock()
+
+	c.clientMu.Lock()
+	if c.client != nil {
+		c.client.Close()
+		c.client = nil
+	}
+	c.clientMu.Unlock()
 }
 
 func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage, error) {
@@ -307,6 +349,11 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 		cm.RPCForFilterLog = v
 	}
 
+	// CHAIN_RPC[_<id>] may be a comma-separated list of endpoints for failover.
+	// rpcs is the rotation ring; RPC stays the active one (rpcs[0] to start).
+	cm.rpcs = splitEndpoints(cm.RPC)
+	cm.RPC = cm.rpcs[0]
+
 	// check chain RPC is connected
 	// check chain id; the validated client is kept as the shared client
 	client, err := cm.Client(context.Background())
@@ -348,8 +395,73 @@ func (c *ContractManage) GetTransactionReceipt(hash common.Hash) (*types.Receipt
 	return com.GetTransactionReceipt(c.RPC, hash)
 }
 
+// CheckTx waits for txHash to be mined and reports the result, with RPC
+// failover. It polls the shared client with the same escalating backoff as the
+// legacy com.CheckTx, but distinguishes the two error cases the legacy code
+// conflated: ethereum.NotFound (endpoint reachable, tx just not mined yet →
+// keep waiting on the SAME endpoint) versus a transport error (endpoint
+// unreachable/erroring → rotateRPC to the next one). A mined-but-reverted tx is
+// analysed for its revert reason exactly as before — that is a real result, not
+// an endpoint fault, so it never triggers failover.
 func (c *ContractManage) CheckTx(txHash common.Hash) error {
-	return com.CheckTx(c.RPC, txHash)
+	com.Logger.Debug("check tx: ", txHash.String())
+	var receipt *types.Receipt
+
+	t := 0
+	for i := 0; i < 10; i++ {
+		t = 2*t + 1
+		time.Sleep(time.Duration(t) * time.Second)
+
+		cl, err := c.Client(context.Background())
+		if err != nil {
+			c.rotateRPC() // can't even dial → try the next endpoint
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		r, err := cl.TransactionReceipt(ctx, txHash)
+		cancel()
+		if err == nil {
+			receipt = r
+			break
+		}
+		if !errors.Is(err, ethereum.NotFound) {
+			// not "not mined yet" — the endpoint is unreachable/erroring.
+			c.rotateRPC()
+		}
+	}
+
+	if receipt == nil {
+		return fmt.Errorf("%s not packaged", txHash)
+	}
+
+	if receipt.Status == types.ReceiptStatusFailed { // 0 means fail
+		if err := com.AnalyzeTransactionFailure(c.activeRPC(), txHash); err != nil {
+			com.Logger.Warn("tx revert: ", err)
+			return err
+		}
+		if receipt.GasUsed != receipt.CumulativeGasUsed {
+			return fmt.Errorf("%s transaction exceed gas limit", txHash)
+		}
+		return fmt.Errorf("%s transaction mined but execution failed, check your input", txHash)
+	}
+	com.Logger.Debugf("%s cost gas: %d, price: %d", txHash.String(), receipt.GasUsed, receipt.EffectiveGasPrice)
+	return nil
+}
+
+// splitEndpoints parses a comma-separated endpoint list, trimming blanks. A
+// single endpoint (the common case) yields a one-element slice.
+func splitEndpoints(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{s}
+	}
+	return out
 }
 
 func (c *ContractManage) Transfer(toAddr common.Address, value *big.Int) error {
