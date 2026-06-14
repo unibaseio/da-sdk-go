@@ -30,7 +30,14 @@ var (
 
 // V2 deployment configuration
 var (
-	slots    = uint64(16000)    // Epoch slots, 16000 * blockInterval(450ms) = 2h
+	// slots / minProveTime are in BLOCKS, so their wall-clock depends on the
+	// chain's block interval. These defaults assume ~450ms blocks (16000*450ms
+	// ≈ 2h epoch, 8000*450ms ≈ 1h prove window). ⚠️ base-sepolia is ~2s blocks,
+	// so the SAME block counts become ~8.9h / ~4.4h — recalibrate per chain via
+	// -slots / -min-prove-time (e.g. base-sepolia: -slots 3600 -min-prove-time
+	// 1800 for ~2h / ~1h). Safety note: the prove window must comfortably exceed
+	// the BN254 proof wall-clock (~4-5 min), which 1800*2s=1h does.
+	slots    = uint64(16000)    // Epoch slots (blocks); see note above
 	delay    = uint64(7)        // Piece delay in epochs
 	minStore = uint64(1200)     // Minimum storage time, 1200 epochs = 100 days
 	maxStore = uint64(12000)    // Maximum storage time
@@ -39,7 +46,7 @@ var (
 	// streamPrice  = big.NewInt(1e12)    // Streaming price, per replica
 	minPrice        = big.NewInt(1e8)  // just for test
 	streamPrice     = big.NewInt(1e9)  // just for test
-	minProveTime    = big.NewInt(8000) // Minimum prove time for RS/E proofs, 1 hour
+	minProveTime    = big.NewInt(8000) // Min prove time (blocks); ~1h @450ms — see slots note
 	challengeWindow = uint64(7)        // Challenge window in epochs for EProof
 	minPledgeMap    = map[uint8]*big.Int{
 		// type 1 (store) min pledge must cover the fraud-proof penalty
