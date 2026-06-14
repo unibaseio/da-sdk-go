@@ -68,6 +68,16 @@ type ContractManage struct {
 	rpcs   []string
 	rpcIdx int
 
+	// Filter-log endpoint failover, symmetric to the tx/call path above but a
+	// SEPARATE client (event sync uses RPCForFilterLog, often a different RPC).
+	// A flaky getLogs endpoint must not wedge sync: a store that misses a
+	// challenge against itself would fail to prove and be wrongly slashed.
+	filterMu       sync.Mutex
+	filterRPCs     []string
+	filterIdx      int
+	filterClientMu sync.Mutex
+	filterClient   *ethclient.Client
+
 	// nonce management: this key is used concurrently (a store node submits
 	// epoch proofs, adds replicas and answers challenges from different
 	// goroutines). Without serialization each goroutine fetched PendingNonceAt
@@ -353,6 +363,8 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 	// rpcs is the rotation ring; RPC stays the active one (rpcs[0] to start).
 	cm.rpcs = splitEndpoints(cm.RPC)
 	cm.RPC = cm.rpcs[0]
+	cm.filterRPCs = splitEndpoints(cm.RPCForFilterLog)
+	cm.RPCForFilterLog = cm.filterRPCs[0]
 
 	// check chain RPC is connected
 	// check chain id; the validated client is kept as the shared client
@@ -446,6 +458,76 @@ func (c *ContractManage) CheckTx(txHash common.Hash) error {
 	}
 	com.Logger.Debugf("%s cost gas: %d, price: %d", txHash.String(), receipt.GasUsed, receipt.EffectiveGasPrice)
 	return nil
+}
+
+// FilterClient returns the shared ethclient for the active filter-log endpoint,
+// dialing it lazily. Separate from Client (tx/call path) because event sync
+// uses RPCForFilterLog, which may be a different RPC.
+func (c *ContractManage) FilterClient(ctx context.Context) (*ethclient.Client, error) {
+	c.filterClientMu.Lock()
+	defer c.filterClientMu.Unlock()
+	if c.filterClient != nil {
+		return c.filterClient, nil
+	}
+	c.filterMu.Lock()
+	ep := c.RPCForFilterLog
+	c.filterMu.Unlock()
+	cl, err := ethclient.DialContext(ctx, ep)
+	if err != nil {
+		return nil, err
+	}
+	c.filterClient = cl
+	return cl, nil
+}
+
+// rotateFilterRPC advances to the next filter-log endpoint (if more than one)
+// and drops the cached filter client so the next FilterClient() re-dials it.
+func (c *ContractManage) rotateFilterRPC() {
+	c.filterMu.Lock()
+	if len(c.filterRPCs) > 1 {
+		c.filterIdx = (c.filterIdx + 1) % len(c.filterRPCs)
+		c.RPCForFilterLog = c.filterRPCs[c.filterIdx]
+		com.Logger.Warn("filter-log rpc failover -> ", c.RPCForFilterLog)
+	}
+	c.filterMu.Unlock()
+
+	c.filterClientMu.Lock()
+	if c.filterClient != nil {
+		c.filterClient.Close()
+		c.filterClient = nil
+	}
+	c.filterClientMu.Unlock()
+}
+
+// FilterLogs runs eth_getLogs on the filter endpoint with failover: on a
+// transport error it rotates to the next endpoint (the caller's sync loop
+// retries on the next tick, which re-dials the new endpoint).
+func (c *ContractManage) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	cl, err := c.FilterClient(ctx)
+	if err != nil {
+		c.rotateFilterRPC()
+		return nil, err
+	}
+	logs, err := cl.FilterLogs(ctx, q)
+	if err != nil {
+		c.rotateFilterRPC()
+	}
+	return logs, err
+}
+
+// FilterBlockNumber reads the head block via the filter endpoint, with the same
+// failover as FilterLogs (event sync uses both against RPCForFilterLog).
+func (c *ContractManage) FilterBlockNumber(ctx context.Context) (uint64, error) {
+	cl, err := c.FilterClient(ctx)
+	if err != nil {
+		c.rotateFilterRPC()
+		return 0, err
+	}
+	n, err := cl.BlockNumber(ctx)
+	if err != nil {
+		c.rotateFilterRPC()
+	}
+	return n, err
 }
 
 // splitEndpoints parses a comma-separated endpoint list, trimming blanks. A

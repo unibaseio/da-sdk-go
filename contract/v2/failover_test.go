@@ -24,6 +24,45 @@ func TestSplitEndpoints(t *testing.T) {
 	}
 }
 
+// TestFilterRPCFailover proves the same rotation for the SEPARATE filter-log
+// path: FilterBlockNumber on a dead endpoint fails and rotates, then succeeds
+// on the live one. Event sync depends on this — a store that can't read its
+// challenge would be wrongly slashed.
+func TestFilterRPCFailover(t *testing.T) {
+	reachableAnvil(t)
+
+	const dead = "http://127.0.0.1:1"
+	cm := &ContractManage{
+		filterRPCs:      []string{dead, anvilRPC},
+		filterIdx:       0,
+		RPCForFilterLog: dead,
+		ChainID:         big.NewInt(31337),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_, err := cm.FilterBlockNumber(ctx) // dead endpoint -> error + internal rotate
+	cancel()
+	if err == nil {
+		t.Fatal("expected dead filter endpoint to fail")
+	}
+	if cm.activeFilterRPC() != anvilRPC {
+		t.Fatalf("after failover active filter=%s, want %s", cm.activeFilterRPC(), anvilRPC)
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := cm.FilterBlockNumber(ctx); err != nil {
+		t.Fatalf("filter call after failover should succeed: %v", err)
+	}
+}
+
+// activeFilterRPC test accessor mirrors activeRPC for assertions.
+func (c *ContractManage) activeFilterRPC() string {
+	c.filterMu.Lock()
+	defer c.filterMu.Unlock()
+	return c.RPCForFilterLog
+}
+
 // TestRotateRPCFailover proves the rotation mechanism: a dead active endpoint
 // fails the call, rotateRPC advances to the next endpoint and drops the cached
 // client, and subsequent calls succeed on the live endpoint.
