@@ -16,16 +16,23 @@ type Policy struct {
 	K uint8
 }
 
+// SupportedPolicies is the single source of truth for the RS (N,K) codes the
+// protocol supports. Check validates against it, and the deploy tool iterates
+// it to register per-policy VK roots — keep new policies in one place.
+var SupportedPolicies = []Policy{
+	{N: 6, K: 4},
+	{N: 14, K: 7},
+	{N: 32, K: 16},
+	{N: 64, K: 32},
+}
+
 func (p Policy) Check() error {
-	switch {
-	case p.N == 6 && p.K == 4:
-	case p.N == 14 && p.K == 7:
-	case p.N == 32 && p.K == 16:
-	case p.N == 64 && p.K == 32:
-	default:
-		return fmt.Errorf("unsupported rs policy: %d %d", p.N, p.K)
+	for _, sp := range SupportedPolicies {
+		if p.N == sp.N && p.K == sp.K {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("unsupported rs policy: %d %d", p.N, p.K)
 }
 
 type FileCore struct {

@@ -54,7 +54,10 @@ var (
 	//https://sepolia-optimism.etherscan.io/
 	//DevChain   = "https://11155420.rpc.thirdweb.com"
 
-	DefaultGasLimit = 10_000_000
+	// 0 = let go-ethereum EstimateGas per-tx (right-sizes cheap txs and scales
+	// for proof-heavy verify txs); GAS_LIMIT env pins a fixed value if a chain's
+	// estimates misbehave.
+	DefaultGasLimit = 0
 	DefaultGasPrice = 100_000_000 // 0.1gwei
 
 	DefaultStreamPrice  = 1e12
@@ -286,9 +289,11 @@ func MakeAuthBySk(ep string, chainID *big.Int, sk *ecdsa.PrivateKey) (*bind.Tran
 	}
 
 	auth.Value = big.NewInt(0)
-	// TODO(P1): switch proof-heavy txs to EstimateGas + safety margin once the
-	// margin ratio is confirmed; a fixed limit either wastes or underprovisions.
-	auth.GasLimit = uint64(DefaultGasLimit)
+	// GasLimit 0 makes go-ethereum's bound-contract transactor EstimateGas with
+	// the real calldata at send time (accurate per tx). A fixed limit either
+	// over-reserves on cheap txs (EIP-1559 locks GasLimit*feeCap upfront) or
+	// out-of-gases a large verify tx. GAS_LIMIT env pins an explicit value.
+	auth.GasLimit = uint64(DefaultGasLimit) // 0 unless GAS_LIMIT set
 	client, err := ethclient.Dial(ep)
 	if err != nil {
 		return nil, err

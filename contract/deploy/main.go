@@ -13,6 +13,7 @@ import (
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/piece"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/rsproof"
 	dlog "github.com/unibaseio/da-sdk-go/lib/log"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -211,28 +212,12 @@ func deployall_v1(client *ethclient.Client, sk string) {
 		return
 	}
 
-	err = SetRSVKRoot(client, sk, 6, 4)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = SetRSVKRoot(client, sk, 14, 7)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = SetRSVKRoot(client, sk, 32, 16)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = SetRSVKRoot(client, sk, 64, 32)
-	if err != nil {
-		log.Println(err)
-		return
+	for _, p := range types.SupportedPolicies {
+		err = SetRSVKRoot(client, sk, int(p.N), int(p.K))
+		if err != nil {
+			log.Println(err)
+			return
+		}
 	}
 
 	err = DeployEproof(client, sk)
@@ -410,21 +395,11 @@ func deployall_v2(client *ethclient.Client, sk string) {
 
 	// Set RS VK roots for different policies
 	log.Println("=== Setting RS VK Roots ===")
-	if err := SetRSVKRootV2(client, sk, 6, 4, rsproofProxy); err != nil {
-		log.Println("Failed to set RS VK root for n=6, k=4:", err)
-		return
-	}
-	if err := SetRSVKRootV2(client, sk, 14, 7, rsproofProxy); err != nil {
-		log.Println("Failed to set RS VK root for n=14, k=7:", err)
-		return
-	}
-	if err := SetRSVKRootV2(client, sk, 32, 16, rsproofProxy); err != nil {
-		log.Println("Failed to set RS VK root for n=32, k=16:", err)
-		return
-	}
-	if err := SetRSVKRootV2(client, sk, 64, 32, rsproofProxy); err != nil {
-		log.Println("Failed to set RS VK root for n=64, k=32:", err)
-		return
+	for _, p := range types.SupportedPolicies {
+		if err := SetRSVKRootV2(client, sk, int(p.N), int(p.K), rsproofProxy); err != nil {
+			log.Printf("Failed to set RS VK root for n=%d, k=%d: %v", p.N, p.K, err)
+			return
+		}
 	}
 
 	// Deploy EVerify proxy

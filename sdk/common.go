@@ -72,7 +72,6 @@ func CheckFileFull(ff types.FileFull, stream common.Address, fp string) ([]types
 	}
 	defer fi.Close()
 
-	mh := InHashID.New()
 	var rnd bls.Fr
 	for i := 0; i < len(ff.Pieces); i++ {
 		ew := new(bls.EncodeWitness)
@@ -86,19 +85,9 @@ func CheckFileFull(ff types.FileFull, stream common.Address, fp string) ([]types
 			return nil, err
 		}
 
-		mh.Reset()
-
-		buf := make([]byte, 28)
-		buf = append(buf, stream.Bytes()...)
-		mh.Write(buf)
-
-		for j := 0; j < int(ff.Policy.K); j++ {
-			mh.Write(ew.Commits[j].Marshal())
-			mh.Write(ew.MoveCommits[j].Marshal())
-			mh.Write(ew.LimitCommits[j].Marshal())
-		}
-
-		point := mh.Sum(nil)
+		// Fiat-Shamir point — shared with the encoder via bls.Challenge so the
+		// transcript byte-layout can't drift between encode and verify.
+		point := ew.Challenge(stream.Bytes())
 		rnd.SetBytes(point)
 
 		slen := (1 + (ff.PieceSizes[i]-1)/(31*int64(ff.Policy.K))) * 31
@@ -108,7 +97,7 @@ func CheckFileFull(ff types.FileFull, stream common.Address, fp string) ([]types
 			if rest < slen {
 				size = rest
 			}
-			buf = make([]byte, size)
+			buf := make([]byte, size)
 			n, err := fi.Read(buf)
 			if err != nil {
 				return nil, err

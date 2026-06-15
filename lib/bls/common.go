@@ -21,8 +21,14 @@ const (
 	MinShard  = 2
 	MaxShard  = 1 << LogShard
 	MaxSize   = MaxShard * UnPadSize // per piece
-	SlothDec  = 17
-	SlothEnc  = "8c920a4fd422fb02d82062c67a1bc3cdee6ce960787878804bcf0f0f0f0f0f1"
+	// Sloth PoR — V1 is the LIVE version: SlothEncode/SlothDecode (sloth.go) and
+	// the in-circuit constraint (da-core groth SlothHint, exponent SlothDec=17)
+	// both pin it. V2/V3 in sloth.go are experimental and NOT wired into the
+	// runtime or any on-chain circuit. Single source of truth for "which Sloth";
+	// changing it means regenerating the circuit + redeploying verifiers.
+	SlothVersion = 1
+	SlothDec     = 17 // 17th-root VDF exponent (V1)
+	SlothEnc     = "8c920a4fd422fb02d82062c67a1bc3cdee6ce960787878804bcf0f0f0f0f0f1"
 )
 
 type Fr = fr.Element
@@ -198,6 +204,30 @@ func (ew *EncodeWitness) Deserialize(buf []byte) error {
 		}
 	}
 	return nil
+}
+
+// Challenge computes the Fiat-Shamir point bound into the encoding:
+//
+//	MiMC( 28 zero bytes ‖ stream ‖ {Commits[i] ‖ MoveCommits[i] ‖ LimitCommits[i]}_{i<k} )
+//
+// over the k data shards (k = len(MoveCommits)). ⚠️ This transcript MUST stay
+// byte-identical across the encoder (helper.EncodeData), the verifier
+// (sdk.CheckFileFull) and the in-circuit derivation (plonk rsone). It used to be
+// hand-written in two places; both Go callers now route through here so they
+// cannot drift. Commitment bytes are the compressed Marshal encoding
+// (== Commitment.Raw()); NewFieldHash is the BW6-761 MiMC (== plonk.InHashID).
+func (ew *EncodeWitness) Challenge(stream []byte) []byte {
+	mh := NewFieldHash()
+	buf := make([]byte, 28)
+	buf = append(buf, stream...)
+	mh.Write(buf)
+	k := len(ew.MoveCommits)
+	for i := 0; i < k; i++ {
+		mh.Write(ew.Commits[i].Marshal())
+		mh.Write(ew.MoveCommits[i].Marshal())
+		mh.Write(ew.LimitCommits[i].Marshal())
+	}
+	return mh.Sum(nil)
 }
 
 func Eval(p []Fr, point Fr) Fr {
