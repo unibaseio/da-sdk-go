@@ -43,10 +43,12 @@ var (
 	minStore = uint64(1200)     // Minimum storage time, 1200 epochs = 100 days
 	maxStore = uint64(12000)    // Maximum storage time
 	maxSize  = uint64(33554432) // 32MB
-	// minPrice     = big.NewInt(1e11)    // Minimum price per unit, per epoch*MB
-	// streamPrice  = big.NewInt(1e12)    // Streaming price, per replica
-	minPrice        = big.NewInt(1e8)  // just for test
-	streamPrice     = big.NewInt(1e9)  // just for test
+	// Economic starting values (governance-adjustable post-launch). At UB=$0.1
+	// minPrice 1e11 ≈ ~$3.6/TB/month (pre-redundancy) — between Filecoin and S3.
+	// ⚠️ validate vs storer cost + market with the AddPiece val formula before
+	// mainnet; was 1e8/1e9 ("just for test") — do NOT ship those.
+	minPrice        = big.NewInt(1e11) // minimum storage price per unit, per epoch*MB
+	streamPrice     = big.NewInt(1e12) // streaming price, per replica
 	minProveTime    = big.NewInt(8000) // Min prove time (blocks); ~1h @450ms — see slots note
 	challengeWindow = uint64(7)        // Challenge window in epochs for EProof
 	minPledgeMap    = map[uint8]*big.Int{
