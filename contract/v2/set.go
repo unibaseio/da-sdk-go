@@ -16,6 +16,52 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// Attest records this validator's on-chain liveness for the given epoch in the
+// reward pool (FixB+A2). No-op if the pool address isn't configured.
+func (c *ContractManage) Attest(epoch uint64) error {
+	if c.ValidatorRewardAddr == (common.Address{}) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.TODO(), 1*time.Minute)
+	defer cancel()
+	vi, err := c.NewValidatorReward(ctx)
+	if err != nil {
+		return err
+	}
+	au, err := c.MakeAuth()
+	if err != nil {
+		return err
+	}
+	tx, err := vi.Attest(au, epoch)
+	if err != nil {
+		return err
+	}
+	return c.CheckTx(tx.Hash())
+}
+
+// Claim pulls this validator's allocated reward from the pool. No-op if the
+// pool address isn't configured.
+func (c *ContractManage) Claim() error {
+	if c.ValidatorRewardAddr == (common.Address{}) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.TODO(), 1*time.Minute)
+	defer cancel()
+	vi, err := c.NewValidatorReward(ctx)
+	if err != nil {
+		return err
+	}
+	au, err := c.MakeAuth()
+	if err != nil {
+		return err
+	}
+	tx, err := vi.Claim(au)
+	if err != nil {
+		return err
+	}
+	return c.CheckTx(tx.Hash())
+}
+
 func (c *ContractManage) UpdateEpoch() (uint64, error) {
 	ctx, cancle := context.WithTimeout(context.TODO(), 1*time.Minute)
 	defer cancle()

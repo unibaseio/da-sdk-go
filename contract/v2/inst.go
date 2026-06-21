@@ -14,6 +14,7 @@ import (
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/plonk/rsone"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/rsproof"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/token"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/validatorreward"
 )
 
 // All bindings share the ContractManage client (see Client in contract.go).
@@ -99,6 +100,14 @@ func (c *ContractManage) NewEVerify(ctx context.Context) (*everify.EVerify, erro
 		return nil, err
 	}
 	return everify.NewEVerify(c.EVerifyAddr, client)
+}
+
+func (c *ContractManage) NewValidatorReward(ctx context.Context) (*validatorreward.ValidatorReward, error) {
+	client, err := c.Client(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return validatorreward.NewValidatorReward(c.ValidatorRewardAddr, client)
 }
 
 func (c *ContractManage) NewToken(ctx context.Context) (*token.Token, error) {

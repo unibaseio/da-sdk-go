@@ -20,6 +20,7 @@ import (
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/plonk/rsone"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/proxy"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/rsproof"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/validatorreward"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -641,5 +642,88 @@ func SetBasePenaltyV2(client *ethclient.Client, sk string, rsproofAddr, eproofAd
 		return err
 	}
 	log.Printf("eproof basePenalty set to %s\n", penalty.String())
+	return nil
+}
+
+// --- ValidatorReward (FixB+A2) ---------------------------------------------
+
+func DeployValidatorRewardImpl(client *ethclient.Client, sk string) (common.Address, error) {
+	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	if err != nil {
+		return common.Address{}, err
+	}
+	tAddr, tx, _, err := validatorreward.DeployValidatorReward(au, client)
+	if err != nil {
+		return common.Address{}, err
+	}
+	if err = contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+		return common.Address{}, err
+	}
+	log.Println("validatorReward: ", tAddr.Hex())
+	SaveDeployment("ValidatorReward", tAddr)
+	return tAddr, nil
+}
+
+func DeployValidatorRewardProxy(client *ethclient.Client, sk string, implAddr, token, owner common.Address) (common.Address, error) {
+	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	if err != nil {
+		return common.Address{}, err
+	}
+	vrABI, err := validatorreward.ValidatorRewardMetaData.GetAbi()
+	if err != nil {
+		return common.Address{}, err
+	}
+	initData, err := vrABI.Pack("initialize", token, owner)
+	if err != nil {
+		return common.Address{}, err
+	}
+	proxyAddr, tx, _, err := proxy.DeployERC1967Proxy(au, client, implAddr, initData)
+	if err != nil {
+		return common.Address{}, err
+	}
+	if err = contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+		return common.Address{}, err
+	}
+	log.Printf("ValidatorRewardProxy deployed at: %s\n", proxyAddr.Hex())
+	SaveDeployment("ValidatorRewardProxy", proxyAddr)
+	return proxyAddr, nil
+}
+
+// SetValidatorPool repoints RSProof + EProof's penalty-share recipient to the
+// validator reward pool (FixB+A2). Until called, the protocol share defaults to
+// `base` (backward-compatible).
+func SetValidatorPool(client *ethclient.Client, sk string, rsproofProxy, eproofProxy, pool common.Address) error {
+	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	if err != nil {
+		return err
+	}
+	ri, err := rsproof.NewRSProof(rsproofProxy, client)
+	if err != nil {
+		return err
+	}
+	tx, err := ri.SetValidatorPool(au, pool)
+	if err != nil {
+		return err
+	}
+	if err = contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+		return err
+	}
+
+	au, err = contract.MakeAuth(ChainURL, ChainID, sk)
+	if err != nil {
+		return err
+	}
+	ei, err := eproof.NewEProof(eproofProxy, client)
+	if err != nil {
+		return err
+	}
+	tx, err = ei.SetValidatorPool(au, pool)
+	if err != nil {
+		return err
+	}
+	if err = contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+		return err
+	}
+	log.Printf("validatorPool set on RSProof+EProof: %s\n", pool.Hex())
 	return nil
 }

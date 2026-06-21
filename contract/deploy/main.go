@@ -461,6 +461,26 @@ func deployall_v2(client *ethclient.Client, sk string) {
 		return
 	}
 
+	// Step 7: ValidatorReward pool (FixB+A2) — deployed LAST so it does not
+	// shift the deterministic addresses of the core proxies (the LocalAnvil
+	// table + integration tests depend on the existing deploy order). Repoint
+	// RSProof/EProof's penalty share to it; treasury funds it off-chain.
+	log.Println("=== Deploying ValidatorReward (FixB+A2) ===")
+	validatorRewardImpl, err := DeployValidatorRewardImpl(client, sk)
+	if err != nil {
+		log.Println("Failed to deploy ValidatorReward implementation:", err)
+		return
+	}
+	validatorPool, err := DeployValidatorRewardProxy(client, sk, validatorRewardImpl, tokenAddr, owner)
+	if err != nil {
+		log.Println("Failed to deploy ValidatorReward proxy:", err)
+		return
+	}
+	if err := SetValidatorPool(client, sk, rsproofProxy, eproofProxy, validatorPool); err != nil {
+		log.Println("Failed to set validator pool on RSProof/EProof:", err)
+		return
+	}
+
 	log.Println("=== V2 Deployment Complete ===")
 	log.Printf("Summary:\n")
 	log.Printf("  EpochProxy: %s\n", epochProxy.Hex())
@@ -469,6 +489,7 @@ func deployall_v2(client *ethclient.Client, sk string) {
 	log.Printf("  RSProofProxy: %s\n", rsproofProxy.Hex())
 	log.Printf("  EVerifyProxy: %s\n", everifyProxy.Hex())
 	log.Printf("  EProofProxy: %s\n", eproofProxy.Hex())
+	log.Printf("  ValidatorRewardProxy: %s\n", validatorPool.Hex())
 
 	// Phase 2: DAO governance
 	if deployDAOPhase {

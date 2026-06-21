@@ -53,6 +53,11 @@ type ContractManage struct {
 	AddAddr   common.Address
 	MulAddr   common.Address
 
+	// FixB+A2 validator reward pool. Not in the per-chain const tables (a
+	// post-deploy address); set via VALIDATOR_REWARD_ADDR env. Zero => the
+	// validator runtime skips attest/claim (no-op until configured).
+	ValidatorRewardAddr common.Address
+
 	// shared RPC client for c.RPC, created lazily and reused by all contract
 	// bindings/calls (P2: one client instead of a dial per call)
 	clientMu sync.Mutex
@@ -365,6 +370,11 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 	cm.RPC = cm.rpcs[0]
 	cm.filterRPCs = splitEndpoints(cm.RPCForFilterLog)
 	cm.RPCForFilterLog = cm.filterRPCs[0]
+
+	// FixB+A2: validator reward pool address (post-deploy, env-configured).
+	if v := os.Getenv("VALIDATOR_REWARD_ADDR"); v != "" {
+		cm.ValidatorRewardAddr = common.HexToAddress(v)
+	}
 
 	// check chain RPC is connected
 	// check chain id; the validated client is kept as the shared client
