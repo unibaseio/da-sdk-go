@@ -3,6 +3,8 @@ package hub
 import (
 	"sync"
 	"time"
+
+	"github.com/unibaseio/da-sdk-go/lib/env"
 )
 
 // missCache is a small TTL set of "this download key is definitely not here"
@@ -31,7 +33,7 @@ const (
 func newMissCache() *missCache {
 	return &missCache{
 		entries: make(map[string]int64),
-		ttl:     time.Duration(envInt64("HUB_DOWNLOAD_MISS_TTL_SEC", defaultMissTTLSec)) * time.Second,
+		ttl:     time.Duration(env.Int64("HUB_DOWNLOAD_MISS_TTL_SEC", defaultMissTTLSec)) * time.Second,
 		max:     defaultMissMaxItems,
 	}
 }
