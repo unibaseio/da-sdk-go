@@ -147,7 +147,7 @@ func (s *Server) addBucket(owner, bucket string) error {
 	var gbucket types.Bucket
 	result := s.gdb.First(&gbucket, "name = ? ", bucket)
 	if result.RowsAffected > 0 {
-		if gbucket.Owner != owner {
+		if !strings.EqualFold(gbucket.Owner, owner) {
 			logger.Infof("bucket: %s is owned by %s", bucket, gbucket.Owner)
 			return fmt.Errorf("bucket: %s is owned by %s", bucket, gbucket.Owner)
 		}
@@ -165,7 +165,11 @@ func (s *Server) addBucket(owner, bucket string) error {
 
 func (s *Server) getAccount(owner string) ([]types.Account, error) {
 	var accounts []types.Account
-	result := s.gdb.Where(&types.Account{Name: owner}).Find(&accounts)
+	q := s.gdb
+	if owner != "" {
+		q = q.Where("LOWER(name) = ?", strings.ToLower(owner))
+	}
+	result := q.Find(&accounts)
 	if result.Error != nil {
 		return accounts, result.Error
 	}
@@ -184,7 +188,14 @@ func (s *Server) listAccount(offset, limit int) ([]types.Account, error) {
 
 func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) {
 	var buckets []types.Bucket
-	result := s.gdb.Where(&types.Bucket{Owner: owner, Name: bucket}).Find(&buckets)
+	q := s.gdb
+	if owner != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	}
+	if bucket != "" {
+		q = q.Where("name = ?", bucket)
+	}
+	result := q.Find(&buckets)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -254,7 +265,11 @@ func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) 
 
 func (s *Server) listBucket(owner string, offset, limit int) ([]types.BucketDisplay, error) {
 	var buckets []types.Bucket
-	result := s.gdb.Where(&types.Bucket{Owner: owner}).Order("id desc").Limit(limit).Offset(offset).Find(&buckets)
+	q := s.gdb
+	if owner != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	}
+	result := q.Order("id desc").Limit(limit).Offset(offset).Find(&buckets)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -362,7 +377,17 @@ func (s *Server) getNeedleByName(name string) ([]types.Needle, error) {
 
 func (s *Server) getNeedleDisplay(owner, bucket, name string) ([]types.NeedleDisplay, error) {
 	var needle []types.Needle
-	result := s.gdb.Where(&types.Needle{Name: name, Owner: owner, Bucket: bucket}).Order("id desc").Limit(1).Find(&needle)
+	q := s.gdb
+	if name != "" {
+		q = q.Where("name = ?", name)
+	}
+	if owner != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	}
+	if bucket != "" {
+		q = q.Where("bucket = ?", bucket)
+	}
+	result := q.Order("id desc").Limit(1).Find(&needle)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -392,7 +417,14 @@ func (s *Server) getNeedleDisplay(owner, bucket, name string) ([]types.NeedleDis
 func (s *Server) listNeedleDisplay(owner, bucket string, offset, limit int) ([]types.NeedleDisplay, error) {
 	logger.Debug("list needle: ", owner, bucket, offset, limit)
 	var needle []types.Needle
-	result := s.gdb.Where(&types.Needle{Owner: owner, Bucket: bucket}).Order("id desc").Limit(limit).Offset(offset).Find(&needle)
+	q := s.gdb
+	if owner != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	}
+	if bucket != "" {
+		q = q.Where("bucket = ?", bucket)
+	}
+	result := q.Order("id desc").Limit(limit).Offset(offset).Find(&needle)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -433,7 +465,14 @@ func (s *Server) addVolume(owner string, findex uint64, piece, txn string) {
 
 func (s *Server) getVolume(owner string, fid uint64) ([]types.Volume, error) {
 	var vol []types.Volume
-	result := s.gdb.Where(&types.Volume{Owner: owner, File: fid}).Find(&vol)
+	q := s.gdb
+	if owner != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	}
+	if fid != 0 {
+		q = q.Where("file = ?", fid)
+	}
+	result := q.Find(&vol)
 	if result.Error != nil {
 		return vol, result.Error
 	}
@@ -442,7 +481,11 @@ func (s *Server) getVolume(owner string, fid uint64) ([]types.Volume, error) {
 
 func (s *Server) listVolume(owner string, offset, limit int) ([]types.Volume, error) {
 	var vols []types.Volume
-	result := s.gdb.Where(&types.Volume{Owner: owner}).Order("id desc").Limit(limit).Offset(offset).Find(&vols)
+	q := s.gdb
+	if owner != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	}
+	result := q.Order("id desc").Limit(limit).Offset(offset).Find(&vols)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -452,7 +495,14 @@ func (s *Server) listVolume(owner string, offset, limit int) ([]types.Volume, er
 
 func (s *Server) listConversationDisplay(addr, bucket string, offset, limit int) ([]types.Conversation, error) {
 	var conversations []types.Conversation
-	result := s.gdb.Where(&types.Conversation{Owner: addr, Bucket: bucket}).Order("id desc").Limit(limit).Offset(offset).Find(&conversations)
+	q := s.gdb
+	if addr != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(addr))
+	}
+	if bucket != "" {
+		q = q.Where("bucket = ?", bucket)
+	}
+	result := q.Order("id desc").Limit(limit).Offset(offset).Find(&conversations)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -461,11 +511,17 @@ func (s *Server) listConversationDisplay(addr, bucket string, offset, limit int)
 
 func (s *Server) getConversationDisplay(addr, bucket, name string) ([]types.Conversation, error) {
 	var conversations []types.Conversation
-	result := s.gdb.Where(&types.Conversation{
-		Owner:  addr,
-		Bucket: bucket,
-		Name:   name,
-	}).Find(&conversations)
+	q := s.gdb
+	if addr != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(addr))
+	}
+	if bucket != "" {
+		q = q.Where("bucket = ?", bucket)
+	}
+	if name != "" {
+		q = q.Where("name = ?", name)
+	}
+	result := q.Find(&conversations)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -478,17 +534,23 @@ func (s *Server) listNeedleDisplayByConversation(addr, bucket, conversation stri
 
 	// 首先获取conversation_0的id
 	var firstNeedle types.Needle
-	firstQuery := s.gdb.Model(&types.Needle{
-		Owner:  addr,
-		Bucket: bucket,
-	}).Where("name = ?", conversation+"_0")
+	firstQuery := s.gdb.Model(&types.Needle{}).Where("name = ?", conversation+"_0")
+	if addr != "" {
+		firstQuery = firstQuery.Where("LOWER(owner) = ?", strings.ToLower(addr))
+	}
+	if bucket != "" {
+		firstQuery = firstQuery.Where("bucket = ?", bucket)
+	}
 
 	firstResult := firstQuery.First(&firstNeedle)
 
-	query := s.gdb.Model(&types.Needle{
-		Owner:  addr,
-		Bucket: bucket,
-	})
+	query := s.gdb.Model(&types.Needle{})
+	if addr != "" {
+		query = query.Where("LOWER(owner) = ?", strings.ToLower(addr))
+	}
+	if bucket != "" {
+		query = query.Where("bucket = ?", bucket)
+	}
 
 	// 如果找到了conversation_0记录，使用id进行优化查询
 	if firstResult.Error == nil {
@@ -499,10 +561,6 @@ func (s *Server) listNeedleDisplayByConversation(addr, bucket, conversation stri
 		query = query.Where("name like ? and created_at >= ?",
 			conversation+"_%",
 			time.Date(2025, 3, 7, 0, 0, 0, 0, time.UTC))
-	}
-
-	if bucket != "" {
-		query = query.Where("bucket = ?", bucket)
 	}
 
 	result = query.Order("id desc").Limit(limit).Offset(offset).Find(&needles)
@@ -584,11 +642,14 @@ func (s *Server) listConversation(addr, bucket string, offset, limit int) ([]str
 
 func (s *Server) getConversation(ctx context.Context, conversation, addr, bucket string, offset, limit int) ([]string, error) {
 	var gconversation types.Conversation
-	res := s.gdb.Where(&types.Conversation{
-		Name:   conversation,
-		Owner:  addr,
-		Bucket: bucket,
-	}).Find(&gconversation)
+	cq := s.gdb.Where("name = ?", conversation)
+	if addr != "" {
+		cq = cq.Where("LOWER(owner) = ?", strings.ToLower(addr))
+	}
+	if bucket != "" {
+		cq = cq.Where("bucket = ?", bucket)
+	}
+	res := cq.Find(&gconversation)
 	if res.Error != nil {
 		return nil, res.Error
 	}
@@ -597,12 +658,15 @@ func (s *Server) getConversation(ctx context.Context, conversation, addr, bucket
 	}
 
 	var needles []types.Needle
-	query := s.gdb.Model(&types.Needle{
-		Owner:  addr,
-		Bucket: bucket,
-	}).Where("name like ? and created_at >= ?",
+	query := s.gdb.Model(&types.Needle{}).Where("name like ? and created_at >= ?",
 		conversation+"_%",
 		time.Date(2025, 3, 7, 0, 0, 0, 0, time.UTC))
+	if addr != "" {
+		query = query.Where("LOWER(owner) = ?", strings.ToLower(addr))
+	}
+	if bucket != "" {
+		query = query.Where("bucket = ?", bucket)
+	}
 
 	result := query.Order("id asc").Limit(limit).Offset(offset).Find(&needles)
 	if result.Error != nil {

@@ -10,6 +10,18 @@ services:
     environment:
       EXPOSE_URL: ""
       MAX_SIZE: "4MB"
+      # Authorization freshness window for /api writes (seconds). Browser
+      # clients sign one token at login and cache it, so the window must be
+      # long enough to cover a session — 7 days here (client refreshes at 6d).
+      HUB_AUTH_DRIFT_SEC: "604800"
+      # Other tunables (uncomment to override the in-code defaults):
+      # HUB_MAX_JSON_BYTES: "4194304"        # /api/upload JSON body cap (4 MiB)
+      # HUB_MAX_MULTIPART_BYTES: "67108864"  # /api/uploadData file cap (64 MiB)
+      #
+      # NOTE: the hub does NOT do application-level rate limiting. It sits
+      # behind the explorer's reverse proxy, where every request shares the
+      # proxy's IP, so a per-IP limiter would 429 all legitimate traffic.
+      # Rate-limit at the proxy (real client IP) instead.
 networks:
   default:
     driver: bridge

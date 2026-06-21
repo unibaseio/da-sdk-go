@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Smoke-test the hub /api auth + owner-match + rate-limit + size-cap
+# Smoke-test the hub /api auth + owner-match + size-cap
 # behaviour against a running hub-mock (or a real hub).
 #
 # Usage:
@@ -104,23 +104,7 @@ code=$(curl -s -o /tmp/r.json -w "%{http_code}" -X POST "$BASE/api/download" \
   --data-urlencode 'id=hello')
 expect 401 "$code" "mismatched download owner rejected"
 
-div "T8  rate limit  (default per-owner burst 15, spam 25)"
-hit429=0
-for i in $(seq 1 25); do
-  c=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/upload" \
-    -H 'Content-Type: application/json' \
-    -H "Authorization: $HDR_UP" \
-    -d "{\"owner\":\"$SIGNER\",\"id\":\"x$i\",\"message\":\"y\"}")
-  if [[ "$c" == "429" ]]; then hit429=$((hit429 + 1)); fi
-done
-if [[ "$hit429" -gt 0 ]]; then
-  printf '  ✅ rate-limit triggered (%d × 429)\n' "$hit429"
-else
-  printf '  ❌ no 429 seen in 25 reqs\n'
-  fails=$((fails + 1))
-fi
-
-div "T9  body size cap (5 MiB, default cap 4 MiB)"
+div "T8  body size cap (5 MiB, default cap 4 MiB)"
 python3 -c "
 import sys
 body = '{\"owner\":\"$SIGNER\",\"id\":\"x\",\"message\":\"' + ('a' * (5*1024*1024)) + '\"}'

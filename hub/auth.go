@@ -30,11 +30,14 @@ const (
 	defaultMaxJSONBytes      int64 = 4 << 20  // 4 MB for /upload (JSON message)
 	defaultMaxMultipartBytes int64 = 64 << 20 // 64 MB for /uploadData (file)
 
-	// rate limit defaults
-	defaultIPReqPerSec    = 10.0
-	defaultIPBurst        = 30
-	defaultOwnerReqPerSec = 5.0
-	defaultOwnerBurst     = 15
+	// rate limit defaults. Per-IP is generous on purpose: legitimate explorer
+	// traffic all arrives from the explorer's reverse-proxy IP (one IP, many
+	// users), so the cap must clear their aggregate while still throttling a
+	// single abusive host hammering hundreds of req/s from its own IP.
+	defaultIPReqPerSec    = 50.0
+	defaultIPBurst        = 100
+	defaultOwnerReqPerSec = 20.0
+	defaultOwnerBurst     = 40
 )
 
 // env helpers now live in lib/env (Int64/Float/Int); HUB_* keys stay local
@@ -121,9 +124,40 @@ func abortWithAuthError(c *gin.Context, err error) {
 	c.AbortWithStatusJSON(http.StatusUnauthorized, lerror.ToAPIError("hub", err))
 }
 
+// abortWithBadRequest is for client errors on public (unauthenticated) reads —
+// e.g. a missing or malformed owner — where a 401 would be misleading.
+func abortWithBadRequest(c *gin.Context, err error) {
+	c.AbortWithStatusJSON(http.StatusBadRequest, lerror.ToAPIError("hub", err))
+}
+
 // ----------------------------------------------------------------------------
 // Owner ownership check (signer must own the namespace they're touching)
 // ----------------------------------------------------------------------------
+
+// CanonOwner normalizes an owner to the canonical lowercase storage form.
+// Ethereum addresses are case-insensitive — EIP-55 mixed case is only a UI
+// checksum — so keying storage on lowercase stops one wallet from splitting
+// into separate mixed-case vs lowercase namespaces. Non-address owners
+// (legacy string ids) are lowercased too, which is harmless for matching.
+func CanonOwner(owner string) string {
+	return strings.ToLower(owner)
+}
+
+// ownerCandidates returns the owner forms to try when reading, newest-scheme
+// first: the canonical lowercase form (how we store going forward), then the
+// EIP-55 checksum form (how legacy data was stored). Deduped.
+func ownerCandidates(owner string) []string {
+	lc := strings.ToLower(owner)
+	out := []string{lc}
+	if common.IsHexAddress(owner) {
+		if cs := common.HexToAddress(owner).Hex(); cs != lc {
+			out = append(out, cs)
+		}
+	} else if owner != lc {
+		out = append(out, owner)
+	}
+	return out
+}
 
 // CtxAuthAddr returns the lowercased 0x... address stored by AuthMiddleware,
 // or "" if auth wasn't applied (e.g. on bypass routes).
@@ -168,17 +202,42 @@ func RequireOwnerMatch(c *gin.Context, owner string) bool {
 }
 
 // ResolveOwnerForList is the read-side variant used by list/get endpoints.
-// Behavior:
-//   - if owner is empty, default to the signer's own address
-//   - if owner is provided, it must equal the signer (and be a valid ETH addr)
+// These run on the public (unauthenticated) /api group, so the common case
+// has no signer. Behavior:
+//   - no signer (public read): owner is OPTIONAL. Empty means "no filter —
+//     list everything", which the explorer's global /agents and /memory
+//     browse views rely on. A provided owner must be a valid address and
+//     simply scopes the listing to that owner.
+//   - signer present (e.g. if a route is ever moved to the authed group):
+//     empty owner defaults to the signer; an explicit owner must match it.
+//
+// Stored content is client-encrypted, so an unscoped listing exposes only
+// ciphertext plus public metadata (bucket / needle names) — the same data
+// a block explorer shows.
+//
+// The owner is returned in canonical lowercase form (CanonOwner). Ethereum
+// addresses are case-insensitive, so callers must match it case-insensitively
+// (the gorm queries use LOWER(owner)=?, and logFSRead also tries the EIP-55
+// checksum form for legacy data). This keeps a single wallet from splitting
+// into mixed-case vs lowercase namespaces regardless of what case the client
+// sent.
 //
 // Returns (resolvedOwner, ok). When ok is false, the response has already
-// been written and the handler must return.
+// been written and the handler must return. An empty resolvedOwner with
+// ok==true means "list all" — the gorm queries omit a zero-value owner from
+// the WHERE clause, so this is the correct unscoped query.
 func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 	signer := CtxAuthAddr(c)
+
 	if signer == "" {
-		abortWithAuthError(c, fmt.Errorf("no signer in context"))
-		return "", false
+		if owner == "" {
+			return "", true
+		}
+		if !common.IsHexAddress(owner) {
+			abortWithBadRequest(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
+			return "", false
+		}
+		return CanonOwner(owner), true
 	}
 
 	if owner == "" {
@@ -186,7 +245,7 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 	}
 
 	if !common.IsHexAddress(owner) {
-		abortWithAuthError(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
+		abortWithBadRequest(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
 		return "", false
 	}
 
@@ -195,12 +254,27 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 		return "", false
 	}
 
-	return strings.ToLower(owner), true
+	return CanonOwner(owner), true
 }
 
 // ----------------------------------------------------------------------------
-// Rate limiting (two-tier: per-IP and per-owner)
+// Rate limiting (per-IP + per-owner)
 // ----------------------------------------------------------------------------
+//
+// Reinstated as a per-IP guard. It works correctly when abusive hosts connect
+// from their own IP (the case we observed: a bot hammering /api/download from
+// a dedicated IP). Legitimate explorer traffic arrives from the explorer's
+// reverse-proxy IP — one IP shared by many users — so the per-IP cap is set
+// generously (see defaults above) to clear that aggregate while still cutting
+// off a single host doing hundreds of req/s.
+//
+// NOTE: behind a proxy, c.ClientIP() reflects the proxy IP unless gin is told
+// to trust it (SetTrustedProxies) and the proxy forwards X-Forwarded-For. We
+// deliberately do NOT trust-all + read XFF here, because that lets any client
+// spoof its IP and dodge the limit. So this throttles per *connecting* IP,
+// which is exactly right for direct abusers and safe (just coarse) for proxied
+// traffic. The download negative cache is the primary flood absorber; this is
+// defense-in-depth.
 
 type limiterRegistry struct {
 	mu       sync.Mutex
@@ -228,11 +302,8 @@ func (lr *limiterRegistry) get(key string) *rate.Limiter {
 	return l
 }
 
-// RateLimit produces a middleware that enforces:
-//   - per-IP rate (DOS protection, applies before auth-recovered identity)
-//   - per-owner rate (applied when AuthMiddleware has set ctxAuthAddrKey)
-//
-// Returns 429 on either tier exceedance.
+// RateLimit enforces a per-IP token bucket, plus a per-owner bucket once
+// AuthMiddleware has recovered a signer. Returns 429 on either tier.
 func RateLimit() gin.HandlerFunc {
 	ipRPS := env.Float("HUB_RATE_IP_RPS", defaultIPReqPerSec)
 	ipBurst := env.Int("HUB_RATE_IP_BURST", defaultIPBurst)
@@ -243,19 +314,17 @@ func RateLimit() gin.HandlerFunc {
 	ownerReg := newLimiterRegistry(ownerRPS, ownerBurst)
 
 	return func(c *gin.Context) {
-		// per-IP first
 		ip := c.ClientIP()
 		if ip != "" && !ipReg.get(ip).Allow() {
 			logger.Warnf("rate limit hit (ip) from %s %s", ip, c.Request.URL.Path)
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, lerror.ToAPIError("hub", fmt.Errorf("rate limit exceeded (ip)")))
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, lerror.ToAPIError("hub", fmt.Errorf("rate limit exceeded")))
 			return
 		}
 
-		// per-owner if available (set by AuthMiddleware in the chain before us)
 		if addr := CtxAuthAddr(c); addr != "" {
 			if !ownerReg.get(addr).Allow() {
 				logger.Warnf("rate limit hit (owner) from %s %s", addr, c.Request.URL.Path)
-				c.AbortWithStatusJSON(http.StatusTooManyRequests, lerror.ToAPIError("hub", fmt.Errorf("rate limit exceeded (owner)")))
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, lerror.ToAPIError("hub", fmt.Errorf("rate limit exceeded")))
 				return
 			}
 		}

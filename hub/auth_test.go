@@ -68,7 +68,6 @@ func newTestRouter() *gin.Engine {
 	g := r.Group("/api")
 	g.Use(MaxBodySize())
 	g.Use(AuthMiddleware())
-	g.Use(RateLimit())
 
 	// fake info endpoint (bypassed)
 	g.GET("/info", func(c *gin.Context) {
@@ -214,6 +213,88 @@ func TestResolveOwnerForList_DefaultsToSigner(t *testing.T) {
 	}
 }
 
+// newPublicTestRouter mirrors the public, read-only /api group in server.go:
+// body-size cap only, NO AuthMiddleware (and no rate limiting).
+func newPublicTestRouter() *gin.Engine {
+	r := gin.New()
+	g := r.Group("/api")
+	g.Use(MaxBodySize())
+
+	// fake list endpoint that exercises ResolveOwnerForList on the public path
+	g.GET("/listBucket", func(c *gin.Context) {
+		owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+		if !ok {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "owner": owner})
+	})
+	return r
+}
+
+const otherAddr = "0x1111111111111111111111111111111111111111"
+
+func TestPublicList_NoAuthAcceptsExplicitOwner(t *testing.T) {
+	r := newPublicTestRouter()
+	w := httptest.NewRecorder()
+	// No Authorization header, explicit owner (someone else's) — must succeed.
+	req := httptest.NewRequest("GET", "/api/listBucket?owner="+otherAddr, nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200 on public list, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(strings.ToLower(w.Body.String()), strings.ToLower(otherAddr)) {
+		t.Errorf("expected owner addr in response, got %s", w.Body.String())
+	}
+}
+
+func TestPublicList_CanonicalizesOwnerToLowercase(t *testing.T) {
+	// Ethereum addresses are case-insensitive (EIP-55 case is just a UI
+	// checksum). The hub canonicalizes owner to lowercase so a wallet can't
+	// split into mixed-case vs lowercase namespaces; reads then match the
+	// stored rows via LOWER(owner) and the legacy-checksum fallback.
+	r := newPublicTestRouter()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/listBucket?owner="+testAddr, nil) // testAddr is EIP-55 mixed case
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"owner":"`+strings.ToLower(testAddr)+`"`) {
+		t.Errorf("owner not canonicalized to lowercase; want %s, got %s", strings.ToLower(testAddr), w.Body.String())
+	}
+}
+
+func TestPublicList_NoAuthNoOwnerListsAll(t *testing.T) {
+	r := newPublicTestRouter()
+	w := httptest.NewRecorder()
+	// No auth and no owner: owner is optional on public reads — this is the
+	// explorer's global browse view, which lists every owner's entries.
+	// Resolves to "" (no filter → list all), so the handler runs and 200s.
+	req := httptest.NewRequest("GET", "/api/listBucket", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200 (list-all) when owner omitted on public list, got %d body=%s", w.Code, w.Body.String())
+	}
+	// resolved owner is empty in the response — the unscoped query marker.
+	if !strings.Contains(w.Body.String(), `"owner":""`) {
+		t.Errorf("expected empty resolved owner (list-all) in response, got %s", w.Body.String())
+	}
+}
+
+func TestPublicList_NoAuthRejectsBadOwner(t *testing.T) {
+	r := newPublicTestRouter()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/listBucket?owner=not-an-address", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 on malformed owner, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestInfoBypass(t *testing.T) {
 	r := newTestRouter()
 	w := httptest.NewRecorder()
@@ -245,27 +326,25 @@ func TestMaxBodySize_RejectsHugePayload(t *testing.T) {
 	}
 }
 
-func TestRateLimit_PerOwnerKicks(t *testing.T) {
-	t.Setenv("HUB_RATE_OWNER_RPS", "1")
-	t.Setenv("HUB_RATE_OWNER_BURST", "2")
-	t.Setenv("HUB_RATE_IP_RPS", "1000") // make IP limiter effectively no-op
-	t.Setenv("HUB_RATE_IP_BURST", "1000")
-	r := newTestRouter()
-	hdr := buildHeader(t, testSK, "upload", time.Now().Unix())
+func TestRateLimit_PerIPKicks(t *testing.T) {
+	t.Setenv("HUB_RATE_IP_RPS", "1")
+	t.Setenv("HUB_RATE_IP_BURST", "3")
+	r := gin.New()
+	g := r.Group("/api")
+	g.Use(RateLimit())
+	g.GET("/listBucket", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 
-	hits := 0
-	for i := 0; i < 6; i++ {
+	hits429 := 0
+	for i := 0; i < 10; i++ {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/api/upload",
-			strings.NewReader(`{"owner":"`+testAddr+`","id":"x","message":"y"}`))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", hdr)
+		req := httptest.NewRequest("GET", "/api/listBucket", nil)
+		req.RemoteAddr = "203.0.113.7:1234" // same IP each time → shared bucket
 		r.ServeHTTP(w, req)
 		if w.Code == http.StatusTooManyRequests {
-			hits++
+			hits429++
 		}
 	}
-	if hits == 0 {
-		t.Fatalf("expected at least one 429 in 6 rapid requests")
+	if hits429 == 0 {
+		t.Fatalf("expected at least one 429 from a single IP doing 10 rapid requests (burst=3)")
 	}
 }
