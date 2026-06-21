@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	contract "github.com/unibaseio/da-sdk-go/contract/v2"
 	"github.com/unibaseio/da-sdk-go/docs"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
@@ -71,6 +72,10 @@ type Server struct {
 
 	// negative cache of download keys confirmed missing (download-flood guard)
 	missCache *missCache
+
+	// lazily-built chain client for the /api/seal path (hub-signed AddPiece)
+	cmMu sync.Mutex
+	cm   *contract.ContractManage
 
 	httpServer *http.Server
 
@@ -185,6 +190,7 @@ func (s *Server) registRoute() {
 	authed.Use(RateLimit())
 
 	s.addUpload(authed)
+	s.addSeal(authed)
 }
 
 // ListenAndServe starts the HTTP server

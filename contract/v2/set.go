@@ -62,6 +62,22 @@ func (c *ContractManage) Claim() error {
 	return c.CheckTx(tx.Hash())
 }
 
+// AddPieceCost is the exact token amount AddPiece locks (IncreaseAllowance) for
+// a piece, in wei. Single source of truth shared by AddPiece (v1) and the hub
+// /api/seal v2 path (which must return a cost matching what the contract locks,
+// or the client's IncreaseAllowance underfunds and addPiece reverts). pc.Start/
+// Expire/Price must already be resolved (non-zero).
+func AddPieceCost(pc types.PieceCore) *big.Int {
+	_size := 1 + (pc.Size-1)/(31*int64(pc.Policy.K))
+	_size = 1 + (_size-1)/(32*1024)
+
+	val := big.NewInt(int64(pc.Expire-pc.Start) * _size)
+	val.Mul(val, pc.Price)
+	val.Add(val, big.NewInt(int64(com.DefaultStreamPrice)))
+	val.Mul(val, big.NewInt(int64(pc.Policy.N)))
+	return val
+}
+
 func (c *ContractManage) UpdateEpoch() (uint64, error) {
 	ctx, cancle := context.WithTimeout(context.TODO(), 1*time.Minute)
 	defer cancle()
@@ -179,13 +195,7 @@ func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
 		pc.Price = big.NewInt(int64(com.DefaultReplicaPrice))
 	}
 
-	_size := 1 + (pc.Size-1)/(31*int64(pc.Policy.K))
-	_size = 1 + (_size-1)/(32*1024)
-
-	val := big.NewInt(int64(pc.Expire-pc.Start) * _size)
-	val.Mul(val, pc.Price)
-	val.Add(val, big.NewInt(int64(com.DefaultStreamPrice)))
-	val.Mul(val, big.NewInt(int64(pc.Policy.N)))
+	val := AddPieceCost(pc)
 	com.Logger.Debug("submitpiece val: ", utils.FormatEth(val))
 
 	au, err := c.MakeAuth()
