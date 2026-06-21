@@ -146,12 +146,20 @@ func (s *Server) seal(c *gin.Context) {
 	pc.Expire = expire
 	pc.Price = price
 
+	// idempotency: da_cid is content-addressed, so a retried seal of the same
+	// blob yields the same piece. If it is already on chain, don't re-register.
+	serial, _ := cm.GetPieceSerial(pc.Name)
+
 	if register == "hub" {
 		// v1: hub signs AddPiece + pays gas; client needs no chain interaction.
-		txn, err := cm.AddPiece(pc)
-		if err != nil {
-			c.JSON(599, lerror.ToAPIError("hub", err))
-			return
+		txn := ""
+		if serial == 0 {
+			txn, err = cm.AddPiece(pc)
+			if err != nil {
+				c.JSON(599, lerror.ToAPIError("hub", err))
+				return
+			}
+			serial, _ = cm.GetPieceSerial(pc.Name) // best-effort
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"register":     "hub",
@@ -159,7 +167,8 @@ func (s *Server) seal(c *gin.Context) {
 			"size":         pc.Size,
 			"policy":       gin.H{"n": policy.N, "k": policy.K},
 			"expire":       expire,
-			"add_piece_tx": txn,
+			"add_piece_tx": txn, // "" if already registered (idempotent retry)
+			"piece_serial": serial,
 		})
 		return
 	}
@@ -183,5 +192,9 @@ func (s *Server) seal(c *gin.Context) {
 		"cost":           contract.AddPieceCost(pc).String(),
 		"piece_contract": cm.PieceAddr.Hex(),
 		"token_contract": cm.TokenAddr.Hex(),
+		"piece_serial":   serial, // >0 if already registered (idempotent)
+		// client must AddPiece before this epoch or the piece falls out of
+		// stream staging (~15 min) and is under-replicated (spec Q2).
+		"staging_deadline_epoch": pc.Start + uint64(com.DelaySubmit),
 	})
 }
