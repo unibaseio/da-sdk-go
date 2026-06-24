@@ -42,40 +42,42 @@ func (s *Server) getMemoryOverview(c *gin.Context) {
 // listMemoryStatByGet godoc
 //
 //	@Summary		Per-owner memory stats (paginated)
-//	@Description	List each wallet's memory entry count and total size (GB), grouped by owner, ordered by size desc. Supports pagination.
+//	@Description	List each wallet's memory entry count and total size (GB), grouped by owner, ordered by size desc. Pass owner to filter to a single wallet (case-insensitive); result stays a list (0 or 1 item).
 //	@Tags			statistics
 //	@Accept			json
 //	@Produce		json
-//	@Param			offset	query		int	false	"pagination offset" default(0)
-//	@Param			length	query		int	false	"page size (max 100)" default(32)
+//	@Param			owner	query		string	false	"filter to a single wallet address (case-insensitive)"
+//	@Param			offset	query		int		false	"pagination offset" default(0)
+//	@Param			length	query		int		false	"page size (max 100)" default(32)
 //	@Success		200		{object}	types.MemoryStatResult
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/memoryStat [get]
 func (s *Server) listMemoryStatByGet(c *gin.Context) {
 	offset, _ := strconv.Atoi(c.Query("offset"))
 	length, _ := strconv.Atoi(c.Query("length"))
-	s.serveMemoryStat(c, offset, length)
+	s.serveMemoryStat(c, c.Query("owner"), offset, length)
 }
 
 // listMemoryStatByPost godoc
 //
 //	@Summary		Per-owner memory stats (paginated, POST)
-//	@Description	List each wallet's memory entry count and total size (GB), grouped by owner, ordered by size desc. Supports pagination.
+//	@Description	List each wallet's memory entry count and total size (GB), grouped by owner, ordered by size desc. Pass owner to filter to a single wallet (case-insensitive); result stays a list (0 or 1 item).
 //	@Tags			statistics
 //	@Accept			application/x-www-form-urlencoded
 //	@Produce		json
-//	@Param			offset	formData	int	false	"pagination offset" default(0)
-//	@Param			length	formData	int	false	"page size (max 100)" default(32)
+//	@Param			owner	formData	string	false	"filter to a single wallet address (case-insensitive)"
+//	@Param			offset	formData	int		false	"pagination offset" default(0)
+//	@Param			length	formData	int		false	"page size (max 100)" default(32)
 //	@Success		200		{object}	types.MemoryStatResult
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/memoryStat [post]
 func (s *Server) listMemoryStatByPost(c *gin.Context) {
 	offset, _ := strconv.Atoi(c.PostForm("offset"))
 	length, _ := strconv.Atoi(c.PostForm("length"))
-	s.serveMemoryStat(c, offset, length)
+	s.serveMemoryStat(c, c.PostForm("owner"), offset, length)
 }
 
-func (s *Server) serveMemoryStat(c *gin.Context, offset, length int) {
+func (s *Server) serveMemoryStat(c *gin.Context, owner string, offset, length int) {
 	if length <= 0 {
 		length = 32
 	}
@@ -85,8 +87,8 @@ func (s *Server) serveMemoryStat(c *gin.Context, offset, length int) {
 	if offset < 0 {
 		offset = 0
 	}
-	// paginated from the background-computed snapshot (no inline DB scan)
-	c.JSON(http.StatusOK, s.memoryStatPage(offset, length))
+	// served (and filtered) from the background-computed snapshot (no inline DB scan)
+	c.JSON(http.StatusOK, s.memoryStatPage(owner, offset, length))
 }
 
 // @Summary Get statistics by POST

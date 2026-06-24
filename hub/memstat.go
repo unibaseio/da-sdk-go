@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,21 +95,37 @@ func (s *Server) memoryOverviewSnapshot() types.MemoryOverview {
 	return ov
 }
 
-// memoryStatPage paginates the cached per-owner list in memory.
-func (s *Server) memoryStatPage(offset, length int) types.MemoryStatResult {
+// memoryStatPage paginates the cached per-owner list in memory. When owner is
+// non-empty it filters to that single wallet (case-insensitive) — the result
+// is still a list (0 or 1 item).
+func (s *Server) memoryStatPage(owner string, offset, length int) types.MemoryStatResult {
 	res := types.MemoryStatResult{Offset: offset, Length: length, Items: []types.MemoryStat{}}
 	snap := s.memStat.get()
 	if snap == nil {
 		return res
 	}
-	res.Total = int64(len(snap.owners))
 	res.ComputedAt = snap.computedAt.Unix()
-	if offset < len(snap.owners) {
-		end := offset + length
-		if end > len(snap.owners) {
-			end = len(snap.owners)
+
+	items := snap.owners
+	if owner != "" {
+		// snapshot owners are lowercased (GROUP BY LOWER(owner)); match the same.
+		want := strings.ToLower(strings.TrimSpace(owner))
+		items = []types.MemoryStat{}
+		for _, o := range snap.owners {
+			if o.Owner == want {
+				items = []types.MemoryStat{o}
+				break
+			}
 		}
-		res.Items = snap.owners[offset:end]
+	}
+
+	res.Total = int64(len(items))
+	if offset < len(items) {
+		end := offset + length
+		if end > len(items) {
+			end = len(items)
+		}
+		res.Items = items[offset:end]
 	}
 	return res
 }
