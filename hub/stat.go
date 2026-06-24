@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -36,12 +35,8 @@ func (s *Server) addStat(g *gin.RouterGroup) {
 //	@Failure		599	{object}	lerror.APIError
 //	@Router			/api/memoryOverview [get]
 func (s *Server) getMemoryOverview(c *gin.Context) {
-	ov, err := s.memoryOverview()
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
-	c.JSON(http.StatusOK, ov)
+	// served from the background-computed snapshot (no inline DB scan)
+	c.JSON(http.StatusOK, s.memoryOverviewSnapshot())
 }
 
 // listMemoryStatByGet godoc
@@ -90,12 +85,8 @@ func (s *Server) serveMemoryStat(c *gin.Context, offset, length int) {
 	if offset < 0 {
 		offset = 0
 	}
-	res, err := s.listMemoryStat(offset, length)
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
-	c.JSON(http.StatusOK, res)
+	// paginated from the background-computed snapshot (no inline DB scan)
+	c.JSON(http.StatusOK, s.memoryStatPage(offset, length))
 }
 
 // @Summary Get statistics by POST
