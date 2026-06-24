@@ -31,6 +31,7 @@ func main() {
 	g.Use(hub.MaxBodySize())
 	g.Use(hub.AuthMiddleware())
 	g.Use(hub.RateLimit())
+	g.Use(hub.RateLimit())
 
 	// bypassed
 	g.GET("/info", func(c *gin.Context) {

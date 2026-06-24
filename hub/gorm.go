@@ -186,6 +186,63 @@ func (s *Server) listAccount(offset, limit int) ([]types.Account, error) {
 	return accounts, nil
 }
 
+// listMemoryStat returns one page of per-owner memory usage: entry count and
+// total bytes, grouped by owner (case-insensitive, so mixed-case and lowercase
+// variants of the same wallet merge). Ordered by bytes desc (biggest first).
+func (s *Server) listMemoryStat(offset, limit int) (types.MemoryStatResult, error) {
+	res := types.MemoryStatResult{Offset: offset, Length: limit, Items: []types.MemoryStat{}}
+
+	// total distinct owners — for pagination
+	var total int64
+	if err := s.gdb.Model(&types.Needle{}).
+		Select("COUNT(DISTINCT LOWER(owner))").Row().Scan(&total); err != nil {
+		return res, err
+	}
+	res.Total = total
+
+	var rows []types.MemoryStat
+	err := s.gdb.Model(&types.Needle{}).
+		Select("LOWER(owner) as owner, count(*) as count, COALESCE(SUM(size),0) as bytes").
+		Group("LOWER(owner)").
+		Order("bytes desc").
+		Limit(limit).Offset(offset).
+		Scan(&rows).Error
+	if err != nil {
+		return res, err
+	}
+	for i := range rows {
+		rows[i].GB = float64(rows[i].Bytes) / 1e9
+	}
+	res.Items = rows
+	return res, nil
+}
+
+// memoryOverview returns the dashboard summary: total distinct addresses
+// (accounts), wallets that have at least one memory entry, total entry count,
+// and total stored bytes/GB.
+func (s *Server) memoryOverview() (types.MemoryOverview, error) {
+	var ov types.MemoryOverview
+
+	if err := s.gdb.Model(&types.Account{}).Count(&ov.TotalAddresses).Error; err != nil {
+		return ov, err
+	}
+	if err := s.gdb.Model(&types.Needle{}).
+		Select("COUNT(DISTINCT LOWER(owner))").Row().Scan(&ov.WalletsWithMemory); err != nil {
+		return ov, err
+	}
+	if err := s.gdb.Model(&types.Needle{}).Count(&ov.MemoryCount).Error; err != nil {
+		return ov, err
+	}
+	var bytes int64
+	if err := s.gdb.Model(&types.Needle{}).
+		Select("COALESCE(SUM(size),0)").Row().Scan(&bytes); err != nil {
+		return ov, err
+	}
+	ov.MemoryBytes = bytes
+	ov.MemoryGB = float64(bytes) / 1e9
+	return ov, nil
+}
+
 func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) {
 	var buckets []types.Bucket
 	q := s.gdb
