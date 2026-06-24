@@ -63,6 +63,10 @@ func (s *Server) loadGORM() {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_name ON needles(owner, name);")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket ON needles(owner, bucket);")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket_name ON needles(owner, bucket, name);")
+	// expression index so the case-insensitive owner queries (LOWER(owner) used
+	// by the list/get endpoints and the memory-stats aggregation) can use an
+	// index instead of full table scans.
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner ON needles(LOWER(owner));")
 
 	s.gdb = db
 
@@ -186,61 +190,42 @@ func (s *Server) listAccount(offset, limit int) ([]types.Account, error) {
 	return accounts, nil
 }
 
-// listMemoryStat returns one page of per-owner memory usage: entry count and
-// total bytes, grouped by owner (case-insensitive, so mixed-case and lowercase
-// variants of the same wallet merge). Ordered by bytes desc (biggest first).
-func (s *Server) listMemoryStat(offset, limit int) (types.MemoryStatResult, error) {
-	res := types.MemoryStatResult{Offset: offset, Length: limit, Items: []types.MemoryStat{}}
+// computeMemStats runs the heavy aggregation ONCE: a single GROUP BY over
+// needles yields the full per-owner list, from which the overview totals are
+// derived (no separate COUNT/SUM scans). This is a full-table scan and must
+// NOT be run inline per request (it 504'd behind the proxy on a large table) —
+// it's driven by the background refresh loop and the result is cached.
+//
+// Grouping/counting use LOWER(owner) so mixed-case and lowercase variants of
+// the same wallet merge (backed by idx_needles_lower_owner).
+func (s *Server) computeMemStats() (types.MemoryOverview, []types.MemoryStat, error) {
+	var ov types.MemoryOverview
 
-	// total distinct owners — for pagination
-	var total int64
-	if err := s.gdb.Model(&types.Needle{}).
-		Select("COUNT(DISTINCT LOWER(owner))").Row().Scan(&total); err != nil {
-		return res, err
+	if err := s.gdb.Model(&types.Account{}).Count(&ov.TotalAddresses).Error; err != nil {
+		return ov, nil, err
 	}
-	res.Total = total
 
-	var rows []types.MemoryStat
+	owners := []types.MemoryStat{}
 	err := s.gdb.Model(&types.Needle{}).
 		Select("LOWER(owner) as owner, count(*) as count, COALESCE(SUM(size),0) as bytes").
 		Group("LOWER(owner)").
 		Order("bytes desc").
-		Limit(limit).Offset(offset).
-		Scan(&rows).Error
+		Scan(&owners).Error
 	if err != nil {
-		return res, err
+		return ov, nil, err
 	}
-	for i := range rows {
-		rows[i].GB = float64(rows[i].Bytes) / 1e9
-	}
-	res.Items = rows
-	return res, nil
-}
 
-// memoryOverview returns the dashboard summary: total distinct addresses
-// (accounts), wallets that have at least one memory entry, total entry count,
-// and total stored bytes/GB.
-func (s *Server) memoryOverview() (types.MemoryOverview, error) {
-	var ov types.MemoryOverview
-
-	if err := s.gdb.Model(&types.Account{}).Count(&ov.TotalAddresses).Error; err != nil {
-		return ov, err
+	var totalCount, totalBytes int64
+	for i := range owners {
+		owners[i].GB = float64(owners[i].Bytes) / 1e9
+		totalCount += owners[i].Count
+		totalBytes += owners[i].Bytes
 	}
-	if err := s.gdb.Model(&types.Needle{}).
-		Select("COUNT(DISTINCT LOWER(owner))").Row().Scan(&ov.WalletsWithMemory); err != nil {
-		return ov, err
-	}
-	if err := s.gdb.Model(&types.Needle{}).Count(&ov.MemoryCount).Error; err != nil {
-		return ov, err
-	}
-	var bytes int64
-	if err := s.gdb.Model(&types.Needle{}).
-		Select("COALESCE(SUM(size),0)").Row().Scan(&bytes); err != nil {
-		return ov, err
-	}
-	ov.MemoryBytes = bytes
-	ov.MemoryGB = float64(bytes) / 1e9
-	return ov, nil
+	ov.WalletsWithMemory = int64(len(owners))
+	ov.MemoryCount = totalCount
+	ov.MemoryBytes = totalBytes
+	ov.MemoryGB = float64(totalBytes) / 1e9
+	return ov, owners, nil
 }
 
 func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) {

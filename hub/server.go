@@ -72,6 +72,10 @@ type Server struct {
 	// negative cache of download keys confirmed missing (download-flood guard)
 	missCache *missCache
 
+	// cached per-owner memory stats, recomputed in the background (the live
+	// aggregation is a full-table scan that timed out behind the proxy)
+	memStat *memStatCache
+
 	httpServer *http.Server
 
 	// Add channels for graceful shutdown
@@ -108,6 +112,7 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		lfs:           make(map[string]*logfs.LogFS),
 
 		missCache: newMissCache(),
+		memStat:   &memStatCache{},
 
 		shutdownChan:   make(chan struct{}),
 		checkpointStop: make(chan struct{}),
@@ -130,6 +135,8 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	s.statManager = sm
 
 	go s.uploadTo()
+
+	s.startMemStats(context.Background())
 
 	s.registRoute()
 

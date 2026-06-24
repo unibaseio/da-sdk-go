@@ -2,6 +2,7 @@ package hub
 
 import (
 	"testing"
+	"time"
 
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"gorm.io/driver/sqlite"
@@ -26,7 +27,7 @@ func newStatTestServer(t *testing.T) *Server {
 	if err := db.AutoMigrate(&types.Needle{}, &types.Account{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return &Server{gdb: db}
+	return &Server{gdb: db, memStat: &memStatCache{}}
 }
 
 func seedNeedle(t *testing.T, s *Server, owner string, size uint64) {
@@ -43,141 +44,127 @@ func seedAccount(t *testing.T, s *Server, name string) {
 	}
 }
 
-func TestMemoryOverview(t *testing.T) {
+func TestComputeMemStats_AggregatesPerOwner(t *testing.T) {
 	s := newStatTestServer(t)
-	// 5 known addresses on the hub...
-	for _, a := range []string{"0xa1", "0xa2", "0xa3", "0xa4", "0xa5"} {
-		seedAccount(t, s, a)
-	}
-	// ...but only 2 of them actually have memory entries.
-	seedNeedle(t, s, "0xA1", 100) // mixed case; merges with 0xa1 below
-	seedNeedle(t, s, "0xa1", 200)
-	seedNeedle(t, s, "0xa2", 50)
+	// owner A: 3 entries, 100+200+300 = 600 bytes (mixed + lower case → merge)
+	seedNeedle(t, s, "0xAAAa000000000000000000000000000000000001", 100)
+	seedNeedle(t, s, "0xAAAa000000000000000000000000000000000001", 200)
+	seedNeedle(t, s, "0xaaaa000000000000000000000000000000000001", 300)
+	// owner B: 1 entry, 50 bytes
+	seedNeedle(t, s, "0xBBBB000000000000000000000000000000000002", 50)
+	// 3 accounts on the hub (one has no memory)
+	seedAccount(t, s, "0xaaaa000000000000000000000000000000000001")
+	seedAccount(t, s, "0xbbbb000000000000000000000000000000000002")
+	seedAccount(t, s, "0xcccc000000000000000000000000000000000003")
 
-	ov, err := s.memoryOverview()
+	ov, owners, err := s.computeMemStats()
 	if err != nil {
-		t.Fatalf("memoryOverview: %v", err)
+		t.Fatalf("computeMemStats: %v", err)
 	}
-	if ov.TotalAddresses != 5 {
-		t.Errorf("TotalAddresses: want 5, got %d", ov.TotalAddresses)
+
+	if ov.TotalAddresses != 3 {
+		t.Errorf("TotalAddresses: want 3, got %d", ov.TotalAddresses)
 	}
 	if ov.WalletsWithMemory != 2 {
 		t.Errorf("WalletsWithMemory: want 2 (case-merged), got %d", ov.WalletsWithMemory)
 	}
-	if ov.MemoryCount != 3 {
-		t.Errorf("MemoryCount: want 3, got %d", ov.MemoryCount)
+	if ov.MemoryCount != 4 {
+		t.Errorf("MemoryCount: want 4, got %d", ov.MemoryCount)
 	}
-	if ov.MemoryBytes != 350 {
-		t.Errorf("MemoryBytes: want 350, got %d", ov.MemoryBytes)
+	if ov.MemoryBytes != 650 {
+		t.Errorf("MemoryBytes: want 650, got %d", ov.MemoryBytes)
 	}
-	if ov.MemoryGB != 350.0/1e9 {
-		t.Errorf("MemoryGB: want %v, got %v", 350.0/1e9, ov.MemoryGB)
+	if len(owners) != 2 {
+		t.Fatalf("want 2 owners, got %d", len(owners))
+	}
+	// sorted by bytes desc → A (600) first
+	if owners[0].Owner != "0xaaaa000000000000000000000000000000000001" ||
+		owners[0].Count != 3 || owners[0].Bytes != 600 {
+		t.Errorf("owner A wrong: %+v", owners[0])
+	}
+	if owners[1].Count != 1 || owners[1].Bytes != 50 {
+		t.Errorf("owner B wrong: %+v", owners[1])
 	}
 }
 
-func TestMemoryOverview_Empty(t *testing.T) {
+func TestComputeMemStats_Empty(t *testing.T) {
 	s := newStatTestServer(t)
-	ov, err := s.memoryOverview()
+	ov, owners, err := s.computeMemStats()
 	if err != nil {
-		t.Fatalf("memoryOverview: %v", err)
+		t.Fatal(err)
 	}
 	if ov.TotalAddresses != 0 || ov.WalletsWithMemory != 0 || ov.MemoryCount != 0 || ov.MemoryBytes != 0 {
 		t.Fatalf("want all-zero overview, got %+v", ov)
 	}
-}
-
-func TestListMemoryStat_AggregatesPerOwner(t *testing.T) {
-	s := newStatTestServer(t)
-	// owner A: 3 entries, 100+200+300 = 600 bytes
-	seedNeedle(t, s, "0xAAAa000000000000000000000000000000000001", 100)
-	seedNeedle(t, s, "0xAAAa000000000000000000000000000000000001", 200)
-	seedNeedle(t, s, "0xaaaa000000000000000000000000000000000001", 300) // same wallet, lowercase
-	// owner B: 1 entry, 50 bytes
-	seedNeedle(t, s, "0xBBBB000000000000000000000000000000000002", 50)
-
-	res, err := s.listMemoryStat(0, 10)
-	if err != nil {
-		t.Fatalf("listMemoryStat: %v", err)
-	}
-
-	// 2 distinct owners (case-insensitive merge of A's two cases)
-	if res.Total != 2 {
-		t.Fatalf("want total=2 distinct owners, got %d", res.Total)
-	}
-	if len(res.Items) != 2 {
-		t.Fatalf("want 2 items, got %d", len(res.Items))
-	}
-
-	// ordered by bytes desc → A (600) first
-	a := res.Items[0]
-	if a.Owner != "0xaaaa000000000000000000000000000000000001" {
-		t.Errorf("want owner A (lowercased) first, got %s", a.Owner)
-	}
-	if a.Count != 3 || a.Bytes != 600 {
-		t.Errorf("owner A: want count=3 bytes=600, got count=%d bytes=%d", a.Count, a.Bytes)
-	}
-	if a.GB != 600.0/1e9 {
-		t.Errorf("owner A: want gb=%v, got %v", 600.0/1e9, a.GB)
-	}
-
-	b := res.Items[1]
-	if b.Count != 1 || b.Bytes != 50 {
-		t.Errorf("owner B: want count=1 bytes=50, got count=%d bytes=%d", b.Count, b.Bytes)
+	if len(owners) != 0 {
+		t.Fatalf("want 0 owners, got %d", len(owners))
 	}
 }
 
-func TestListMemoryStat_Pagination(t *testing.T) {
+func TestMemStatCache_Pagination(t *testing.T) {
 	s := newStatTestServer(t)
-	// 5 owners, sizes 500,400,300,200,100 → deterministic desc order
-	owners := []struct {
-		addr string
-		size uint64
-	}{
-		{"0x0000000000000000000000000000000000000005", 500},
-		{"0x0000000000000000000000000000000000000004", 400},
-		{"0x0000000000000000000000000000000000000003", 300},
-		{"0x0000000000000000000000000000000000000002", 200},
-		{"0x0000000000000000000000000000000000000001", 100},
+	// build a snapshot of 5 owners directly (bypass DB; test the in-memory page)
+	owners := []types.MemoryStat{
+		{Owner: "0x5", Count: 5, Bytes: 500},
+		{Owner: "0x4", Count: 4, Bytes: 400},
+		{Owner: "0x3", Count: 3, Bytes: 300},
+		{Owner: "0x2", Count: 2, Bytes: 200},
+		{Owner: "0x1", Count: 1, Bytes: 100},
 	}
-	for _, o := range owners {
-		seedNeedle(t, s, o.addr, o.size)
+	s.memStat.set(&memStatSnapshot{
+		overview:   types.MemoryOverview{WalletsWithMemory: 5},
+		owners:     owners,
+		computedAt: time.Unix(1700000000, 0),
+	})
+
+	p1 := s.memoryStatPage(0, 2)
+	if p1.Total != 5 || len(p1.Items) != 2 || p1.Items[0].Bytes != 500 || p1.Items[1].Bytes != 400 {
+		t.Fatalf("page1 wrong: %+v", p1)
+	}
+	if p1.ComputedAt != 1700000000 {
+		t.Errorf("want ComputedAt set, got %d", p1.ComputedAt)
 	}
 
-	page1, err := s.listMemoryStat(0, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if page1.Total != 5 {
-		t.Fatalf("want total=5, got %d", page1.Total)
-	}
-	if len(page1.Items) != 2 || page1.Items[0].Bytes != 500 || page1.Items[1].Bytes != 400 {
-		t.Fatalf("page1 unexpected: %+v", page1.Items)
+	p3 := s.memoryStatPage(4, 2)
+	if len(p3.Items) != 1 || p3.Items[0].Bytes != 100 {
+		t.Fatalf("page3 wrong: %+v", p3)
 	}
 
-	page2, err := s.listMemoryStat(2, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page2.Items) != 2 || page2.Items[0].Bytes != 300 || page2.Items[1].Bytes != 200 {
-		t.Fatalf("page2 unexpected: %+v", page2.Items)
-	}
-
-	page3, err := s.listMemoryStat(4, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page3.Items) != 1 || page3.Items[0].Bytes != 100 {
-		t.Fatalf("page3 unexpected: %+v", page3.Items)
+	// offset past the end → empty page, but total still correct
+	pEnd := s.memoryStatPage(10, 2)
+	if pEnd.Total != 5 || len(pEnd.Items) != 0 {
+		t.Fatalf("pastEnd wrong: %+v", pEnd)
 	}
 }
 
-func TestListMemoryStat_Empty(t *testing.T) {
-	s := newStatTestServer(t)
-	res, err := s.listMemoryStat(0, 10)
-	if err != nil {
-		t.Fatal(err)
+func TestMemStatCache_NotReady(t *testing.T) {
+	s := newStatTestServer(t) // memStat set but no snapshot computed yet
+	ov := s.memoryOverviewSnapshot()
+	if ov.ComputedAt != 0 || ov.MemoryCount != 0 {
+		t.Fatalf("want empty overview before first compute, got %+v", ov)
 	}
-	if res.Total != 0 || len(res.Items) != 0 {
-		t.Fatalf("want empty, got total=%d items=%d", res.Total, len(res.Items))
+	page := s.memoryStatPage(0, 10)
+	if page.Total != 0 || len(page.Items) != 0 || page.ComputedAt != 0 {
+		t.Fatalf("want empty page before first compute, got %+v", page)
+	}
+}
+
+func TestRefreshMemStats_PopulatesCache(t *testing.T) {
+	s := newStatTestServer(t)
+	seedNeedle(t, s, "0xAbc0000000000000000000000000000000000001", 1000)
+	seedAccount(t, s, "0xabc0000000000000000000000000000000000001")
+
+	s.refreshMemStats()
+
+	ov := s.memoryOverviewSnapshot()
+	if ov.ComputedAt == 0 {
+		t.Fatal("ComputedAt should be set after refresh")
+	}
+	if ov.WalletsWithMemory != 1 || ov.MemoryCount != 1 || ov.MemoryBytes != 1000 {
+		t.Fatalf("overview wrong after refresh: %+v", ov)
+	}
+	page := s.memoryStatPage(0, 10)
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Bytes != 1000 {
+		t.Fatalf("page wrong after refresh: %+v", page)
 	}
 }

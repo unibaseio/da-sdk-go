@@ -94,10 +94,11 @@ type MemoryStat struct {
 
 // MemoryStatResult is one page of per-owner memory stats.
 type MemoryStatResult struct {
-	Total  int64        `json:"total"` // total distinct owners (for pagination)
-	Offset int          `json:"offset"`
-	Length int          `json:"length"`
-	Items  []MemoryStat `json:"items"`
+	Total      int64        `json:"total"` // total distinct owners (for pagination)
+	Offset     int          `json:"offset"`
+	Length     int          `json:"length"`
+	Items      []MemoryStat `json:"items"`
+	ComputedAt int64        `json:"computedAt"` // unix secs of the cached snapshot (0 = not ready)
 }
 
 // MemoryOverview is the dashboard summary (the four overview cards).
@@ -107,6 +108,7 @@ type MemoryOverview struct {
 	MemoryCount       int64   `json:"memoryCount"`       // total memory entries (needles)
 	MemoryBytes       int64   `json:"memoryBytes"`       // total stored bytes
 	MemoryGB          float64 `json:"memoryGB"`          // memoryBytes / 1e9
+	ComputedAt        int64   `json:"computedAt"`        // unix secs of the cached snapshot (0 = not ready)
 }
 
 type Stat struct {
