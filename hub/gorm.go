@@ -217,6 +217,32 @@ func (s *Server) listMemoryStat(offset, limit int) (types.MemoryStatResult, erro
 	return res, nil
 }
 
+// memoryOverview returns the dashboard summary: total distinct addresses
+// (accounts), wallets that have at least one memory entry, total entry count,
+// and total stored bytes/GB.
+func (s *Server) memoryOverview() (types.MemoryOverview, error) {
+	var ov types.MemoryOverview
+
+	if err := s.gdb.Model(&types.Account{}).Count(&ov.TotalAddresses).Error; err != nil {
+		return ov, err
+	}
+	if err := s.gdb.Model(&types.Needle{}).
+		Select("COUNT(DISTINCT LOWER(owner))").Row().Scan(&ov.WalletsWithMemory); err != nil {
+		return ov, err
+	}
+	if err := s.gdb.Model(&types.Needle{}).Count(&ov.MemoryCount).Error; err != nil {
+		return ov, err
+	}
+	var bytes int64
+	if err := s.gdb.Model(&types.Needle{}).
+		Select("COALESCE(SUM(size),0)").Row().Scan(&bytes); err != nil {
+		return ov, err
+	}
+	ov.MemoryBytes = bytes
+	ov.MemoryGB = float64(bytes) / 1e9
+	return ov, nil
+}
+
 func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) {
 	var buckets []types.Bucket
 	q := s.gdb

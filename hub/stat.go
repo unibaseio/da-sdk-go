@@ -21,6 +21,27 @@ func (s *Server) addStat(g *gin.RouterGroup) {
 
 	g.Group("/").POST("/memoryStat", s.listMemoryStatByPost)
 	g.Group("/").GET("/memoryStat", s.listMemoryStatByGet)
+
+	g.Group("/").GET("/memoryOverview", s.getMemoryOverview)
+	g.Group("/").POST("/memoryOverview", s.getMemoryOverview)
+}
+
+// getMemoryOverview godoc
+//
+//	@Summary		Memory dashboard overview
+//	@Description	Hub-wide totals: distinct addresses, wallets with memory, total memory entries, total size (GB).
+//	@Tags			statistics
+//	@Produce		json
+//	@Success		200	{object}	types.MemoryOverview
+//	@Failure		599	{object}	lerror.APIError
+//	@Router			/api/memoryOverview [get]
+func (s *Server) getMemoryOverview(c *gin.Context) {
+	ov, err := s.memoryOverview()
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	c.JSON(http.StatusOK, ov)
 }
 
 // listMemoryStatByGet godoc

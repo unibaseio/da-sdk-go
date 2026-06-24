@@ -23,7 +23,7 @@ func newStatTestServer(t *testing.T) *Server {
 		t.Fatalf("db handle: %v", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.AutoMigrate(&types.Needle{}); err != nil {
+	if err := db.AutoMigrate(&types.Needle{}, &types.Account{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return &Server{gdb: db}
@@ -33,6 +33,56 @@ func seedNeedle(t *testing.T, s *Server, owner string, size uint64) {
 	t.Helper()
 	if err := s.gdb.Create(&types.Needle{Owner: owner, Size: size}).Error; err != nil {
 		t.Fatalf("seed: %v", err)
+	}
+}
+
+func seedAccount(t *testing.T, s *Server, name string) {
+	t.Helper()
+	if err := s.gdb.Create(&types.Account{Name: name}).Error; err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+}
+
+func TestMemoryOverview(t *testing.T) {
+	s := newStatTestServer(t)
+	// 5 known addresses on the hub...
+	for _, a := range []string{"0xa1", "0xa2", "0xa3", "0xa4", "0xa5"} {
+		seedAccount(t, s, a)
+	}
+	// ...but only 2 of them actually have memory entries.
+	seedNeedle(t, s, "0xA1", 100) // mixed case; merges with 0xa1 below
+	seedNeedle(t, s, "0xa1", 200)
+	seedNeedle(t, s, "0xa2", 50)
+
+	ov, err := s.memoryOverview()
+	if err != nil {
+		t.Fatalf("memoryOverview: %v", err)
+	}
+	if ov.TotalAddresses != 5 {
+		t.Errorf("TotalAddresses: want 5, got %d", ov.TotalAddresses)
+	}
+	if ov.WalletsWithMemory != 2 {
+		t.Errorf("WalletsWithMemory: want 2 (case-merged), got %d", ov.WalletsWithMemory)
+	}
+	if ov.MemoryCount != 3 {
+		t.Errorf("MemoryCount: want 3, got %d", ov.MemoryCount)
+	}
+	if ov.MemoryBytes != 350 {
+		t.Errorf("MemoryBytes: want 350, got %d", ov.MemoryBytes)
+	}
+	if ov.MemoryGB != 350.0/1e9 {
+		t.Errorf("MemoryGB: want %v, got %v", 350.0/1e9, ov.MemoryGB)
+	}
+}
+
+func TestMemoryOverview_Empty(t *testing.T) {
+	s := newStatTestServer(t)
+	ov, err := s.memoryOverview()
+	if err != nil {
+		t.Fatalf("memoryOverview: %v", err)
+	}
+	if ov.TotalAddresses != 0 || ov.WalletsWithMemory != 0 || ov.MemoryCount != 0 || ov.MemoryBytes != 0 {
+		t.Fatalf("want all-zero overview, got %+v", ov)
 	}
 }
 

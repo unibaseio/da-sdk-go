@@ -100,6 +100,15 @@ type MemoryStatResult struct {
 	Items  []MemoryStat `json:"items"`
 }
 
+// MemoryOverview is the dashboard summary (the four overview cards).
+type MemoryOverview struct {
+	TotalAddresses    int64   `json:"totalAddresses"`    // distinct addresses known to the hub (accounts)
+	WalletsWithMemory int64   `json:"walletsWithMemory"` // owners with >=1 memory entry
+	MemoryCount       int64   `json:"memoryCount"`       // total memory entries (needles)
+	MemoryBytes       int64   `json:"memoryBytes"`       // total stored bytes
+	MemoryGB          float64 `json:"memoryGB"`          // memoryBytes / 1e9
+}
+
 type Stat struct {
 	Day           time.Time
 	DailyAccounts int64 // new created accounts at this day
