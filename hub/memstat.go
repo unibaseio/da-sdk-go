@@ -8,9 +8,15 @@ import (
 	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
-// memStatRefreshInterval is how often the per-owner memory aggregates are
-// recomputed in the background.
-const memStatRefreshInterval = 2 * time.Minute
+// defaultMemStatRefreshSec is how often (seconds) the per-owner memory
+// aggregates are recomputed in the background. Conservative by default because
+// each recompute is an index scan over the whole needles table (tens of
+// millions of rows). Override with HUB_MEMSTAT_REFRESH_SEC.
+const defaultMemStatRefreshSec int64 = 300
+
+func memStatRefreshInterval() time.Duration {
+	return time.Duration(envInt64("HUB_MEMSTAT_REFRESH_SEC", defaultMemStatRefreshSec)) * time.Second
+}
 
 // memStatSnapshot is a point-in-time result of computeMemStats, served to the
 // /api/memoryOverview and /api/memoryStat endpoints without touching the DB.
@@ -46,7 +52,7 @@ func (m *memStatCache) set(s *memStatSnapshot) {
 func (s *Server) startMemStats(ctx context.Context) {
 	go func() {
 		s.refreshMemStats()
-		t := time.NewTicker(memStatRefreshInterval)
+		t := time.NewTicker(memStatRefreshInterval())
 		defer t.Stop()
 		for {
 			select {

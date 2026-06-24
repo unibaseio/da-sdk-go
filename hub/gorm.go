@@ -63,10 +63,15 @@ func (s *Server) loadGORM() {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_name ON needles(owner, name);")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket ON needles(owner, bucket);")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket_name ON needles(owner, bucket, name);")
-	// expression index so the case-insensitive owner queries (LOWER(owner) used
-	// by the list/get endpoints and the memory-stats aggregation) can use an
-	// index instead of full table scans.
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner ON needles(LOWER(owner));")
+	// Covering expression index for the case-insensitive owner queries.
+	// (LOWER(owner), size) lets the memory-stats aggregation
+	// (GROUP BY LOWER(owner), SUM(size)) run as an index-only scan — no table
+	// row lookups — which matters a lot on a multi-tens-of-millions-row table.
+	// The LOWER(owner) prefix also serves the WHERE LOWER(owner)=? filters used
+	// by the list/get/download endpoints.
+	// NOTE: building this on a very large existing table is a one-time, possibly
+	// multi-minute operation that blocks startup until it completes.
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_size ON needles(LOWER(owner), size);")
 
 	s.gdb = db
 
