@@ -26,6 +26,18 @@ func (s *Server) addUpload(g *gin.RouterGroup) {
 	g.Group("/").POST("/upload", s.upload)
 }
 
+// addUploadReadonly registers the write paths on a read-only replica so they
+// return 503 instead of writing to the replica's local logfs/badger (which
+// would fork the data). Writes must be routed to the primary by the LB.
+func (s *Server) addUploadReadonly(g *gin.RouterGroup) {
+	reject := func(c *gin.Context) {
+		c.JSON(http.StatusServiceUnavailable,
+			lerror.ToAPIError("hub", fmt.Errorf("this node is read-only; route writes to the primary")))
+	}
+	g.Group("/").POST("/uploadData", reject)
+	g.Group("/").POST("/upload", reject)
+}
+
 func (s *Server) uploadData(c *gin.Context) {
 	addr := c.PostForm("owner")
 	if !RequireOwnerMatch(c, addr) {
