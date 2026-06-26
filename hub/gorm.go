@@ -63,6 +63,15 @@ func (s *Server) loadGORM() {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_name ON needles(owner, name);")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket ON needles(owner, bucket);")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket_name ON needles(owner, bucket, name);")
+	// Covering expression index for the case-insensitive owner queries.
+	// (LOWER(owner), size) lets the memory-stats aggregation
+	// (GROUP BY LOWER(owner), SUM(size)) run as an index-only scan — no table
+	// row lookups — which matters a lot on a multi-tens-of-millions-row table.
+	// The LOWER(owner) prefix also serves the WHERE LOWER(owner)=? filters used
+	// by the list/get/download endpoints.
+	// NOTE: building this on a very large existing table is a one-time, possibly
+	// multi-minute operation that blocks startup until it completes.
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_size ON needles(LOWER(owner), size);")
 
 	s.gdb = db
 
@@ -184,6 +193,44 @@ func (s *Server) listAccount(offset, limit int) ([]types.Account, error) {
 	}
 
 	return accounts, nil
+}
+
+// computeMemStats runs the heavy aggregation ONCE: a single GROUP BY over
+// needles yields the full per-owner list, from which the overview totals are
+// derived (no separate COUNT/SUM scans). This is a full-table scan and must
+// NOT be run inline per request (it 504'd behind the proxy on a large table) —
+// it's driven by the background refresh loop and the result is cached.
+//
+// Grouping/counting use LOWER(owner) so mixed-case and lowercase variants of
+// the same wallet merge (backed by idx_needles_lower_owner).
+func (s *Server) computeMemStats() (types.MemoryOverview, []types.MemoryStat, error) {
+	var ov types.MemoryOverview
+
+	if err := s.gdb.Model(&types.Account{}).Count(&ov.TotalAddresses).Error; err != nil {
+		return ov, nil, err
+	}
+
+	owners := []types.MemoryStat{}
+	err := s.gdb.Model(&types.Needle{}).
+		Select("LOWER(owner) as owner, count(*) as count, COALESCE(SUM(size),0) as bytes").
+		Group("LOWER(owner)").
+		Order("bytes desc").
+		Scan(&owners).Error
+	if err != nil {
+		return ov, nil, err
+	}
+
+	var totalCount, totalBytes int64
+	for i := range owners {
+		owners[i].GB = float64(owners[i].Bytes) / 1e9
+		totalCount += owners[i].Count
+		totalBytes += owners[i].Bytes
+	}
+	ov.WalletsWithMemory = int64(len(owners))
+	ov.MemoryCount = totalCount
+	ov.MemoryBytes = totalBytes
+	ov.MemoryGB = float64(totalBytes) / 1e9
+	return ov, owners, nil
 }
 
 func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) {
