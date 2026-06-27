@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -39,6 +40,42 @@ func (c *ContractManage) HandleSetEpoch(elog etypes.Log, cabi abi.ABI) (types.Ep
 	return ei, nil
 }
 
+// decodeAddPieceFields recovers the piece fields
+// [pn, price, size, expire, rsn, rsk, streamer] from a tx's calldata. The
+// AddPiece event is emitted by BOTH addPiece (owner == caller) and addPieceFor
+// (owner == attributed user, caller == relayer/hub); addPieceFor has an extra
+// leading `owner` arg that shifts every field by one. Dispatch on the 4-byte
+// selector so attributed pieces aren't silently mis-decoded with addPiece's
+// layout. The owner itself comes from the indexed event topic, not here.
+func decodeAddPieceFields(cabi abi.ABI, inputData []byte) ([]interface{}, error) {
+	if len(inputData) < 4 {
+		return nil, fmt.Errorf("invalid calldata length")
+	}
+	selector := inputData[:4]
+
+	if m, ok := cabi.Methods["addPieceFor"]; ok && bytes.Equal(selector, m.ID) {
+		in, err := m.Inputs.UnpackValues(inputData[4:])
+		if err != nil {
+			return nil, err
+		}
+		if len(in) != 8 {
+			return nil, fmt.Errorf("invalid addPieceFor input length")
+		}
+		return in[1:], nil // drop the leading owner arg
+	}
+	if m, ok := cabi.Methods["addPiece"]; ok && bytes.Equal(selector, m.ID) {
+		in, err := m.Inputs.UnpackValues(inputData[4:])
+		if err != nil {
+			return nil, err
+		}
+		if len(in) != 7 {
+			return nil, fmt.Errorf("invalid addPiece input length")
+		}
+		return in, nil
+	}
+	return nil, fmt.Errorf("unexpected method selector %x for AddPiece event", selector)
+}
+
 func (c *ContractManage) HandleAddPiece(elog etypes.Log, cabi abi.ABI) (types.PieceCore, error) {
 	pc := types.PieceCore{
 		TxHash: elog.TxHash.String(),
@@ -69,33 +106,23 @@ func (c *ContractManage) HandleAddPiece(elog etypes.Log, cabi abi.ABI) (types.Pi
 		return pc, err
 	}
 
-	method, ok := cabi.Methods["addPiece"]
-	if !ok {
-		return pc, fmt.Errorf("no method 'addPiece' in ABI")
-	}
-
-	inputData := tx.Data()
-	inputs, err := method.Inputs.UnpackValues(inputData[4:])
+	fields, err := decodeAddPieceFields(cabi, tx.Data())
 	if err != nil {
 		return pc, err
 	}
 
-	if len(inputs) != 7 {
-		return pc, fmt.Errorf("invalid input length")
-	}
-
-	g1, err := com.SolidityToG1(inputs[0].([]byte))
+	g1, err := com.SolidityToG1(fields[0].([]byte))
 	if err == nil {
 		pc.Name = com.G1ToString(g1)
 	} else {
-		pc.Name = hex.EncodeToString(inputs[0].([]byte))
+		pc.Name = hex.EncodeToString(fields[0].([]byte))
 	}
-	pc.Price = inputs[1].(*big.Int)
-	pc.Size = int64(inputs[2].(uint64))
-	pc.Expire = inputs[3].(uint64)
-	pc.Policy.N = inputs[4].(uint8)
-	pc.Policy.K = inputs[5].(uint8)
-	pc.Streamer = inputs[6].(common.Address)
+	pc.Price = fields[1].(*big.Int)
+	pc.Size = int64(fields[2].(uint64))
+	pc.Expire = fields[3].(uint64)
+	pc.Policy.N = fields[4].(uint8)
+	pc.Policy.K = fields[5].(uint8)
+	pc.Streamer = fields[6].(common.Address)
 
 	return pc, nil
 }

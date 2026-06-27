@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	com "github.com/unibaseio/da-sdk-go/contract/common"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
@@ -164,6 +165,39 @@ func (s *Server) seal(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"register":     "hub",
 			"da_cid":       pc.Name,
+			"size":         pc.Size,
+			"policy":       gin.H{"n": policy.N, "k": policy.K},
+			"expire":       expire,
+			"add_piece_tx": txn, // "" if already registered (idempotent retry)
+			"piece_serial": serial,
+		})
+		return
+	}
+
+	if register == "hub_attributed" {
+		// sponsored + attributed: the hub pays gas + token, but the piece is owned
+		// on-chain by the authenticated user (owner == signer, already enforced by
+		// RequireOwnerMatch). piece.owner + the AddPiece event then show the real
+		// user — browsable/Dune-aggregatable — instead of the hub. Requires the hub
+		// key to hold RELAYER_ROLE on the Piece contract (else addPieceFor reverts).
+		if owner == "" {
+			c.JSON(http.StatusBadRequest, lerror.ToAPIError("hub", fmt.Errorf("owner required for hub_attributed")))
+			return
+		}
+		ownerAddr := common.HexToAddress(owner)
+		txn := ""
+		if serial == 0 {
+			txn, err = cm.AddPieceFor(pc, ownerAddr)
+			if err != nil {
+				c.JSON(599, lerror.ToAPIError("hub", err))
+				return
+			}
+			serial, _ = cm.GetPieceSerial(pc.Name) // best-effort
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"register":     "hub_attributed",
+			"da_cid":       pc.Name,
+			"owner":        ownerAddr.Hex(), // on-chain piece.owner (the user)
 			"size":         pc.Size,
 			"policy":       gin.H{"n": policy.N, "k": policy.K},
 			"expire":       expire,

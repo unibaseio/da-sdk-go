@@ -178,6 +178,21 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 }
 
 func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
+	return c.addPieceImpl(pc, nil)
+}
+
+// AddPieceFor submits a piece sponsored by this account (the payer / relayer)
+// but attributed on-chain to `owner` (the end user) via the contract's
+// addPieceFor. This account must hold RELAYER_ROLE on the Piece contract. Used
+// by the hub's sponsored /api/seal path so piece.owner reflects the real user.
+func (c *ContractManage) AddPieceFor(pc types.PieceCore, owner common.Address) (string, error) {
+	return c.addPieceImpl(pc, &owner)
+}
+
+// addPieceImpl is the shared body: owner==nil -> addPiece (self), owner!=nil ->
+// addPieceFor (sponsored, attributed to *owner). Payment is always pulled from
+// this account.
+func (c *ContractManage) addPieceImpl(pc types.PieceCore, owner *common.Address) (string, error) {
 	com.Logger.Debug("add piece: ", pc)
 	ctx, cancle := context.WithTimeout(context.TODO(), 3*time.Minute)
 	defer cancle()
@@ -235,7 +250,11 @@ func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tx, err = fi.AddPiece(au, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
+	if owner != nil {
+		tx, err = fi.AddPieceFor(au, *owner, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
+	} else {
+		tx, err = fi.AddPiece(au, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
+	}
 	if err != nil {
 		return "", err
 	}

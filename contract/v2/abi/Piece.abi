@@ -32,6 +32,19 @@
   },
   {
     "type": "function",
+    "name": "RELAYER_ROLE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "UPGRADE_INTERFACE_VERSION",
     "inputs": [],
     "outputs": [
@@ -60,6 +73,54 @@
     "type": "function",
     "name": "addPiece",
     "inputs": [
+      {
+        "name": "_pn",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_price",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_size",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "_expire",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "rsn",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "rsk",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "_s",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "addPieceFor",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
       {
         "name": "_pn",
         "type": "bytes",
