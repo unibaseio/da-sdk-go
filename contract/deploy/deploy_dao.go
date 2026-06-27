@@ -14,7 +14,9 @@ import (
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/everify"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/node"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/piece"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/proxy"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/rsproof"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/vub"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -49,6 +51,51 @@ func DeployGovernanceTokenImpl(client *ethclient.Client, sk string, name, symbol
 	log.Println("GovernanceToken initialized")
 	SaveDeployment("GovernanceToken", tAddr)
 	return tAddr, nil
+}
+
+// DeployVUBProxy deploys the vote-escrowed UB staking module (VUB) behind a
+// UUPS proxy. VUB implements IVotes and replaces the legacy placeholder
+// GovernanceToken as the token fed to DAOGovernor: stake UB -> ve-weighted vUB
+// voting power.
+// ubAddr is the staked token (UB on this chain); rewardAddr is the
+// community-incentive token paying staking APY (may equal ubAddr on testnet).
+func DeployVUBProxy(client *ethclient.Client, sk string, ubAddr, rewardAddr, owner common.Address) (common.Address, error) {
+	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	if err != nil {
+		return common.Address{}, err
+	}
+	implAddr, tx, _, err := vub.DeployVUB(au, client)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("deploy VUB impl: %w", err)
+	}
+	if err = contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+		return common.Address{}, err
+	}
+	log.Println("VUB impl deployed at:", implAddr.Hex())
+
+	vubABI, err := vub.VUBMetaData.GetAbi()
+	if err != nil {
+		return common.Address{}, err
+	}
+	initData, err := vubABI.Pack("initialize", ubAddr, rewardAddr, owner)
+	if err != nil {
+		return common.Address{}, err
+	}
+
+	au, err = contract.MakeAuth(ChainURL, ChainID, sk)
+	if err != nil {
+		return common.Address{}, err
+	}
+	proxyAddr, tx, _, err := proxy.DeployERC1967Proxy(au, client, implAddr, initData)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("deploy VUB proxy: %w", err)
+	}
+	if err = contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+		return common.Address{}, err
+	}
+	log.Printf("VUBProxy deployed at: %s (ub=%s reward=%s)\n", proxyAddr.Hex(), ubAddr.Hex(), rewardAddr.Hex())
+	SaveDeployment("VUB", proxyAddr)
+	return proxyAddr, nil
 }
 
 func DeployDAOTimelockImpl(client *ethclient.Client, sk string, minDelay *big.Int, admin common.Address) (common.Address, error) {
@@ -278,12 +325,26 @@ func GrantGovernorRoleToContracts(client *ethclient.Client, sk string, timelockA
 	return nil
 }
 
-func deployDAO(client *ethclient.Client, sk string, owner, epochProxy, nodeProxy, pieceProxy, rsproofProxy, everifyProxy, eproofProxy common.Address) {
-	// Step 1: GovernanceToken
-	govTokenAddr, err := DeployGovernanceTokenImpl(client, sk, daoTokenName, daoTokenSymbol, daoTokenSupply, owner)
-	if err != nil {
-		log.Println("Failed to deploy GovernanceToken:", err)
-		return
+func deployDAO(client *ethclient.Client, sk string, owner, ubAddr, rewardAddr, epochProxy, nodeProxy, pieceProxy, rsproofProxy, everifyProxy, eproofProxy common.Address) {
+	// Step 1: governance token. Default = vUB (stake UB -> ve-weighted votes);
+	// the legacy GovernanceToken remains available as a fallback via -dao-gov-token legacy.
+	var govTokenAddr common.Address
+	var err error
+	if daoGovTokenKind == "legacy" {
+		govTokenAddr, err = DeployGovernanceTokenImpl(client, sk, daoTokenName, daoTokenSymbol, daoTokenSupply, owner)
+		if err != nil {
+			log.Println("Failed to deploy GovernanceToken:", err)
+			return
+		}
+	} else {
+		if rewardAddr == (common.Address{}) {
+			rewardAddr = ubAddr // testnet default: reward in the same token
+		}
+		govTokenAddr, err = DeployVUBProxy(client, sk, ubAddr, rewardAddr, owner)
+		if err != nil {
+			log.Println("Failed to deploy VUB:", err)
+			return
+		}
 	}
 
 	// Step 2: DAOTimelock
@@ -313,7 +374,7 @@ func deployDAO(client *ethclient.Client, sk string, owner, epochProxy, nodeProxy
 	}
 
 	log.Println("=== DAO Governance Deployment Complete ===")
-	log.Printf("  GovernanceToken: %s\n", govTokenAddr.Hex())
+	log.Printf("  GovToken (%s): %s\n", daoGovTokenKind, govTokenAddr.Hex())
 	log.Printf("  DAOTimelock:     %s\n", timelockAddr.Hex())
 	log.Printf("  DAOGovernor:     %s\n", governorAddr.Hex())
 }

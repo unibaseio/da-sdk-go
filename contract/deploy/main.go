@@ -65,14 +65,19 @@ var (
 
 // DAO governance configuration
 var (
-	daoTokenName         = "Unibase DAO Governance Token"
-	daoTokenSymbol       = "UNIDAOT"
+	daoTokenName         = "UBDAO Governance Token"
+	daoTokenSymbol       = "vUB"
 	daoTokenSupply       = new(big.Int).Mul(big.NewInt(1e18), big.NewInt(1_000_000_000)) // 1B tokens
 	daoVotingDelay       = big.NewInt(1)                                                  // 1 block
 	daoVotingPeriod      = uint32(24_000)                                                 // ~3h at ~450ms block time on BSC
 	daoProposalThreshold = new(big.Int).Mul(big.NewInt(1e18), big.NewInt(2_500_000))      // 2.5M tokens (~0.25%)
 	daoQuorumFraction    = big.NewInt(4)                                                  // 4%
 	daoTimelockDelay     = big.NewInt(0)                                                  // no delay for testnet
+
+	// governance token: "vub" (stake UB -> ve-weighted votes, default) or
+	// "legacy" (standalone placeholder GovernanceToken). Override with -dao-gov-token.
+	daoGovTokenKind = "vub"
+	daoRewardToken  = common.Address{} // reward token for vUB APY; empty -> reuse UB token
 )
 
 func init() {
@@ -84,9 +89,16 @@ func main() {
 	rpc := flag.String("rpc", "", "chain rpc endpoint (default: bnb-testnet)")
 	chainID := flag.Int64("chainid", 0, "chain id (default: bnb-testnet)")
 	skipDAO := flag.Bool("skip-dao", false, "skip phase-2 DAO governance deployment")
+	govToken := flag.String("dao-gov-token", "vub", "DAO governance token: vub (stake UB->ve votes) or legacy (placeholder GovernanceToken)")
+	rewardTok := flag.String("dao-reward-token", "", "reward token address for vUB APY (default: reuse UB token)")
 	slotsFlag := flag.Uint64("slots", 0, "epoch length in blocks (default 16000; use a small value on local anvil)")
 	mptFlag := flag.Int64("min-prove-time", 0, "min prove time in blocks (default 8000)")
 	flag.Parse()
+
+	daoGovTokenKind = *govToken
+	if *rewardTok != "" {
+		daoRewardToken = common.HexToAddress(*rewardTok)
+	}
 
 	if *rpc != "" {
 		ChainURL = *rpc
@@ -495,6 +507,6 @@ func deployall_v2(client *ethclient.Client, sk string) {
 	if deployDAOPhase {
 		log.Println("")
 		log.Println("=== Phase 2: DAO Governance Deployment ===")
-		deployDAO(client, sk, owner, epochProxy, nodeProxy, pieceProxy, rsproofProxy, everifyProxy, eproofProxy)
+		deployDAO(client, sk, owner, tokenAddr, daoRewardToken, epochProxy, nodeProxy, pieceProxy, rsproofProxy, everifyProxy, eproofProxy)
 	}
 }
