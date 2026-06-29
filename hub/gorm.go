@@ -63,6 +63,14 @@ func (s *Server) loadGORM() {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_name ON needles(owner, name);")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket ON needles(owner, bucket);")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket_name ON needles(owner, bucket, name);")
+	// listNeedle filters by LOWER(owner) and orders by id desc. Without a
+	// (LOWER(owner), id) index that query SEARCHes by owner but then builds a
+	// TEMP B-TREE to sort all matched rows by id — catastrophic for a wallet
+	// with millions of needles (loads them all to return 32). This index serves
+	// WHERE LOWER(owner)=? ORDER BY id via a reverse index walk (no temp sort).
+	// NOTE: on a large existing DB the first startup builds this once (minutes,
+	// write-locking) before serving — expected, do not restart mid-build.
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_id ON needles(LOWER(owner), id);")
 
 	s.gdb = db
 
