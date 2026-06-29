@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -197,6 +198,7 @@ func DecodeAuth(authstr string) (types.Auth, error) {
 			Time int64
 			Hash string
 			Sign string
+			Msg  string
 		}
 		jau := JSAuth{}
 		err := json.Unmarshal([]byte(authstr), &jau)
@@ -207,6 +209,7 @@ func DecodeAuth(authstr string) (types.Auth, error) {
 		au.Type = jau.Type
 		au.Addr = jau.Addr
 		au.Time = jau.Time
+		au.Msg = jau.Msg
 		if strings.HasPrefix(jau.Hash, "0x") {
 			au.Hash, err = hex.DecodeString(jau.Hash[2:])
 			if err != nil {
@@ -263,6 +266,83 @@ func VerifyAuth(au types.Auth) error {
 	}
 
 	return nil
+}
+
+// personalSignDigest computes the EIP-191 personal_sign digest of msg:
+// keccak256("\x19Ethereum Signed Message:\n" + len(msg) + msg). Same construction
+// VerifyAuth uses for the "personal_sign" type, factored for reuse by VerifySIWE.
+func personalSignDigest(msg []byte) []byte {
+	h := sha3.NewLegacyKeccak256()
+	h.Write([]byte{0x19})
+	h.Write([]byte("Ethereum Signed Message:"))
+	h.Write([]byte{0x0A})
+	h.Write([]byte(strconv.Itoa(len(msg))))
+	h.Write(msg)
+	return h.Sum(nil)
+}
+
+var (
+	siweAddrRe   = regexp.MustCompile(`(?m)^0x[0-9a-fA-F]{40}$`)
+	siweIssuedRe = regexp.MustCompile(`(?mi)^Issued At:[ \t]*(.+?)[ \t]*$`)
+)
+
+// parseSIWE pulls the two security-relevant fields out of a SIWE / EIP-4361
+// message: the account address line (^0x…40 hex…$) and the "Issued At:" RFC3339
+// timestamp. The verifier does NOT reconstruct the message (it checks the
+// received bytes), so the rest of the text is free-form/human-readable.
+func parseSIWE(msg string) (addr string, issuedAt int64, err error) {
+	a := siweAddrRe.FindString(msg)
+	if a == "" {
+		return "", 0, fmt.Errorf("siwe: missing account address line")
+	}
+	m := siweIssuedRe.FindStringSubmatch(msg)
+	if m == nil {
+		return "", 0, fmt.Errorf("siwe: missing 'Issued At'")
+	}
+	t, perr := time.Parse(time.RFC3339, strings.TrimSpace(m[1]))
+	if perr != nil {
+		return "", 0, fmt.Errorf("siwe: bad 'Issued At' %q: %w", m[1], perr)
+	}
+	return strings.ToLower(a), t.Unix(), nil
+}
+
+// VerifySIWE verifies a human-readable EIP-4361 / SIWE auth. au.Sign must be a
+// personal_sign over the EXACT au.Msg text and recover au.Addr, and the account
+// address embedded in au.Msg must equal au.Addr. It returns the message's
+// "Issued At" as a unix timestamp so the caller can enforce its own freshness
+// window. Security model is identical to VerifyAuth (prove control of Addr +
+// a fresh in-signature timestamp); only the signed bytes are readable.
+func VerifySIWE(au types.Auth) (int64, error) {
+	if len(au.Msg) == 0 {
+		return 0, fmt.Errorf("siwe: empty message")
+	}
+	if len(au.Sign) != 65 {
+		return 0, fmt.Errorf("siwe: bad signature length %d", len(au.Sign))
+	}
+	sig := make([]byte, 65)
+	copy(sig, au.Sign)
+	if sig[64] >= 27 && sig[64] <= 34 {
+		sig[64] -= 27
+	} else if sig[64] >= 35 && sig[64] <= 38 {
+		sig[64] -= 35
+	}
+
+	rePub, err := crypto.Ecrecover(personalSignDigest([]byte(au.Msg)), sig)
+	if err != nil {
+		return 0, err
+	}
+	if !bytes.Equal(au.Addr.Bytes(), utils.ToEthAddress(rePub)) {
+		return 0, fmt.Errorf("siwe: signature does not match %s", au.Addr)
+	}
+
+	addrInMsg, issuedAt, err := parseSIWE(au.Msg)
+	if err != nil {
+		return 0, err
+	}
+	if addrInMsg != strings.ToLower(au.Addr.Hex()) {
+		return 0, fmt.Errorf("siwe: message address %s != envelope %s", addrInMsg, au.Addr)
+	}
+	return issuedAt, nil
 }
 
 // hash is random byte now
