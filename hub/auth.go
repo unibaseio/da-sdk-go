@@ -53,14 +53,18 @@ var authBypassPaths = map[string]bool{
 // ----------------------------------------------------------------------------
 
 // MaxBodySize wraps r.Body with http.MaxBytesReader using a per-route cap.
-// /uploadData (multipart) gets the larger cap, everything else gets the JSON cap.
+// Multipart file-upload routes (/uploadData, /seal) get the larger cap;
+// everything else gets the JSON cap.
 func MaxBodySize() gin.HandlerFunc {
 	jsonCap := env.Int64("HUB_MAX_JSON_BYTES", defaultMaxJSONBytes)
 	multipartCap := env.Int64("HUB_MAX_MULTIPART_BYTES", defaultMaxMultipartBytes)
 
 	return func(c *gin.Context) {
 		var capBytes int64 = jsonCap
-		if c.Request.URL.Path == "/api/uploadData" {
+		switch c.Request.URL.Path {
+		case "/api/uploadData", "/api/seal":
+			// both stream a (potentially large) file part — must not be
+			// truncated by the small JSON cap.
 			capBytes = multipartCap
 		}
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, capBytes)

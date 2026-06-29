@@ -417,34 +417,50 @@ func (c *ContractManage) GetTransactionReceipt(hash common.Hash) (*types.Receipt
 	return com.GetTransactionReceipt(c.RPC, hash)
 }
 
-// CheckTx waits for txHash to be mined and reports the result, with RPC
-// failover. It polls the shared client with the same escalating backoff as the
-// legacy com.CheckTx, but distinguishes the two error cases the legacy code
-// conflated: ethereum.NotFound (endpoint reachable, tx just not mined yet →
-// keep waiting on the SAME endpoint) versus a transport error (endpoint
-// unreachable/erroring → rotateRPC to the next one). A mined-but-reverted tx is
-// analysed for its revert reason exactly as before — that is a real result, not
-// an endpoint fault, so it never triggers failover.
+// CheckTx waits (unbounded backoff) for txHash to be mined. Kept for callers
+// with no deadline of their own (node proof/challenge loops).
 func (c *ContractManage) CheckTx(txHash common.Hash) error {
+	return c.CheckTxCtx(context.Background(), txHash)
+}
+
+// CheckTxCtx waits for txHash to be mined and reports the result, with RPC
+// failover. It polls the shared client with an escalating backoff, but
+// distinguishes the two error cases the legacy com.CheckTx conflated:
+// ethereum.NotFound (endpoint reachable, tx just not mined yet → keep waiting on
+// the SAME endpoint) versus a transport error (endpoint unreachable/erroring →
+// rotateRPC to the next one). A mined-but-reverted tx is analysed for its revert
+// reason — that is a real result, not an endpoint fault, so it never triggers
+// failover. It also honors ctx: a cancelled/expired ctx aborts the wait
+// immediately instead of sleeping through the full backoff (worst case tens of
+// minutes), so synchronous HTTP handlers (e.g. /api/seal) can bound it.
+// context.Background() reproduces the original unbounded behavior.
+func (c *ContractManage) CheckTxCtx(ctx context.Context, txHash common.Hash) error {
 	com.Logger.Debug("check tx: ", txHash.String())
 	var receipt *types.Receipt
 
 	t := 0
 	for i := 0; i < 10; i++ {
 		t = 2*t + 1
-		time.Sleep(time.Duration(t) * time.Second)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s wait aborted: %w", txHash, ctx.Err())
+		case <-time.After(time.Duration(t) * time.Second):
+		}
 
-		cl, err := c.Client(context.Background())
+		cl, err := c.Client(ctx)
 		if err != nil {
 			c.rotateRPC() // can't even dial → try the next endpoint
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		r, err := cl.TransactionReceipt(ctx, txHash)
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		r, err := cl.TransactionReceipt(rctx, txHash)
 		cancel()
 		if err == nil {
 			receipt = r
 			break
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s wait aborted: %w", txHash, ctx.Err())
 		}
 		if !errors.Is(err, ethereum.NotFound) {
 			// not "not mined yet" — the endpoint is unreachable/erroring.
