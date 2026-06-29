@@ -1,10 +1,11 @@
 services:
   dimo-hub:
-    image: mossv2/dimo:hub-latest
+    #image: mossv2/dimo:hub-latest
+    image: unibaseio/hub:hub-v2
     ports:
       - 8080:8080
     volumes:
-      - ~/data:/data
+      - ~/data/hub:/data
       - ~/.plonk:/root/.plonk
     restart: on-failure:0
     environment:
