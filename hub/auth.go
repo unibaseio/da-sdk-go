@@ -31,14 +31,21 @@ const (
 	defaultMaxJSONBytes      int64 = 4 << 20  // 4 MB for /upload (JSON message)
 	defaultMaxMultipartBytes int64 = 64 << 20 // 64 MB for /uploadData (file)
 
-	// rate limit defaults. Per-IP is generous on purpose: legitimate explorer
+	// rate limit defaults. Deliberately generous: (1) legitimate explorer
 	// traffic all arrives from the explorer's reverse-proxy IP (one IP, many
-	// users), so the cap must clear their aggregate while still throttling a
-	// single abusive host hammering hundreds of req/s from its own IP.
-	defaultIPReqPerSec    = 50.0
-	defaultIPBurst        = 100
-	defaultOwnerReqPerSec = 20.0
-	defaultOwnerBurst     = 40
+	// users); (2) there is no batch/stream read API, so a client syncing N
+	// records issues N separate small GET /download calls — a few thousand
+	// objects must not trip the limiter. The negative cache (not this limiter)
+	// is the primary absorber of non-existent-key floods, so a high cap here is
+	// safe; the real ceiling is single-instance read throughput.
+	//
+	// burst = 2x rps so a one-shot batch of up to `burst` requests clears
+	// immediately, then sustains at `rps`. Tune per deployment via
+	// HUB_RATE_IP_RPS / _BURST and HUB_RATE_OWNER_RPS / _BURST.
+	defaultIPReqPerSec    = 1000.0
+	defaultIPBurst        = 2000
+	defaultOwnerReqPerSec = 1000.0
+	defaultOwnerBurst     = 2000
 )
 
 func envInt64(key string, fallback int64) int64 {
