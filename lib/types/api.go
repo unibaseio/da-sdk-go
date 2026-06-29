@@ -18,6 +18,11 @@ type Auth struct {
 	Time int64
 	Hash []byte
 	Sign []byte
+	// Msg, when set, carries a human-readable EIP-4361 / SIWE message that was
+	// personal_signed verbatim (instead of the legacy Hash||be64(Time) bytes).
+	// The verifier recovers the signer over Msg and reads the timestamp from it.
+	// Empty for legacy clients — kept omitempty so their envelopes are unchanged.
+	Msg string `json:",omitempty"`
 }
 
 type ModelResult struct {

@@ -133,19 +133,36 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// freshness: |now - au.Time| <= drift
+		// Verify the signature first, recovering the timestamp BOUND INTO the
+		// signature: au.Time for the legacy Hash||be64(Time) bytes, or the
+		// "Issued At" embedded in the SIWE message. Freshness is then checked
+		// against that bound timestamp, so a tampered envelope can't widen the
+		// window.
+		var signedAt int64
+		if len(au.Msg) > 0 {
+			// EIP-4361 / SIWE human-readable message (new clients)
+			signedAt, err = sdk.VerifySIWE(au)
+			if err != nil {
+				abortWithAuthError(c, fmt.Errorf("verify auth: %w", err))
+				return
+			}
+		} else {
+			// legacy: signature over Hash(label) || be64(Time)
+			signedAt = au.Time
+			if err := sdk.VerifyAuth(au); err != nil {
+				abortWithAuthError(c, fmt.Errorf("verify auth: %w", err))
+				return
+			}
+		}
+
+		// freshness: |now - signedAt| <= drift
 		now := time.Now().Unix()
-		delta := now - au.Time
+		delta := now - signedAt
 		if delta < 0 {
 			delta = -delta
 		}
 		if delta > drift {
 			abortWithAuthError(c, fmt.Errorf("auth timestamp out of window (delta=%ds, max=%ds)", delta, drift))
-			return
-		}
-
-		if err := sdk.VerifyAuth(au); err != nil {
-			abortWithAuthError(c, fmt.Errorf("verify auth: %w", err))
 			return
 		}
 
