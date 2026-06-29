@@ -18,10 +18,17 @@ services:
       # HUB_MAX_JSON_BYTES: "4194304"        # /api/upload JSON body cap (4 MiB)
       # HUB_MAX_MULTIPART_BYTES: "67108864"  # /api/uploadData file cap (64 MiB)
       #
-      # NOTE: the hub does NOT do application-level rate limiting. It sits
-      # behind the explorer's reverse proxy, where every request shares the
-      # proxy's IP, so a per-IP limiter would 429 all legitimate traffic.
-      # Rate-limit at the proxy (real client IP) instead.
+      # Per-IP / per-owner token-bucket rate limits (req/s + burst). download is
+      # public, so it is gated only by the per-IP bucket; with no batch/stream
+      # read API a client syncing N records makes N small GETs, so keep these
+      # high. Behind the explorer's reverse proxy all clients share one IP, so
+      # the per-IP cap must clear their aggregate. burst = 2x rps absorbs a
+      # one-shot batch, then sustains at rps. (Non-existent-key floods are
+      # absorbed by the download negative cache, not this limiter.)
+      HUB_RATE_IP_RPS: "1000"
+      HUB_RATE_IP_BURST: "2000"
+      HUB_RATE_OWNER_RPS: "1000"
+      HUB_RATE_OWNER_BURST: "2000"
 networks:
   default:
     driver: bridge
