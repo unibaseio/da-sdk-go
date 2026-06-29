@@ -30,7 +30,7 @@ import (
 )
 
 func Set(client *ethclient.Client, sk string, _typ string, ca common.Address) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func Set(client *ethclient.Client, sk string, _typ string, ca common.Address) er
 }
 
 func DeployBank(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func DeployBank(client *ethclient.Client, sk string) error {
 }
 
 func DeployToken(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -107,7 +107,7 @@ func DeployToken(client *ethclient.Client, sk string) error {
 }
 
 func DeployEpoch(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,7 @@ func DeployEpoch(client *ethclient.Client, sk string) error {
 }
 
 func DeployReward(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func DeployReward(client *ethclient.Client, sk string) error {
 }
 
 func DeployControl(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func DeployControl(client *ethclient.Client, sk string) error {
 }
 
 func DeployNode(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -188,7 +188,7 @@ func DeployNode(client *ethclient.Client, sk string) error {
 }
 
 func DeployPiece(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -208,7 +208,7 @@ func DeployPiece(client *ethclient.Client, sk string) error {
 }
 
 func DeployRSProof(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func DeployRSProof(client *ethclient.Client, sk string) error {
 }
 
 func DeployRSPlonk(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -250,7 +250,7 @@ func DeployRSPlonk(client *ethclient.Client, sk string) error {
 }
 
 func SetRSVKRoot(client *ethclient.Client, sk string, n, k int) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -297,7 +297,7 @@ func SetRSVKRoot(client *ethclient.Client, sk string, n, k int) error {
 }
 
 func DeployEproof(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -317,7 +317,7 @@ func DeployEproof(client *ethclient.Client, sk string) error {
 }
 
 func DeployEverify(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -337,7 +337,7 @@ func DeployEverify(client *ethclient.Client, sk string) error {
 }
 
 func DeployKZGPlonk(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -358,7 +358,7 @@ func DeployKZGPlonk(client *ethclient.Client, sk string) error {
 }
 
 func DeployMulPlonk(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -379,7 +379,7 @@ func DeployMulPlonk(client *ethclient.Client, sk string) error {
 }
 
 func DeployAddPlonk(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -400,7 +400,7 @@ func DeployAddPlonk(client *ethclient.Client, sk string) error {
 }
 
 func DeployModel(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -420,7 +420,7 @@ func DeployModel(client *ethclient.Client, sk string) error {
 }
 
 func DeployGPU(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -440,7 +440,7 @@ func DeployGPU(client *ethclient.Client, sk string) error {
 }
 
 func DeploySpace(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -460,7 +460,7 @@ func DeploySpace(client *ethclient.Client, sk string) error {
 }
 
 func SetMinPledge(client *ethclient.Client, sk string, _typ uint8, val *big.Int) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -497,7 +497,7 @@ func SetMiner(client *ethclient.Client, sk string, _a common.Address) error {
 	if err != nil {
 		return err
 	}
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}

@@ -24,7 +24,7 @@ import (
 )
 
 func DeployGovernanceTokenImpl(client *ethclient.Client, sk string, name, symbol string, supply *big.Int, owner common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -37,7 +37,7 @@ func DeployGovernanceTokenImpl(client *ethclient.Client, sk string, name, symbol
 	}
 	log.Println("GovernanceToken deployed at:", tAddr.Hex())
 
-	au, err = contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err = makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -60,7 +60,7 @@ func DeployGovernanceTokenImpl(client *ethclient.Client, sk string, name, symbol
 // ubAddr is the staked token (UB on this chain); rewardAddr is the
 // community-incentive token paying staking APY (may equal ubAddr on testnet).
 func DeployVUBProxy(client *ethclient.Client, sk string, ubAddr, rewardAddr, owner common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -82,7 +82,7 @@ func DeployVUBProxy(client *ethclient.Client, sk string, ubAddr, rewardAddr, own
 		return common.Address{}, err
 	}
 
-	au, err = contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err = makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -99,7 +99,7 @@ func DeployVUBProxy(client *ethclient.Client, sk string, ubAddr, rewardAddr, own
 }
 
 func DeployDAOTimelockImpl(client *ethclient.Client, sk string, minDelay *big.Int, admin common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -115,7 +115,7 @@ func DeployDAOTimelockImpl(client *ethclient.Client, sk string, minDelay *big.In
 	// proposers/executors are set to address(0) as placeholder;
 	// PROPOSER_ROLE is granted to the governor after it's deployed.
 	placeholder := []common.Address{{}}
-	au, err = contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err = makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -132,7 +132,7 @@ func DeployDAOTimelockImpl(client *ethclient.Client, sk string, minDelay *big.In
 }
 
 func DeployDAOGovernorImpl(client *ethclient.Client, sk string, govTokenAddr, timelockAddr common.Address, votingDelay *big.Int, votingPeriod uint32, proposalThreshold, quorumFraction *big.Int) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -145,7 +145,7 @@ func DeployDAOGovernorImpl(client *ethclient.Client, sk string, govTokenAddr, ti
 	}
 	log.Println("DAOGovernor deployed at:", gAddr.Hex())
 
-	au, err = contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err = makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -177,7 +177,7 @@ func SetupTimelockRoles(client *ethclient.Client, sk string, timelockAddr, gover
 		return fmt.Errorf("get EXECUTOR_ROLE: %w", err)
 	}
 
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func SetupTimelockRoles(client *ethclient.Client, sk string, timelockAddr, gover
 	}
 	log.Printf("Granted PROPOSER_ROLE to Governor: %s\n", governorAddr.Hex())
 
-	au, err = contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err = makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -245,7 +245,7 @@ func GrantGovernorRoleToContracts(client *ethclient.Client, sk string, timelockA
 
 	grants := []grantCall{
 		{"Epoch", func() (common.Hash, error) {
-			au, e := contract.MakeAuth(ChainURL, ChainID, sk)
+			au, e := makeAuth(sk)
 			if e != nil {
 				return common.Hash{}, e
 			}
@@ -256,7 +256,7 @@ func GrantGovernorRoleToContracts(client *ethclient.Client, sk string, timelockA
 			return tx.Hash(), nil
 		}},
 		{"Node", func() (common.Hash, error) {
-			au, e := contract.MakeAuth(ChainURL, ChainID, sk)
+			au, e := makeAuth(sk)
 			if e != nil {
 				return common.Hash{}, e
 			}
@@ -267,7 +267,7 @@ func GrantGovernorRoleToContracts(client *ethclient.Client, sk string, timelockA
 			return tx.Hash(), nil
 		}},
 		{"Piece", func() (common.Hash, error) {
-			au, e := contract.MakeAuth(ChainURL, ChainID, sk)
+			au, e := makeAuth(sk)
 			if e != nil {
 				return common.Hash{}, e
 			}
@@ -278,7 +278,7 @@ func GrantGovernorRoleToContracts(client *ethclient.Client, sk string, timelockA
 			return tx.Hash(), nil
 		}},
 		{"RSProof", func() (common.Hash, error) {
-			au, e := contract.MakeAuth(ChainURL, ChainID, sk)
+			au, e := makeAuth(sk)
 			if e != nil {
 				return common.Hash{}, e
 			}
@@ -289,7 +289,7 @@ func GrantGovernorRoleToContracts(client *ethclient.Client, sk string, timelockA
 			return tx.Hash(), nil
 		}},
 		{"EVerify", func() (common.Hash, error) {
-			au, e := contract.MakeAuth(ChainURL, ChainID, sk)
+			au, e := makeAuth(sk)
 			if e != nil {
 				return common.Hash{}, e
 			}
@@ -300,7 +300,7 @@ func GrantGovernorRoleToContracts(client *ethclient.Client, sk string, timelockA
 			return tx.Hash(), nil
 		}},
 		{"EProof", func() (common.Hash, error) {
-			au, e := contract.MakeAuth(ChainURL, ChainID, sk)
+			au, e := makeAuth(sk)
 			if e != nil {
 				return common.Hash{}, e
 			}

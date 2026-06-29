@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -22,9 +23,51 @@ import (
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/rsproof"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/validatorreward"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
+
+// deploy-local monotonic nonce. The deploy tool fires txs back-to-back;
+// contract.MakeAuth leaves auth.Nonce nil, so go-ethereum fetches PendingNonceAt
+// per send — and under RPC read-after-write lag (Alchemy) two fast txs can reuse
+// a nonce, surfacing as "already known" / "replacement underpriced". makeAuth
+// assigns max(chain pending nonce, our last+1) so a lagging read never reuses one.
+var (
+	deployNonceNext uint64
+	deployNonceInit bool
+)
+
+func makeAuth(sk string) (*bind.TransactOpts, error) {
+	auth, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	if err != nil {
+		return nil, err
+	}
+	// Initialize the local counter ONCE from the chain's pending nonce, then
+	// increment purely locally. Re-reading PendingNonceAt per call is unreliable
+	// on load-balanced RPCs (Alchemy): a transient ghost/queued tx can bump the
+	// reported nonce, and taking it would skip a nonce, leaving an unminable gap
+	// (the tx sits queued forever behind the missing nonce). The deploy tool is
+	// the sole, sequential sender for this key, so a local counter is gap-free.
+	if !deployNonceInit {
+		cl, err := ethclient.Dial(ChainURL)
+		if err != nil {
+			return nil, err
+		}
+		defer cl.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		chainNonce, err := cl.PendingNonceAt(ctx, auth.From)
+		if err != nil {
+			return nil, err
+		}
+		deployNonceNext = chainNonce
+		deployNonceInit = true
+	}
+	auth.Nonce = new(big.Int).SetUint64(deployNonceNext)
+	deployNonceNext++
+	return auth, nil
+}
 
 // DeploymentRecord represents a single deployment entry
 type DeploymentRecord struct {
@@ -97,7 +140,7 @@ func SaveDeployment(contractName string, contractAddr common.Address) error {
 }
 
 func DeployEpochImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -118,7 +161,7 @@ func DeployEpochImpl(client *ethclient.Client, sk string) (common.Address, error
 }
 
 func DeployNodeImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -138,7 +181,7 @@ func DeployNodeImpl(client *ethclient.Client, sk string) (common.Address, error)
 }
 
 func DeployPieceImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -158,7 +201,7 @@ func DeployPieceImpl(client *ethclient.Client, sk string) (common.Address, error
 }
 
 func DeployRSProofImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -177,8 +220,24 @@ func DeployRSProofImpl(client *ethclient.Client, sk string) (common.Address, err
 	return tAddr, nil
 }
 
+// waitForCode polls until the freshly-deployed contract's code is visible at
+// addr. Guards against RPC read-after-write lag (e.g. Alchemy's load-balanced
+// replicas returning empty code in the same second a proxy is created), which
+// otherwise makes the next estimateGas fail with "no contract code at given
+// address". CheckTx confirms the tx is mined; this confirms the read side caught up.
+func waitForCode(client *ethclient.Client, addr common.Address) error {
+	for i := 0; i < 30; i++ {
+		code, err := client.CodeAt(context.Background(), addr, nil)
+		if err == nil && len(code) > 0 {
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("timed out waiting for code at %s", addr.Hex())
+}
+
 func SetRSVKRootV2(client *ethclient.Client, sk string, n, k int, rsproofAddr common.Address) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -215,7 +274,7 @@ func SetRSVKRootV2(client *ethclient.Client, sk string, n, k int, rsproofAddr co
 }
 
 func DeployEproofImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -235,7 +294,7 @@ func DeployEproofImpl(client *ethclient.Client, sk string) (common.Address, erro
 }
 
 func DeployEverifyImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -255,7 +314,7 @@ func DeployEverifyImpl(client *ethclient.Client, sk string) (common.Address, err
 }
 
 func DeployRSPlonkImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -276,7 +335,7 @@ func DeployRSPlonkImpl(client *ethclient.Client, sk string) (common.Address, err
 }
 
 func DeployKZGPlonkImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -297,7 +356,7 @@ func DeployKZGPlonkImpl(client *ethclient.Client, sk string) (common.Address, er
 }
 
 func DeployMulPlonkImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -318,7 +377,7 @@ func DeployMulPlonkImpl(client *ethclient.Client, sk string) (common.Address, er
 }
 
 func DeployAddPlonkImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -340,7 +399,7 @@ func DeployAddPlonkImpl(client *ethclient.Client, sk string) (common.Address, er
 
 // DeployEpochProxy deploys the ERC1967 proxy for Epoch with initialization
 func DeployEpochProxy(client *ethclient.Client, sk string, implAddr common.Address, slots uint64, owner common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -375,7 +434,7 @@ func DeployEpochProxy(client *ethclient.Client, sk string, implAddr common.Addre
 
 // DeployNodeProxy deploys the ERC1967 proxy for Node with initialization
 func DeployNodeProxy(client *ethclient.Client, sk string, implAddr common.Address, token common.Address, epochProxy common.Address, owner common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -407,7 +466,7 @@ func DeployNodeProxy(client *ethclient.Client, sk string, implAddr common.Addres
 
 // DeployPieceProxy deploys the ERC1967 proxy for Piece with initialization
 func DeployPieceProxy(client *ethclient.Client, sk string, implAddr common.Address, token common.Address, epochProxy common.Address, nodeProxy common.Address, initParams piece.IPieceInitParams, owner common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -439,7 +498,7 @@ func DeployPieceProxy(client *ethclient.Client, sk string, implAddr common.Addre
 
 // DeployRSProofProxy deploys the ERC1967 proxy for RSProof with initialization
 func DeployRSProofProxy(client *ethclient.Client, sk string, implAddr common.Address, initParams rsproof.IRSProofInitParams, owner common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -471,7 +530,7 @@ func DeployRSProofProxy(client *ethclient.Client, sk string, implAddr common.Add
 
 // DeployEVerifyProxy deploys the ERC1967 proxy for EVerify with initialization
 func DeployEVerifyProxy(client *ethclient.Client, sk string, implAddr common.Address, epochProxy common.Address, pieceProxy common.Address, kzgVerifier common.Address, mulVerifier common.Address, addVerifier common.Address, owner common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -503,7 +562,7 @@ func DeployEVerifyProxy(client *ethclient.Client, sk string, implAddr common.Add
 
 // DeployEProofProxy deploys the ERC1967 proxy for EProof with initialization
 func DeployEProofProxy(client *ethclient.Client, sk string, implAddr common.Address, initParams eproof.IEProofInitParams, owner common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -535,7 +594,7 @@ func DeployEProofProxy(client *ethclient.Client, sk string, implAddr common.Addr
 
 // SetEProofAddress sets the EProof address in EVerify contract
 func SetEProofAddress(client *ethclient.Client, sk string, everifyProxy common.Address, eproofProxy common.Address) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -561,7 +620,7 @@ func SetEProofAddress(client *ethclient.Client, sk string, everifyProxy common.A
 
 // SetNodeAddresses sets EProof and RSProof addresses in Node contract
 func SetNodeAddresses(client *ethclient.Client, sk string, nodeProxy common.Address, eproofProxy common.Address, rsproofProxy common.Address) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -586,7 +645,7 @@ func SetNodeAddresses(client *ethclient.Client, sk string, nodeProxy common.Addr
 }
 
 func SetMinPledgeV2(client *ethclient.Client, sk string, _typ uint8, val *big.Int, nodeAddr common.Address) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -612,7 +671,7 @@ func SetMinPledgeV2(client *ethclient.Client, sk string, _typ uint8, val *big.In
 // The proxies initialize basePenalty to 1e18; the dev-confirmed value is
 // contract.DefaultPenalty (10000 UB), set post-deploy via the GOVERNOR_ROLE.
 func SetBasePenaltyV2(client *ethclient.Client, sk string, rsproofAddr, eproofAddr common.Address, penalty *big.Int) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -630,6 +689,13 @@ func SetBasePenaltyV2(client *ethclient.Client, sk string, rsproofAddr, eproofAd
 	}
 	log.Printf("rsproof basePenalty set to %s\n", penalty.String())
 
+	// fresh auth for the second tx: makeAuth assigns an explicit, incrementing
+	// nonce, so reusing the same `au` would send eproof's tx at rsproof's nonce
+	// ("replacement underpriced"). One makeAuth per tx.
+	au, err = makeAuth(sk)
+	if err != nil {
+		return err
+	}
 	ei, err := eproof.NewEProof(eproofAddr, client)
 	if err != nil {
 		return err
@@ -648,7 +714,7 @@ func SetBasePenaltyV2(client *ethclient.Client, sk string, rsproofAddr, eproofAd
 // --- ValidatorReward (FixB+A2) ---------------------------------------------
 
 func DeployValidatorRewardImpl(client *ethclient.Client, sk string) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -665,7 +731,7 @@ func DeployValidatorRewardImpl(client *ethclient.Client, sk string) (common.Addr
 }
 
 func DeployValidatorRewardProxy(client *ethclient.Client, sk string, implAddr, token, owner common.Address) (common.Address, error) {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -693,7 +759,7 @@ func DeployValidatorRewardProxy(client *ethclient.Client, sk string, implAddr, t
 // validator reward pool (FixB+A2). Until called, the protocol share defaults to
 // `base` (backward-compatible).
 func SetValidatorPool(client *ethclient.Client, sk string, rsproofProxy, eproofProxy, pool common.Address) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -709,7 +775,7 @@ func SetValidatorPool(client *ethclient.Client, sk string, rsproofProxy, eproofP
 		return err
 	}
 
-	au, err = contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err = makeAuth(sk)
 	if err != nil {
 		return err
 	}

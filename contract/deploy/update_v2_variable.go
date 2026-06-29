@@ -95,7 +95,7 @@ func ReadProxyAddresses(outFile string) (*ProxyAddresses, error) {
 func UpdateEpochSlots(client *ethclient.Client, sk string, epochProxy common.Address, newSlots uint64) error {
 	log.Println("\n=== Updating Epoch slots ===")
 
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -142,7 +142,7 @@ func UpdateEpochSlots(client *ethclient.Client, sk string, epochProxy common.Add
 func UpdateNodeMinStake(client *ethclient.Client, sk string, nodeProxy common.Address) error {
 	log.Println("\n=== Updating Node minimum stakes ===")
 
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -195,7 +195,7 @@ func UpdateNodeMinStake(client *ethclient.Client, sk string, nodeProxy common.Ad
 func UpdateRSProofVKRoot(client *ethclient.Client, sk string, rsproofProxy common.Address, n, k uint8) error {
 	log.Printf("\n=== Updating RSProof VKRoot for RS(%d,%d) ===\n", n, k)
 
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -263,7 +263,7 @@ func UpdateRSProofVKRoot(client *ethclient.Client, sk string, rsproofProxy commo
 func UpdateRSProofMinProveTime(client *ethclient.Client, sk string, rsproofProxy common.Address, newMinProveTime *big.Int) error {
 	log.Println("\n=== Updating RSProof minimum prove time ===")
 
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -311,7 +311,7 @@ func UpdateRSProofMinProveTime(client *ethclient.Client, sk string, rsproofProxy
 func UpdateRSProofBasePenalty(client *ethclient.Client, sk string, rsproofProxy common.Address, newBasePenalty *big.Int) error {
 	log.Println("\n=== Updating RSProof basePenalty ===")
 
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -359,7 +359,7 @@ func UpdateRSProofBasePenalty(client *ethclient.Client, sk string, rsproofProxy 
 func UpdateEProofMinProveTime(client *ethclient.Client, sk string, eproofProxy common.Address, newMinProveTime *big.Int) error {
 	log.Println("\n=== Updating EProof minimum prove time ===")
 
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -407,7 +407,7 @@ func UpdateEProofMinProveTime(client *ethclient.Client, sk string, eproofProxy c
 func UpdateEProofBasePenalty(client *ethclient.Client, sk string, eproofProxy common.Address, newBasePenalty *big.Int) error {
 	log.Println("\n=== Updating EProof basePenalty ===")
 
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}

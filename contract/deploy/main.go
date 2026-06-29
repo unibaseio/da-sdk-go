@@ -16,6 +16,7 @@ import (
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
@@ -125,7 +126,7 @@ func main() {
 }
 
 func DeployTokenTest(client *ethclient.Client, sk string) error {
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	au, err := makeAuth(sk)
 	if err != nil {
 		return err
 	}
@@ -287,13 +288,16 @@ func deployall_v1(client *ethclient.Client, sk string) {
 // 4. Set cross-contract references (EProof in EVerify, addresses in Node)
 // 5. Configure RS VK roots and minimum pledges
 func deployall_v2(client *ethclient.Client, sk string) {
-	// Get owner address from private key
-	au, err := contract.MakeAuth(ChainURL, ChainID, sk)
+	// Get owner address from private key WITHOUT makeAuth — makeAuth advances the
+	// local nonce counter, so calling it just to read the address would burn a
+	// nonce that no tx ever uses, leaving an unminable gap (every later tx sits
+	// queued behind the missing nonce). Derive the address directly instead.
+	pk, err := crypto.HexToECDSA(sk)
 	if err != nil {
-		log.Println("Failed to create auth:", err)
+		log.Println("Failed to parse key:", err)
 		return
 	}
-	owner := au.From
+	owner := crypto.PubkeyToAddress(pk.PublicKey)
 	log.Printf("Using owner address: %s\n", owner.Hex())
 
 	// Step 1: Deploy verifier contracts (non-upgradeable)
@@ -409,6 +413,10 @@ func deployall_v2(client *ethclient.Client, sk string) {
 
 	// Set RS VK roots for different policies
 	log.Println("=== Setting RS VK Roots ===")
+	if err := waitForCode(client, rsproofProxy); err != nil { // guard RPC lag
+		log.Println("RSProof proxy code not visible:", err)
+		return
+	}
 	for _, p := range types.SupportedPolicies {
 		if err := SetRSVKRootV2(client, sk, int(p.N), int(p.K), rsproofProxy); err != nil {
 			log.Printf("Failed to set RS VK root for n=%d, k=%d: %v", p.N, p.K, err)
@@ -442,6 +450,14 @@ func deployall_v2(client *ethclient.Client, sk string) {
 
 	// Step 4: Set cross-contract references
 	log.Println("=== Setting Cross-Contract References ===")
+	if err := waitForCode(client, everifyProxy); err != nil { // guard RPC lag
+		log.Println("EVerify proxy code not visible:", err)
+		return
+	}
+	if err := waitForCode(client, eproofProxy); err != nil {
+		log.Println("EProof proxy code not visible:", err)
+		return
+	}
 
 	// Set EProof address in EVerify
 	if err := SetEProofAddress(client, sk, everifyProxy, eproofProxy); err != nil {
@@ -486,6 +502,10 @@ func deployall_v2(client *ethclient.Client, sk string) {
 	validatorPool, err := DeployValidatorRewardProxy(client, sk, validatorRewardImpl, tokenAddr, owner)
 	if err != nil {
 		log.Println("Failed to deploy ValidatorReward proxy:", err)
+		return
+	}
+	if err := waitForCode(client, validatorPool); err != nil { // guard RPC lag
+		log.Println("ValidatorReward proxy code not visible:", err)
 		return
 	}
 	if err := SetValidatorPool(client, sk, rsproofProxy, eproofProxy, validatorPool); err != nil {
