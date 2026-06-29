@@ -11,58 +11,33 @@ import (
 	"time"
 
 	"github.com/unibaseio/da-sdk-go/lib/types"
-	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	glogger "gorm.io/gorm/logger"
 )
 
 func (s *Server) loadGORM() {
-	cfg := &gorm.Config{
+	gpath := filepath.Join(s.rp.Path(), "gorm")
+
+	os.MkdirAll(gpath, os.ModePerm)
+	gpath = filepath.Join(gpath, "gorm.db")
+	db, err := gorm.Open(sqlite.Open(gpath), &gorm.Config{
 		Logger:                 glogger.Default.LogMode(glogger.Silent),
 		SkipDefaultTransaction: true,
 		PrepareStmt:            true,
+	})
+	if err != nil {
+		panic("failed to connect database")
 	}
 
-	// Backend selection (stage 2: shared index for multi-instance read scaling).
-	//   HUB_DB_DRIVER=postgres + HUB_DB_DSN=...  → shared Postgres (RDS)
-	//   default                                  → local SQLite (single node)
-	driver := strings.ToLower(os.Getenv("HUB_DB_DRIVER"))
-	dsn := os.Getenv("HUB_DB_DSN")
-	if driver == "" && dsn != "" {
-		driver = "postgres"
-	}
-
-	var db *gorm.DB
-	var err error
-	switch driver {
-	case "postgres", "pg":
-		if dsn == "" {
-			panic("HUB_DB_DRIVER=postgres requires HUB_DB_DSN")
-		}
-		db, err = gorm.Open(postgres.Open(dsn), cfg)
-		if err != nil {
-			panic("failed to connect postgres: " + err.Error())
-		}
-		logger.Info("gorm backend: postgres (shared index)")
-	default:
-		gpath := filepath.Join(s.rp.Path(), "gorm")
-		os.MkdirAll(gpath, os.ModePerm)
-		gpath = filepath.Join(gpath, "gorm.db")
-		db, err = gorm.Open(sqlite.Open(gpath), cfg)
-		if err != nil {
-			panic("failed to connect database")
-		}
-		// SQLite-only PRAGMAs (WAL, cache, mmap, busy timeout)
-		_ = db.Exec("PRAGMA journal_mode=WAL;")
-		_ = db.Exec("PRAGMA synchronous = NORMAL;") // NORMAL provides good balance of safety and performance
-		_ = db.Exec("PRAGMA cache_size = -64000;")  // 64MB cache (reduced for more frequent writes)
-		_ = db.Exec("PRAGMA temp_store = MEMORY;")
-		_ = db.Exec("PRAGMA mmap_size = 4000000000;")    // 4GB mmap
-		_ = db.Exec("PRAGMA wal_autocheckpoint = 1000;") // Less frequent checkpoints to reduce lock contention
-		_ = db.Exec("PRAGMA busy_timeout = 60000;")      // Increase timeout to 60 seconds for better handling of concurrent operations
-		logger.Infof("gorm backend: sqlite at %s", gpath)
-	}
+	// Enable WAL mode for better concurrency and data safety
+	_ = db.Exec("PRAGMA journal_mode=WAL;")
+	_ = db.Exec("PRAGMA synchronous = NORMAL;") // NORMAL provides good balance of safety and performance
+	_ = db.Exec("PRAGMA cache_size = -64000;")  // 64MB cache (reduced for more frequent writes)
+	_ = db.Exec("PRAGMA temp_store = MEMORY;")
+	_ = db.Exec("PRAGMA mmap_size = 4000000000;")    // 4GB mmap
+	_ = db.Exec("PRAGMA wal_autocheckpoint = 1000;") // Less frequent checkpoints to reduce lock contention
+	_ = db.Exec("PRAGMA busy_timeout = 60000;")      // Increase timeout to 60 seconds for better handling of concurrent operations
 
 	sqldb, err := db.DB()
 	if err != nil {
@@ -73,39 +48,30 @@ func (s *Server) loadGORM() {
 	sqldb.SetMaxOpenConns(20)                  // Reduce max connections to prevent overwhelming SQLite
 	sqldb.SetConnMaxLifetime(15 * time.Minute) // Shorter connection lifetime for better resource management
 
+	// Auto migrate tables
+	db.AutoMigrate(&types.Account{})
+	db.AutoMigrate(&types.Bucket{})
+	db.AutoMigrate(&types.Needle{})
+	db.AutoMigrate(&types.Volume{})
+	db.AutoMigrate(&types.StatRecord{})
+	db.AutoMigrate(&types.Conversation{})
+
+	// Add indexes
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner ON needles(owner);")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_bucket ON needles(bucket);")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_name ON needles(name);")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_name ON needles(owner, name);")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket ON needles(owner, bucket);")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket_name ON needles(owner, bucket, name);")
+
 	s.gdb = db
 
-	// Schema + indexes: writer only. Reader replicas (HUB_READONLY) share the
-	// same DB, so running AutoMigrate / CREATE INDEX from every replica would
-	// race on DDL (Postgres) — and a reader has nothing to create. The covering
-	// expression index (LOWER(owner), size) lets the memory-stats aggregation
-	// and the WHERE LOWER(owner)=? filters run index-only; building it on a very
-	// large table is a one-time, possibly multi-minute, write-locking op.
-	if !s.readonly {
-		db.AutoMigrate(&types.Account{})
-		db.AutoMigrate(&types.Bucket{})
-		db.AutoMigrate(&types.Needle{})
-		db.AutoMigrate(&types.Volume{})
-		db.AutoMigrate(&types.StatRecord{})
-		db.AutoMigrate(&types.Conversation{})
+	// Start periodic checkpoint routine for data safety
+	go s.periodicCheckpoint()
 
-		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner ON needles(owner);")
-		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_bucket ON needles(bucket);")
-		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_name ON needles(name);")
-		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_name ON needles(owner, name);")
-		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket ON needles(owner, bucket);")
-		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket_name ON needles(owner, bucket, name);")
-		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_size ON needles(LOWER(owner), size);")
-	}
-
-	// Periodic WAL checkpoint is SQLite-only; Postgres self-manages durability.
-	if s.isSQLite() {
-		go s.periodicCheckpoint()
-	}
-
-	// One-time backfill rewrites rows → writer only (and only when requested).
+	// iterate all needles to update bucket
 	ni := os.Getenv("NEED_INIT")
-	if ni != "" && !s.readonly {
+	if ni != "" {
 		logger.Info("handle need init")
 		var needles []types.Needle
 		result := db.Model(&types.Needle{}).Where("name like ? and created_at >= ?",
@@ -218,44 +184,6 @@ func (s *Server) listAccount(offset, limit int) ([]types.Account, error) {
 	}
 
 	return accounts, nil
-}
-
-// computeMemStats runs the heavy aggregation ONCE: a single GROUP BY over
-// needles yields the full per-owner list, from which the overview totals are
-// derived (no separate COUNT/SUM scans). This is a full-table scan and must
-// NOT be run inline per request (it 504'd behind the proxy on a large table) —
-// it's driven by the background refresh loop and the result is cached.
-//
-// Grouping/counting use LOWER(owner) so mixed-case and lowercase variants of
-// the same wallet merge (backed by idx_needles_lower_owner).
-func (s *Server) computeMemStats() (types.MemoryOverview, []types.MemoryStat, error) {
-	var ov types.MemoryOverview
-
-	if err := s.gdb.Model(&types.Account{}).Count(&ov.TotalAddresses).Error; err != nil {
-		return ov, nil, err
-	}
-
-	owners := []types.MemoryStat{}
-	err := s.gdb.Model(&types.Needle{}).
-		Select("LOWER(owner) as owner, count(*) as count, COALESCE(SUM(size),0) as bytes").
-		Group("LOWER(owner)").
-		Order("bytes desc").
-		Scan(&owners).Error
-	if err != nil {
-		return ov, nil, err
-	}
-
-	var totalCount, totalBytes int64
-	for i := range owners {
-		owners[i].GB = float64(owners[i].Bytes) / 1e9
-		totalCount += owners[i].Count
-		totalBytes += owners[i].Bytes
-	}
-	ov.WalletsWithMemory = int64(len(owners))
-	ov.MemoryCount = totalCount
-	ov.MemoryBytes = totalBytes
-	ov.MemoryGB = float64(totalBytes) / 1e9
-	return ov, owners, nil
 }
 
 func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) {
