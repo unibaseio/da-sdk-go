@@ -11,33 +11,58 @@ import (
 	"time"
 
 	"github.com/unibaseio/da-sdk-go/lib/types"
+	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	glogger "gorm.io/gorm/logger"
 )
 
 func (s *Server) loadGORM() {
-	gpath := filepath.Join(s.rp.Path(), "gorm")
-
-	os.MkdirAll(gpath, os.ModePerm)
-	gpath = filepath.Join(gpath, "gorm.db")
-	db, err := gorm.Open(sqlite.Open(gpath), &gorm.Config{
+	cfg := &gorm.Config{
 		Logger:                 glogger.Default.LogMode(glogger.Silent),
 		SkipDefaultTransaction: true,
 		PrepareStmt:            true,
-	})
-	if err != nil {
-		panic("failed to connect database")
 	}
 
-	// Enable WAL mode for better concurrency and data safety
-	_ = db.Exec("PRAGMA journal_mode=WAL;")
-	_ = db.Exec("PRAGMA synchronous = NORMAL;") // NORMAL provides good balance of safety and performance
-	_ = db.Exec("PRAGMA cache_size = -64000;")  // 64MB cache (reduced for more frequent writes)
-	_ = db.Exec("PRAGMA temp_store = MEMORY;")
-	_ = db.Exec("PRAGMA mmap_size = 4000000000;")    // 4GB mmap
-	_ = db.Exec("PRAGMA wal_autocheckpoint = 1000;") // Less frequent checkpoints to reduce lock contention
-	_ = db.Exec("PRAGMA busy_timeout = 60000;")      // Increase timeout to 60 seconds for better handling of concurrent operations
+	// Backend selection (stage 2: shared index for multi-instance read scaling).
+	//   HUB_DB_DRIVER=postgres + HUB_DB_DSN=...  → shared Postgres (RDS)
+	//   default                                  → local SQLite (single node)
+	driver := strings.ToLower(os.Getenv("HUB_DB_DRIVER"))
+	dsn := os.Getenv("HUB_DB_DSN")
+	if driver == "" && dsn != "" {
+		driver = "postgres"
+	}
+
+	var db *gorm.DB
+	var err error
+	switch driver {
+	case "postgres", "pg":
+		if dsn == "" {
+			panic("HUB_DB_DRIVER=postgres requires HUB_DB_DSN")
+		}
+		db, err = gorm.Open(postgres.Open(dsn), cfg)
+		if err != nil {
+			panic("failed to connect postgres: " + err.Error())
+		}
+		logger.Info("gorm backend: postgres (shared index)")
+	default:
+		gpath := filepath.Join(s.rp.Path(), "gorm")
+		os.MkdirAll(gpath, os.ModePerm)
+		gpath = filepath.Join(gpath, "gorm.db")
+		db, err = gorm.Open(sqlite.Open(gpath), cfg)
+		if err != nil {
+			panic("failed to connect database")
+		}
+		// SQLite-only PRAGMAs (WAL, cache, mmap, busy timeout)
+		_ = db.Exec("PRAGMA journal_mode=WAL;")
+		_ = db.Exec("PRAGMA synchronous = NORMAL;") // NORMAL provides good balance of safety and performance
+		_ = db.Exec("PRAGMA cache_size = -64000;")  // 64MB cache (reduced for more frequent writes)
+		_ = db.Exec("PRAGMA temp_store = MEMORY;")
+		_ = db.Exec("PRAGMA mmap_size = 4000000000;")    // 4GB mmap
+		_ = db.Exec("PRAGMA wal_autocheckpoint = 1000;") // Less frequent checkpoints to reduce lock contention
+		_ = db.Exec("PRAGMA busy_timeout = 60000;")      // Increase timeout to 60 seconds for better handling of concurrent operations
+		logger.Infof("gorm backend: sqlite at %s", gpath)
+	}
 
 	sqldb, err := db.DB()
 	if err != nil {
@@ -48,38 +73,53 @@ func (s *Server) loadGORM() {
 	sqldb.SetMaxOpenConns(20)                  // Reduce max connections to prevent overwhelming SQLite
 	sqldb.SetConnMaxLifetime(15 * time.Minute) // Shorter connection lifetime for better resource management
 
-	// Auto migrate tables
-	db.AutoMigrate(&types.Account{})
-	db.AutoMigrate(&types.Bucket{})
-	db.AutoMigrate(&types.Needle{})
-	db.AutoMigrate(&types.Volume{})
-	db.AutoMigrate(&types.StatRecord{})
-	db.AutoMigrate(&types.Conversation{})
-
-	// Add indexes
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner ON needles(owner);")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_bucket ON needles(bucket);")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_name ON needles(name);")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_name ON needles(owner, name);")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket ON needles(owner, bucket);")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket_name ON needles(owner, bucket, name);")
-	// listNeedle filters by LOWER(owner) and orders by id desc. Without a
-	// (LOWER(owner), id) index that query SEARCHes by owner but then builds a
-	// TEMP B-TREE to sort all matched rows by id — catastrophic for a wallet
-	// with millions of needles (loads them all to return 32). This index serves
-	// WHERE LOWER(owner)=? ORDER BY id via a reverse index walk (no temp sort).
-	// NOTE: on a large existing DB the first startup builds this once (minutes,
-	// write-locking) before serving — expected, do not restart mid-build.
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_id ON needles(LOWER(owner), id);")
-
 	s.gdb = db
 
-	// Start periodic checkpoint routine for data safety
-	go s.periodicCheckpoint()
+	// Schema + indexes: writer only. Reader replicas (HUB_READONLY) share the
+	// same DB, so running AutoMigrate / CREATE INDEX from every replica would
+	// race on DDL (Postgres) — and a reader has nothing to create. The covering
+	// expression index (LOWER(owner), size) lets the memory-stats aggregation
+	// and the WHERE LOWER(owner)=? filters run index-only; building it on a very
+	// large table is a one-time, possibly multi-minute, write-locking op.
+	if !s.readonly {
+		db.AutoMigrate(&types.Account{})
+		db.AutoMigrate(&types.Bucket{})
+		db.AutoMigrate(&types.Needle{})
+		db.AutoMigrate(&types.Volume{})
+		db.AutoMigrate(&types.StatRecord{})
+		db.AutoMigrate(&types.Conversation{})
 
-	// iterate all needles to update bucket
+		// Reads filter by LOWER(owner) (+ optional bucket/name) and order by id, so
+		// only the LOWER(owner) expression indexes plus name/bucket are useful. The
+		// raw (owner, …) composites can't serve LOWER(owner)=? — they were dead
+		// weight that slowed every INSERT on this 34M-row table. Drop them (also on
+		// existing DBs) and keep just the indexes the query planner actually uses.
+		for _, dead := range []string{
+			"idx_needles_owner", "idx_needles_owner_name",
+			"idx_needles_owner_bucket", "idx_needles_owner_bucket_name",
+		} {
+			db.Exec("DROP INDEX IF EXISTS " + dead)
+		}
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_bucket ON needles(bucket);")
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_name ON needles(name);")
+		// memoryStat's GROUP BY LOWER(owner) + SUM(size) runs index-only on this.
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_size ON needles(LOWER(owner), size);")
+		// listNeedle's WHERE LOWER(owner)=? ORDER BY id desc walks this in reverse
+		// (no TEMP B-TREE sort even for a wallet with millions of needles).
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_id ON needles(LOWER(owner), id);")
+		// getVolume(owner,file) is called once per needle in the list paths (N+1);
+		// index volumes so each lookup is a seek, not a full-table scan.
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_volumes_lower_owner_file ON volumes(LOWER(owner), file);")
+	}
+
+	// Periodic WAL checkpoint is SQLite-only; Postgres self-manages durability.
+	if s.isSQLite() {
+		go s.periodicCheckpoint()
+	}
+
+	// One-time backfill rewrites rows → writer only (and only when requested).
 	ni := os.Getenv("NEED_INIT")
-	if ni != "" {
+	if ni != "" && !s.readonly {
 		logger.Info("handle need init")
 		var needles []types.Needle
 		result := db.Model(&types.Needle{}).Where("name like ? and created_at >= ?",
@@ -192,6 +232,44 @@ func (s *Server) listAccount(offset, limit int) ([]types.Account, error) {
 	}
 
 	return accounts, nil
+}
+
+// computeMemStats runs the heavy aggregation ONCE: a single GROUP BY over
+// needles yields the full per-owner list, from which the overview totals are
+// derived (no separate COUNT/SUM scans). This is a full-table scan and must
+// NOT be run inline per request (it 504'd behind the proxy on a large table) —
+// it's driven by the background refresh loop and the result is cached.
+//
+// Grouping/counting use LOWER(owner) so mixed-case and lowercase variants of
+// the same wallet merge (backed by idx_needles_lower_owner).
+func (s *Server) computeMemStats() (types.MemoryOverview, []types.MemoryStat, error) {
+	var ov types.MemoryOverview
+
+	if err := s.gdb.Model(&types.Account{}).Count(&ov.TotalAddresses).Error; err != nil {
+		return ov, nil, err
+	}
+
+	owners := []types.MemoryStat{}
+	err := s.gdb.Model(&types.Needle{}).
+		Select("LOWER(owner) as owner, count(*) as count, COALESCE(SUM(size),0) as bytes").
+		Group("LOWER(owner)").
+		Order("bytes desc").
+		Scan(&owners).Error
+	if err != nil {
+		return ov, nil, err
+	}
+
+	var totalCount, totalBytes int64
+	for i := range owners {
+		owners[i].GB = float64(owners[i].Bytes) / 1e9
+		totalCount += owners[i].Count
+		totalBytes += owners[i].Bytes
+	}
+	ov.WalletsWithMemory = int64(len(owners))
+	ov.MemoryCount = totalCount
+	ov.MemoryBytes = totalBytes
+	ov.MemoryGB = float64(totalBytes) / 1e9
+	return ov, owners, nil
 }
 
 func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) {
@@ -348,15 +426,22 @@ func (s *Server) listBucket(owner string, offset, limit int) ([]types.BucketDisp
 	return res, nil
 }
 
-func (s *Server) addNeedle(owner, bucket, name string, findex uint64, start, length uint64) {
-	s.gdb.Create(&types.Needle{
+func (s *Server) addNeedle(owner, bucket, name string, findex uint64, start, length uint64) error {
+	if err := s.gdb.Create(&types.Needle{
 		Owner:  owner,
 		Bucket: bucket,
 		Name:   name,
 		File:   findex,
 		Start:  start,
 		Size:   length,
-	})
+	}).Error; err != nil {
+		// The blob is already in logfs but now unindexed. Surface the failure so
+		// the caller reports the upload as failed (client retries → we re-index),
+		// instead of silently returning 200 with a row missing from listNeedle.
+		// This matters more on a networked Postgres than on local SQLite.
+		logger.Errorf("create needle failed (owner=%s name=%s): %v", owner, name, err)
+		return err
+	}
 
 	if strings.HasSuffix(name, "_0") {
 		connName := strings.TrimSuffix(name, "_0")
@@ -364,14 +449,18 @@ func (s *Server) addNeedle(owner, bucket, name string, findex uint64, start, len
 		var conversation types.Conversation
 		result := s.gdb.Where(&types.Conversation{Name: connName, Owner: owner, Bucket: bucket}).First(&conversation)
 		if result.RowsAffected == 0 {
-			s.gdb.Save(&types.Conversation{
+			// non-fatal: the needle is indexed; conversation grouping can heal later.
+			if err := s.gdb.Save(&types.Conversation{
 				Name:   connName,
 				Owner:  owner,
 				Bucket: bucket,
-			})
+			}).Error; err != nil {
+				logger.Errorf("create conversation failed (name=%s): %v", connName, err)
+			}
 		}
 	}
 	logger.Info("create needle: ", owner)
+	return nil
 }
 
 func (s *Server) getNeedleByName(name string) ([]types.Needle, error) {
@@ -437,6 +526,7 @@ func (s *Server) listNeedleDisplay(owner, bucket string, offset, limit int) ([]t
 		return nil, result.Error
 	}
 
+	vmap := s.volumesFor(needle) // one query instead of getVolume per needle (N+1)
 	res := make([]types.NeedleDisplay, 0, len(needle))
 	for i := 0; i < len(needle); i++ {
 		nd := types.NeedleDisplay{
@@ -448,11 +538,10 @@ func (s *Server) listNeedleDisplay(owner, bucket string, offset, limit int) ([]t
 			Start:     needle[i].Start,
 			Size:      needle[i].Size,
 		}
-		vol, err := s.getVolume(needle[i].Owner, needle[i].File)
-		if err == nil && len(vol) > 0 {
-			nd.Piece = vol[0].Piece
-			nd.TxHash = vol[0].TxHash
-			nd.ChainType = vol[0].ChainType
+		if v, ok := vmap[volKey(needle[i].Owner, needle[i].File)]; ok {
+			nd.Piece = v.Piece
+			nd.TxHash = v.TxHash
+			nd.ChainType = v.ChainType
 		}
 		res = append(res, nd)
 	}
@@ -485,6 +574,46 @@ func (s *Server) getVolume(owner string, fid uint64) ([]types.Volume, error) {
 		return vol, result.Error
 	}
 	return vol, nil
+}
+
+// volKey keys the per-(owner,file) volume map; owner lowercased to match how
+// volumes are queried.
+func volKey(owner string, file uint64) string {
+	return fmt.Sprintf("%s:%d", strings.ToLower(owner), file)
+}
+
+// volumesFor batch-loads the volumes for a page of needles in ONE query, keyed
+// by (LOWER(owner), file) — avoids the N+1 of calling getVolume per needle in
+// the list paths. Bounded by the page's distinct owners × files; the map lookup
+// picks the exact (owner,file) pair, so any cross-product over-fetch is harmless.
+func (s *Server) volumesFor(needles []types.Needle) map[string]types.Volume {
+	m := make(map[string]types.Volume, len(needles))
+	if len(needles) == 0 {
+		return m
+	}
+	ownerSet := make(map[string]struct{})
+	fileSet := make(map[uint64]struct{})
+	for _, n := range needles {
+		ownerSet[strings.ToLower(n.Owner)] = struct{}{}
+		fileSet[n.File] = struct{}{}
+	}
+	owners := make([]string, 0, len(ownerSet))
+	for o := range ownerSet {
+		owners = append(owners, o)
+	}
+	files := make([]uint64, 0, len(fileSet))
+	for f := range fileSet {
+		files = append(files, f)
+	}
+	var vols []types.Volume
+	if err := s.gdb.Where("LOWER(owner) IN ? AND file IN ?", owners, files).Find(&vols).Error; err != nil {
+		logger.Warnf("batch volumesFor failed: %v", err)
+		return m
+	}
+	for _, v := range vols {
+		m[volKey(v.Owner, v.File)] = v
+	}
+	return m
 }
 
 func (s *Server) listVolume(owner string, offset, limit int) ([]types.Volume, error) {
@@ -575,6 +704,7 @@ func (s *Server) listNeedleDisplayByConversation(addr, bucket, conversation stri
 	if result.Error != nil {
 		return nil, result.Error
 	}
+	vmap := s.volumesFor(needles) // batch instead of getVolume per needle (N+1)
 	res := make([]types.NeedleDisplay, 0, len(needles))
 	for i := 0; i < len(needles); i++ {
 		nd := types.NeedleDisplay{
@@ -586,11 +716,10 @@ func (s *Server) listNeedleDisplayByConversation(addr, bucket, conversation stri
 			Start:     needles[i].Start,
 			Size:      needles[i].Size,
 		}
-		vol, err := s.getVolume(needles[i].Owner, needles[i].File)
-		if err == nil && len(vol) > 0 {
-			nd.Piece = vol[0].Piece
-			nd.TxHash = vol[0].TxHash
-			nd.ChainType = vol[0].ChainType
+		if v, ok := vmap[volKey(needles[i].Owner, needles[i].File)]; ok {
+			nd.Piece = v.Piece
+			nd.TxHash = v.TxHash
+			nd.ChainType = v.ChainType
 		}
 		res = append(res, nd)
 	}
