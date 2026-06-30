@@ -113,21 +113,26 @@ Listener rules on the HTTPS:443 listener, in priority order:
 
 | Prio | Condition | Action |
 |---|---|---|
-| 10 | Path is `/api/upload` **or** `/api/uploadData` | forward → `tg-hub-writer` |
+| 10 | Path is `/api/upload`, `/api/uploadData`, `/api/memoryStat` **or** `/api/memoryOverview` | forward → `tg-hub-writer` |
 | default | (everything else) | forward → `tg-hub-read` |
 
 CLI sketch:
 ```bash
-# writes → writer
+# writes + stats → writer
 aws elbv2 create-rule --listener-arn $LISTENER --priority 10 \
-  --conditions '[{"Field":"path-pattern","Values":["/api/upload","/api/uploadData"]}]' \
+  --conditions '[{"Field":"path-pattern","Values":["/api/upload","/api/uploadData","/api/memoryStat","/api/memoryOverview"]}]' \
   --actions   '[{"Type":"forward","TargetGroupArn":"'$TG_WRITER'"}]'
 # default rule already forwards to tg-hub-read
 ```
 
 Notes:
+- `/api/memoryStat` + `/api/memoryOverview` go to the **writer**: the heavy
+  recompute (full-index scan) runs writer-only, so replicas hold no snapshot and
+  would return an empty (ComputedAt=0) result. Stats are low-QPS (dashboard), so
+  routing them to the writer is fine.
 - Match by path is enough (uploads are POST to those two paths). You can also add
-  an `http-request-method = POST` condition for tightness.
+  an `http-request-method = POST` condition for tightness (but keep the GET stat
+  paths on the writer rule).
 - Health check path `/api/info` is public (no auth) and cheap.
 - If you put the writer in `tg-hub-read` too, reads also use it; to fully offload
   the writer, keep `tg-hub-read` = replicas only.
@@ -145,7 +150,10 @@ Notes:
 
 ## What this does / does not give you
 
-- ✅ list / get / `memoryStat` / `memoryOverview` reads scale across N replicas.
+- ✅ list / get reads scale across N replicas.
+- ◑ `memoryStat` / `memoryOverview` are served by the **writer** (the recompute
+  runs writer-only to avoid N× redundant full scans on the shared DB); they're
+  low-QPS dashboard calls, so this is fine.
 - ❌ `download` content does NOT scale (logfs is local to the writer; replicas
   fall back to the DA network). That needs stage 3 (S3).
 - Writer remains the single writer (logfs/badger are still local single-writer).

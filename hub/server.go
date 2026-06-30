@@ -156,8 +156,14 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		go s.uploadTo()
 	}
 
-	// memory-stats recompute is read-only (SELECT/aggregate), safe on replicas.
-	s.startMemStats(context.Background())
+	// memory-stats recompute is a full-index scan over the needles table. Run it
+	// on the WRITER only: if every replica ran it independently against the shared
+	// DB, the heavy scan would be multiplied N times. Stats are low-QPS
+	// (dashboard), so the ALB routes /api/memoryStat + /api/memoryOverview to the
+	// writer (like uploads); a replica that gets one serves an empty snapshot.
+	if !s.readonly {
+		s.startMemStats(context.Background())
+	}
 
 	s.registRoute()
 

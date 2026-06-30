@@ -185,7 +185,9 @@ func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader)
 		return types.MemeMeta{}, err
 	}
 
-	s.addNeedle(addr, bucket, key, lm.Index, lm.Start, lm.Size)
+	if err := s.addNeedle(addr, bucket, key, lm.Index, lm.Start, lm.Size); err != nil {
+		return types.MemeMeta{}, err
+	}
 
 	mm := types.MemeMeta{
 		File:  fmt.Sprintf("%s/%d.log", addr, lm.Index),
