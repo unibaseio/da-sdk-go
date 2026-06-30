@@ -379,6 +379,13 @@ func (s *Server) drainAll(cm *contract.ContractManage, au types.Auth, policy typ
 	wg.Wait()
 }
 
+// getLFS returns the in-memory log instance for an owner (nil if not loaded).
+func (s *Server) getLFS(addr string) *logfs.LogFS {
+	s.RLock()
+	defer s.RUnlock()
+	return s.lfs[addr]
+}
+
 // drainInstance uploads + commits one owner's (log instance idx) pending
 // volumes in order, advancing that owner's offset as each volume lands. Encode
 // (CPU) and AddPiece (chain) of different owners overlap because drainInstance
@@ -391,6 +398,23 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 	}
 
 	key := string(val)
+
+	// P2 time-flush: commit a partial (open) volume once it ages past the
+	// threshold, so slow/low-volume owners' small writes reach DA within bounded
+	// latency instead of waiting for the 31MiB size trigger. Still batched —
+	// everything accumulated in the window goes into one piece. Roll() advances
+	// the persisted offset, so the freshly-completed volume is uploaded below.
+	if maxAge := time.Duration(env.Int("HUB_FLUSH_MAX_AGE_SEC", 300)) * time.Second; maxAge > 0 {
+		if fs := s.getLFS(key); fs != nil {
+			if sz, age := fs.Pending(); sz > 0 && age >= maxAge {
+				if err := fs.Roll(); err != nil {
+					logger.Warnf("time-flush %s failed: %v", key, err)
+				} else {
+					logger.Infof("time-flush %s: rolled %d bytes (age %s)", key, sz, age.Truncate(time.Second))
+				}
+			}
+		}
+	}
 
 	logger.Debugf("check: %s %d", key, idx)
 	dsKey = types.NewKey(types.DsLogFS, key)

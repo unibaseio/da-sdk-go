@@ -8,12 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
+	"github.com/alecthomas/units"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
-	"github.com/alecthomas/units"
-	"github.com/fxamacker/cbor/v2"
 )
 
 var logger = log.Logger("logfs")
@@ -54,6 +55,7 @@ type LogFS struct {
 	curIndex uint64
 	curFi    *os.File
 	basedir  string
+	openedAt time.Time // when the current (open) volume got its first byte
 }
 
 // todo: each one has its own maxsize
@@ -90,6 +92,11 @@ func New(ds types.IKVStore, dir string, local, addr string) (*LogFS, error) {
 		return nil, err
 	}
 	sf.curSize = fi.Size()
+	if sf.curSize > 0 {
+		// existing partial volume: approximate its age from now (we don't persist
+		// the original first-write time). The time-flush will commit it promptly.
+		sf.openedAt = time.Now()
+	}
 
 	logger.Infof("logfs started at: %s %d %d", dir, sf.curIndex, sf.curSize)
 	return sf, nil
@@ -126,8 +133,32 @@ func (sf *LogFS) forward() error {
 	}
 	sf.curFi = fi
 	sf.curSize = 0
+	sf.openedAt = time.Time{} // reset; set on next first write
 	logger.Infof("logfs %s forward to: %d", sf.addr, sf.curIndex)
 	return nil
+}
+
+// Pending reports the unflushed bytes in the current (open) volume and how long
+// ago its first byte was written. Used by the hub to time-flush small writes:
+// commit a partial volume once it ages past a threshold (size trigger is MaxSize).
+func (sf *LogFS) Pending() (int64, time.Duration) {
+	sf.Lock()
+	defer sf.Unlock()
+	if sf.curSize == 0 {
+		return 0, 0
+	}
+	return sf.curSize, time.Since(sf.openedAt)
+}
+
+// Roll force-closes the current (open) volume into a completed one so it becomes
+// uploadable, even below MaxSize. No-op if the volume is empty.
+func (sf *LogFS) Roll() error {
+	sf.Lock()
+	defer sf.Unlock()
+	if sf.curSize == 0 {
+		return nil
+	}
+	return sf.forward()
 }
 
 func (sf *LogFS) Put(key, val []byte) error {
@@ -143,6 +174,10 @@ func (sf *LogFS) Put(key, val []byte) error {
 	has, err := sf.ds.Has(dskey)
 	if err == nil && has {
 		logger.Infof("%s overwrite key: %s", sf.addr, string(key))
+	}
+
+	if sf.curSize == 0 {
+		sf.openedAt = time.Now() // first byte of a fresh volume
 	}
 
 	n, err := sf.curFi.WriteAt(val, sf.curSize)
