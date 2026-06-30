@@ -87,7 +87,15 @@ func (s *Server) loadGORM() {
 		if err := db.Use(dbresolver.Register(dbresolver.Config{
 			Replicas: []gorm.Dialector{postgres.Open(readDSN)},
 			Policy:   dbresolver.RandomPolicy{},
-		})); err != nil {
+		}).
+			// Bound + recycle the replica pool (the writer/source pool already gets
+			// these via sqldb above). ConnMaxLifetime matters for Aurora read
+			// auto-scaling: the reader CLUSTER endpoint load-balances only on NEW
+			// connections, so without periodic recycling the pool stays pinned to the
+			// current reader(s) and a freshly scaled-out replica never receives traffic.
+			SetConnMaxLifetime(10 * time.Minute).
+			SetMaxIdleConns(5).
+			SetMaxOpenConns(20)); err != nil {
 			panic("failed to register read replica (HUB_DB_DSN_READ): " + err.Error())
 		}
 		logger.Info("dbresolver: reads → HUB_DB_DSN_READ (replica), writes/DDL → writer")
