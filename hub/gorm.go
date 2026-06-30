@@ -96,6 +96,10 @@ func (s *Server) loadGORM() {
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket ON needles(owner, bucket);")
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner_bucket_name ON needles(owner, bucket, name);")
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_size ON needles(LOWER(owner), size);")
+		// (LOWER(owner), id): serves listNeedle's WHERE LOWER(owner)=? ORDER BY id desc
+		// via a reverse index walk — avoids a TEMP B-TREE sort for fat owners (kept
+		// from main's idx_needles_lower_owner_id, folded into the writer-only block).
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_id ON needles(LOWER(owner), id);")
 	}
 
 	// Periodic WAL checkpoint is SQLite-only; Postgres self-manages durability.
