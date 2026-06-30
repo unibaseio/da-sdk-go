@@ -3,92 +3,19 @@ package hub
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/gin-gonic/gin"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 	"gorm.io/gorm"
 )
 
 func (s *Server) addStat(g *gin.RouterGroup) {
 	g.Group("/").POST("/stat", s.getStatByPost)
 	g.Group("/").GET("/stat", s.getStatByGet)
-
-	g.Group("/").POST("/memoryStat", s.listMemoryStatByPost)
-	g.Group("/").GET("/memoryStat", s.listMemoryStatByGet)
-
-	g.Group("/").GET("/memoryOverview", s.getMemoryOverview)
-	g.Group("/").POST("/memoryOverview", s.getMemoryOverview)
-}
-
-// getMemoryOverview godoc
-//
-//	@Summary		Memory dashboard overview
-//	@Description	Hub-wide totals: distinct addresses, wallets with memory, total memory entries, total size (GB).
-//	@Tags			statistics
-//	@Produce		json
-//	@Success		200	{object}	types.MemoryOverview
-//	@Failure		599	{object}	lerror.APIError
-//	@Router			/api/memoryOverview [get]
-func (s *Server) getMemoryOverview(c *gin.Context) {
-	// served from the background-computed snapshot (no inline DB scan)
-	c.JSON(http.StatusOK, s.memoryOverviewSnapshot())
-}
-
-// listMemoryStatByGet godoc
-//
-//	@Summary		Per-owner memory stats (paginated)
-//	@Description	List each wallet's memory entry count and total size (GB), grouped by owner, ordered by size desc. Pass owner to filter to a single wallet (case-insensitive); result stays a list (0 or 1 item).
-//	@Tags			statistics
-//	@Accept			json
-//	@Produce		json
-//	@Param			owner	query		string	false	"filter to a single wallet address (case-insensitive)"
-//	@Param			offset	query		int		false	"pagination offset" default(0)
-//	@Param			length	query		int		false	"page size (max 100)" default(32)
-//	@Success		200		{object}	types.MemoryStatResult
-//	@Failure		599		{object}	lerror.APIError
-//	@Router			/api/memoryStat [get]
-func (s *Server) listMemoryStatByGet(c *gin.Context) {
-	offset, _ := strconv.Atoi(c.Query("offset"))
-	length, _ := strconv.Atoi(c.Query("length"))
-	s.serveMemoryStat(c, c.Query("owner"), offset, length)
-}
-
-// listMemoryStatByPost godoc
-//
-//	@Summary		Per-owner memory stats (paginated, POST)
-//	@Description	List each wallet's memory entry count and total size (GB), grouped by owner, ordered by size desc. Pass owner to filter to a single wallet (case-insensitive); result stays a list (0 or 1 item).
-//	@Tags			statistics
-//	@Accept			application/x-www-form-urlencoded
-//	@Produce		json
-//	@Param			owner	formData	string	false	"filter to a single wallet address (case-insensitive)"
-//	@Param			offset	formData	int		false	"pagination offset" default(0)
-//	@Param			length	formData	int		false	"page size (max 100)" default(32)
-//	@Success		200		{object}	types.MemoryStatResult
-//	@Failure		599		{object}	lerror.APIError
-//	@Router			/api/memoryStat [post]
-func (s *Server) listMemoryStatByPost(c *gin.Context) {
-	offset, _ := strconv.Atoi(c.PostForm("offset"))
-	length, _ := strconv.Atoi(c.PostForm("length"))
-	s.serveMemoryStat(c, c.PostForm("owner"), offset, length)
-}
-
-func (s *Server) serveMemoryStat(c *gin.Context, owner string, offset, length int) {
-	if length <= 0 {
-		length = 32
-	}
-	if length > 100 {
-		length = 100
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	// served (and filtered) from the background-computed snapshot (no inline DB scan)
-	c.JSON(http.StatusOK, s.memoryStatPage(owner, offset, length))
 }
 
 // @Summary Get statistics by POST

@@ -84,33 +84,6 @@ type NeedleDisplay struct {
 	TxHash    string
 }
 
-// MemoryStat is one owner's aggregate memory usage.
-type MemoryStat struct {
-	Owner string  `json:"owner"` // wallet address (lowercased)
-	Count int64   `json:"count"` // number of memory entries (needles)
-	Bytes int64   `json:"bytes"` // total stored bytes
-	GB    float64 `json:"gb"`    // bytes / 1e9, convenience
-}
-
-// MemoryStatResult is one page of per-owner memory stats.
-type MemoryStatResult struct {
-	Total      int64        `json:"total"` // total distinct owners (for pagination)
-	Offset     int          `json:"offset"`
-	Length     int          `json:"length"`
-	Items      []MemoryStat `json:"items"`
-	ComputedAt int64        `json:"computedAt"` // unix secs of the cached snapshot (0 = not ready)
-}
-
-// MemoryOverview is the dashboard summary (the four overview cards).
-type MemoryOverview struct {
-	TotalAddresses    int64   `json:"totalAddresses"`    // distinct addresses known to the hub (accounts)
-	WalletsWithMemory int64   `json:"walletsWithMemory"` // owners with >=1 memory entry
-	MemoryCount       int64   `json:"memoryCount"`       // total memory entries (needles)
-	MemoryBytes       int64   `json:"memoryBytes"`       // total stored bytes
-	MemoryGB          float64 `json:"memoryGB"`          // memoryBytes / 1e9
-	ComputedAt        int64   `json:"computedAt"`        // unix secs of the cached snapshot (0 = not ready)
-}
-
 type Stat struct {
 	Day           time.Time
 	DailyAccounts int64 // new created accounts at this day

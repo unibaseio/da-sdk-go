@@ -177,8 +177,21 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	return err
 }
 
+// AddPiece registers a piece on-chain (IncreaseAllowance + addPiece) under the
+// default 3-minute budget. See AddPieceCtx for a caller-supplied deadline.
 func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
-	return c.addPieceImpl(pc, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	return c.addPieceImpl(ctx, pc, nil)
+}
+
+// AddPieceCtx is AddPiece with a caller-supplied context. ctx bounds the whole
+// flow — the contract-binding calls AND the two CheckTx receipt waits (which
+// previously escaped AddPiece's own timeout). A synchronous HTTP handler passes
+// a short ctx so a stuck tx can't hold the request open; on ctx expiry the blob
+// is already staged, so the (idempotent) seal can be retried to confirm.
+func (c *ContractManage) AddPieceCtx(ctx context.Context, pc types.PieceCore) (string, error) {
+	return c.addPieceImpl(ctx, pc, nil)
 }
 
 // AddPieceFor submits a piece sponsored by this account (the payer / relayer)
@@ -186,16 +199,16 @@ func (c *ContractManage) AddPiece(pc types.PieceCore) (string, error) {
 // addPieceFor. This account must hold RELAYER_ROLE on the Piece contract. Used
 // by the hub's sponsored /api/seal path so piece.owner reflects the real user.
 func (c *ContractManage) AddPieceFor(pc types.PieceCore, owner common.Address) (string, error) {
-	return c.addPieceImpl(pc, &owner)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	return c.addPieceImpl(ctx, pc, &owner)
 }
 
 // addPieceImpl is the shared body: owner==nil -> addPiece (self), owner!=nil ->
-// addPieceFor (sponsored, attributed to *owner). Payment is always pulled from
-// this account.
-func (c *ContractManage) addPieceImpl(pc types.PieceCore, owner *common.Address) (string, error) {
+// addPieceFor (sponsored, attributed to *owner). ctx bounds the binding calls +
+// both CheckTx receipt waits. Payment is always pulled from this account.
+func (c *ContractManage) addPieceImpl(ctx context.Context, pc types.PieceCore, owner *common.Address) (string, error) {
 	com.Logger.Debug("add piece: ", pc)
-	ctx, cancle := context.WithTimeout(context.TODO(), 3*time.Minute)
-	defer cancle()
 
 	ce, err := c.GetEpoch()
 	if err != nil {
@@ -217,6 +230,7 @@ func (c *ContractManage) addPieceImpl(pc types.PieceCore, owner *common.Address)
 	if err != nil {
 		return "", err
 	}
+	au.Context = ctx // a cancelled ctx aborts the send's EstimateGas too
 
 	ti, err := c.NewToken(ctx)
 	if err != nil {
@@ -229,7 +243,7 @@ func (c *ContractManage) addPieceImpl(pc types.PieceCore, owner *common.Address)
 	if err != nil {
 		return "", err
 	}
-	err = c.CheckTx(tx.Hash())
+	err = c.CheckTxCtx(ctx, tx.Hash())
 	if err != nil {
 		return "", err
 	}
@@ -250,6 +264,7 @@ func (c *ContractManage) addPieceImpl(pc types.PieceCore, owner *common.Address)
 	if err != nil {
 		return "", err
 	}
+	au.Context = ctx
 	if owner != nil {
 		tx, err = fi.AddPieceFor(au, *owner, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
 	} else {
@@ -258,7 +273,7 @@ func (c *ContractManage) addPieceImpl(pc types.PieceCore, owner *common.Address)
 	if err != nil {
 		return "", err
 	}
-	err = c.CheckTx(tx.Hash())
+	err = c.CheckTxCtx(ctx, tx.Hash())
 	if err != nil {
 		return "", err
 	}

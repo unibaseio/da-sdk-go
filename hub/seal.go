@@ -1,23 +1,32 @@
 package hub
 
 import (
+	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	com "github.com/unibaseio/da-sdk-go/contract/common"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/sdk"
 )
+
+// defaultSealChainTimeoutSec bounds the synchronous on-chain registration in the
+// /api/seal register=hub path. On expiry the blob is already erasure-staged; the
+// client retries seal (idempotent) to confirm the on-chain serial.
+const defaultSealChainTimeoutSec int64 = 90
 
 func (s *Server) addSeal(g *gin.RouterGroup) {
 	g.Group("/").POST("/seal", s.seal)
@@ -155,8 +164,30 @@ func (s *Server) seal(c *gin.Context) {
 		// v1: hub signs AddPiece + pays gas; client needs no chain interaction.
 		txn := ""
 		if serial == 0 {
-			txn, err = cm.AddPiece(pc)
+			// bound the on-chain wait so a stuck tx can't hold this request open
+			// for the full CheckTx backoff (tens of minutes).
+			chainCtx, cancel := context.WithTimeout(context.Background(),
+				time.Duration(env.Int64("HUB_SEAL_CHAIN_TIMEOUT_SEC", defaultSealChainTimeoutSec))*time.Second)
+			txn, err = cm.AddPieceCtx(chainCtx, pc)
+			cancel()
 			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					// the blob is staged; only on-chain registration is pending.
+					// seal is idempotent (GetPieceSerial gate), so the client
+					// retries to confirm the serial — never a duplicate piece.
+					c.JSON(http.StatusAccepted, gin.H{
+						"register":     "hub",
+						"da_cid":       pc.Name,
+						"size":         pc.Size,
+						"policy":       gin.H{"n": policy.N, "k": policy.K},
+						"expire":       expire,
+						"add_piece_tx": "",
+						"piece_serial": uint64(0),
+						"pending":      true,
+						"detail":       "staged; on-chain registration pending, retry seal to confirm",
+					})
+					return
+				}
 				c.JSON(599, lerror.ToAPIError("hub", err))
 				return
 			}
