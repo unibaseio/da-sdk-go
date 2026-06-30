@@ -102,14 +102,37 @@ func (s *Server) loadGORM() {
 		}
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_bucket ON needles(bucket);")
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_name ON needles(name);")
-		// memoryStat's GROUP BY LOWER(owner) + SUM(size) runs index-only on this.
-		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_size ON needles(LOWER(owner), size);")
-		// listNeedle's WHERE LOWER(owner)=? ORDER BY id desc walks this in reverse
-		// (no TEMP B-TREE sort even for a wallet with millions of needles).
-		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_id ON needles(LOWER(owner), id);")
+
+		// The LOWER(owner) expression indexes are PARTIAL on `deleted_at IS NULL` to
+		// match the predicate gorm injects into every soft-delete query. Without it
+		// the planner can't go index-only (it must hit the heap to check deleted_at),
+		// so memoryStat's GROUP BY fell back to a full 34M-row seq scan every refresh.
+		// With it: memoryStat aggregates index-only, and listNeedle's offset-walk stays
+		// in-index. Build the partial versions, THEN drop the old full ones — that
+		// ordering keeps an owner index available throughout the one-time rebuild
+		// (multi-minute on a large table, writer-startup only). Partial indexes work on
+		// both Postgres and SQLite. NOTE: after the rebuild + the bulk load, run
+		// `VACUUM ANALYZE needles;` so the visibility map is set and the scan is truly
+		// index-only.
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_size_live ON needles(LOWER(owner), size) WHERE deleted_at IS NULL;")
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_lower_owner_id_live ON needles(LOWER(owner), id) WHERE deleted_at IS NULL;")
+		// Old full (non-partial) versions, superseded by the *_live partials above.
+		// DROP IF EXISTS is a no-op once gone, so this stays idempotent across restarts.
+		db.Exec("DROP INDEX IF EXISTS idx_needles_lower_owner_size")
+		db.Exec("DROP INDEX IF EXISTS idx_needles_lower_owner_id")
+
 		// getVolume(owner,file) is called once per needle in the list paths (N+1);
 		// index volumes so each lookup is a seek, not a full-table scan.
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_volumes_lower_owner_file ON volumes(LOWER(owner), file);")
+
+		// Small reference tables today, but addBucket/addAccount do a name lookup on
+		// the WRITE path (every upload), and the list endpoints filter by LOWER(owner);
+		// index them so those stay seeks instead of seq scans as the tables grow.
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_buckets_name ON buckets(name);")
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_accounts_name ON accounts(name);")
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_conversations_name ON conversations(name);")
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_buckets_lower_owner_id ON buckets(LOWER(owner), id);")
+		db.Exec("CREATE INDEX IF NOT EXISTS idx_conversations_lower_owner_id ON conversations(LOWER(owner), id);")
 	}
 
 	// Periodic WAL checkpoint is SQLite-only; Postgres self-manages durability.
@@ -241,7 +264,8 @@ func (s *Server) listAccount(offset, limit int) ([]types.Account, error) {
 // it's driven by the background refresh loop and the result is cached.
 //
 // Grouping/counting use LOWER(owner) so mixed-case and lowercase variants of
-// the same wallet merge (backed by idx_needles_lower_owner).
+// the same wallet merge (served index-only by idx_needles_lower_owner_size_live,
+// the partial index whose `deleted_at IS NULL` predicate matches this query).
 func (s *Server) computeMemStats() (types.MemoryOverview, []types.MemoryStat, error) {
 	var ov types.MemoryOverview
 
