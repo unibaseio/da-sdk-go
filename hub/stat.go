@@ -12,6 +12,7 @@ import (
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/plugin/dbresolver"
 )
 
 func (s *Server) addStat(g *gin.RouterGroup) {
@@ -241,8 +242,10 @@ func (sm *StatManager) saveStat(stat *types.Stat) error {
 		LastVolumeID:  sm.lastVolumeID,
 	}
 
-	// if record for the day exists, update it
-	sm.db.Order("id desc").Where("day = ?", record.Day).Assign(record).FirstOrCreate(&record)
+	// if record for the day exists, update it. FirstOrCreate is read+write keyed on
+	// Day (primary key) — force the writer so replica lag can't cause a duplicate
+	// insert / PK conflict.
+	sm.db.Clauses(dbresolver.Write).Order("id desc").Where("day = ?", record.Day).Assign(record).FirstOrCreate(&record)
 
 	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	glogger "gorm.io/gorm/logger"
+	"gorm.io/plugin/dbresolver"
 )
 
 func (s *Server) loadGORM() {
@@ -74,6 +75,23 @@ func (s *Server) loadGORM() {
 	sqldb.SetConnMaxLifetime(15 * time.Minute) // Shorter connection lifetime for better resource management
 
 	s.gdb = db
+
+	// Read/write split: when HUB_DB_DSN_READ is set (e.g. the Aurora reader
+	// endpoint) register gorm's dbresolver so SELECTs go to the read replica and
+	// writes + DDL stay on the writer (the main connection opened above). Unset →
+	// single DB, behavior unchanged. Postgres only. Reads that GATE a write
+	// (existence / uniqueness checks) must still hit the writer to avoid replica-lag
+	// races — those call sites use .Clauses(dbresolver.Write).
+	if (driver == "postgres" || driver == "pg") && os.Getenv("HUB_DB_DSN_READ") != "" {
+		readDSN := os.Getenv("HUB_DB_DSN_READ")
+		if err := db.Use(dbresolver.Register(dbresolver.Config{
+			Replicas: []gorm.Dialector{postgres.Open(readDSN)},
+			Policy:   dbresolver.RandomPolicy{},
+		})); err != nil {
+			panic("failed to register read replica (HUB_DB_DSN_READ): " + err.Error())
+		}
+		logger.Info("dbresolver: reads → HUB_DB_DSN_READ (replica), writes/DDL → writer")
+	}
 
 	// Schema + indexes: writer only. Reader replicas (HUB_READONLY) share the
 	// same DB, so running AutoMigrate / CREATE INDEX from every replica would
@@ -201,7 +219,8 @@ func (s *Server) loadGORM() {
 
 func (s *Server) addAccount(owner string) {
 	var account types.Account
-	result := s.gdb.First(&account, "name = ?", owner)
+	// read-before-write: must see the writer's latest, not a lagging replica.
+	result := s.gdb.Clauses(dbresolver.Write).First(&account, "name = ?", owner)
 	if result.RowsAffected > 0 {
 		logger.Info("already has account: ", owner)
 		return
@@ -216,7 +235,9 @@ func (s *Server) addAccount(owner string) {
 // TODO: bucket is global unique
 func (s *Server) addBucket(owner, bucket string) error {
 	var gbucket types.Bucket
-	result := s.gdb.First(&gbucket, "name = ? ", bucket)
+	// read-before-write (uniqueness/ownership gate): force the writer so two quick
+	// uploads of the same bucket name can't both miss it on a lagging replica.
+	result := s.gdb.Clauses(dbresolver.Write).First(&gbucket, "name = ? ", bucket)
 	if result.RowsAffected > 0 {
 		if !strings.EqualFold(gbucket.Owner, owner) {
 			logger.Infof("bucket: %s is owned by %s", bucket, gbucket.Owner)
@@ -471,7 +492,9 @@ func (s *Server) addNeedle(owner, bucket, name string, findex uint64, start, len
 		connName := strings.TrimSuffix(name, "_0")
 		// check if conversation already exists
 		var conversation types.Conversation
-		result := s.gdb.Where(&types.Conversation{Name: connName, Owner: owner, Bucket: bucket}).First(&conversation)
+		// read-before-write: force the writer so we don't create a duplicate
+		// conversation row off a lagging replica.
+		result := s.gdb.Clauses(dbresolver.Write).Where(&types.Conversation{Name: connName, Owner: owner, Bucket: bucket}).First(&conversation)
 		if result.RowsAffected == 0 {
 			// non-fatal: the needle is indexed; conversation grouping can heal later.
 			if err := s.gdb.Save(&types.Conversation{
