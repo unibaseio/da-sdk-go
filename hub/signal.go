@@ -38,11 +38,13 @@ func (s *Server) SetupSignalHandler() {
 func (s *Server) emergencyShutdown(ctx context.Context) {
 	logger.Warn("performing emergency data persistence...")
 
-	// Force database checkpoint
+	// Force database checkpoint (SQLite WAL only; Postgres self-manages)
 	if s.gdb != nil {
-		logger.Info("emergency: forcing database checkpoint...")
-		if err := s.gdb.Exec("PRAGMA wal_checkpoint(FULL);").Error; err != nil {
-			logger.Errorf("emergency checkpoint failed: %v", err)
+		if s.isSQLite() {
+			logger.Info("emergency: forcing database checkpoint...")
+			if err := s.gdb.Exec("PRAGMA wal_checkpoint(FULL);").Error; err != nil {
+				logger.Errorf("emergency checkpoint failed: %v", err)
+			}
 		}
 
 		// Get underlying SQL database and close it

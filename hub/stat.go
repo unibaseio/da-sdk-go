@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -16,6 +17,78 @@ import (
 func (s *Server) addStat(g *gin.RouterGroup) {
 	g.Group("/").POST("/stat", s.getStatByPost)
 	g.Group("/").GET("/stat", s.getStatByGet)
+
+	g.Group("/").POST("/memoryStat", s.listMemoryStatByPost)
+	g.Group("/").GET("/memoryStat", s.listMemoryStatByGet)
+
+	g.Group("/").GET("/memoryOverview", s.getMemoryOverview)
+	g.Group("/").POST("/memoryOverview", s.getMemoryOverview)
+}
+
+// getMemoryOverview godoc
+//
+//	@Summary		Memory dashboard overview
+//	@Description	Hub-wide totals: distinct addresses, wallets with memory, total memory entries, total size (GB).
+//	@Tags			statistics
+//	@Produce		json
+//	@Success		200	{object}	types.MemoryOverview
+//	@Failure		599	{object}	lerror.APIError
+//	@Router			/api/memoryOverview [get]
+func (s *Server) getMemoryOverview(c *gin.Context) {
+	// served from the background-computed snapshot (no inline DB scan)
+	c.JSON(http.StatusOK, s.memoryOverviewSnapshot())
+}
+
+// listMemoryStatByGet godoc
+//
+//	@Summary		Per-owner memory stats (paginated)
+//	@Description	List each wallet's memory entry count and total size (GB), grouped by owner, ordered by size desc. Pass owner to filter to a single wallet (case-insensitive); result stays a list (0 or 1 item).
+//	@Tags			statistics
+//	@Accept			json
+//	@Produce		json
+//	@Param			owner	query		string	false	"filter to a single wallet address (case-insensitive)"
+//	@Param			offset	query		int		false	"pagination offset" default(0)
+//	@Param			length	query		int		false	"page size (max 100)" default(32)
+//	@Success		200		{object}	types.MemoryStatResult
+//	@Failure		599		{object}	lerror.APIError
+//	@Router			/api/memoryStat [get]
+func (s *Server) listMemoryStatByGet(c *gin.Context) {
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	length, _ := strconv.Atoi(c.Query("length"))
+	s.serveMemoryStat(c, c.Query("owner"), offset, length)
+}
+
+// listMemoryStatByPost godoc
+//
+//	@Summary		Per-owner memory stats (paginated, POST)
+//	@Description	List each wallet's memory entry count and total size (GB), grouped by owner, ordered by size desc. Pass owner to filter to a single wallet (case-insensitive); result stays a list (0 or 1 item).
+//	@Tags			statistics
+//	@Accept			application/x-www-form-urlencoded
+//	@Produce		json
+//	@Param			owner	formData	string	false	"filter to a single wallet address (case-insensitive)"
+//	@Param			offset	formData	int		false	"pagination offset" default(0)
+//	@Param			length	formData	int		false	"page size (max 100)" default(32)
+//	@Success		200		{object}	types.MemoryStatResult
+//	@Failure		599		{object}	lerror.APIError
+//	@Router			/api/memoryStat [post]
+func (s *Server) listMemoryStatByPost(c *gin.Context) {
+	offset, _ := strconv.Atoi(c.PostForm("offset"))
+	length, _ := strconv.Atoi(c.PostForm("length"))
+	s.serveMemoryStat(c, c.PostForm("owner"), offset, length)
+}
+
+func (s *Server) serveMemoryStat(c *gin.Context, owner string, offset, length int) {
+	if length <= 0 {
+		length = 32
+	}
+	if length > 100 {
+		length = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	// served (and filtered) from the background-computed snapshot (no inline DB scan)
+	c.JSON(http.StatusOK, s.memoryStatPage(owner, offset, length))
 }
 
 // @Summary Get statistics by POST
@@ -257,6 +330,20 @@ func (sm *StatManager) run(ctx context.Context) {
 	}
 }
 
+// countAndMaxID returns COUNT(*) and COALESCE(MAX(id),0) for model under the
+// given filter in ONE query. It replaces the old Find()+len() pattern, which
+// materialized every matching row into memory just to count it — fine for the
+// small tables, but on the 34M-row needles table a `created_at < date` filter
+// loaded ~all rows into RAM (OOM / multi-minute stall).
+func countAndMaxID(db *gorm.DB, model interface{}, query string, args ...interface{}) (int64, uint) {
+	var r struct {
+		C int64
+		M uint
+	}
+	db.Model(model).Where(query, args...).Select("COUNT(*) AS c, COALESCE(MAX(id),0) AS m").Scan(&r)
+	return r.C, r.M
+}
+
 // updateStat updates statistics for before a day
 func (sm *StatManager) updateStat(t time.Time) {
 	// Ensure time is aligned to day boundary
@@ -264,33 +351,22 @@ func (sm *StatManager) updateStat(t time.Time) {
 	day := t.Format("2006-01-02")
 	nextDay := t.Add(24 * time.Hour)
 
-	// Get total counts up to the specified day and update last IDs
-	var totalAccounts []types.Account
-	sm.db.Model(&types.Account{}).Where("created_at < ?", nextDay).Find(&totalAccounts)
-	totalAccountsCount := int64(len(totalAccounts))
-	if len(totalAccounts) > 0 {
-		sm.lastAccountID = totalAccounts[len(totalAccounts)-1].ID
+	// Total counts up to the specified day; advance last IDs to MAX(id) seen.
+	totalAccountsCount, lastAcc := countAndMaxID(sm.db, &types.Account{}, "created_at < ?", nextDay)
+	if totalAccountsCount > 0 {
+		sm.lastAccountID = lastAcc
 	}
-
-	var totalBuckets []types.Bucket
-	sm.db.Model(&types.Bucket{}).Where("created_at < ?", nextDay).Find(&totalBuckets)
-	totalBucketsCount := int64(len(totalBuckets))
-	if len(totalBuckets) > 0 {
-		sm.lastBucketID = totalBuckets[len(totalBuckets)-1].ID
+	totalBucketsCount, lastBkt := countAndMaxID(sm.db, &types.Bucket{}, "created_at < ?", nextDay)
+	if totalBucketsCount > 0 {
+		sm.lastBucketID = lastBkt
 	}
-
-	var totalNeedles []types.Needle
-	sm.db.Model(&types.Needle{}).Where("created_at < ?", nextDay).Find(&totalNeedles)
-	totalNeedlesCount := int64(len(totalNeedles))
-	if len(totalNeedles) > 0 {
-		sm.lastNeedleID = totalNeedles[len(totalNeedles)-1].ID
+	totalNeedlesCount, lastNdl := countAndMaxID(sm.db, &types.Needle{}, "created_at < ?", nextDay)
+	if totalNeedlesCount > 0 {
+		sm.lastNeedleID = lastNdl
 	}
-
-	var totalVolumes []types.Volume
-	sm.db.Model(&types.Volume{}).Where("created_at < ?", nextDay).Find(&totalVolumes)
-	totalVolumesCount := int64(len(totalVolumes))
-	if len(totalVolumes) > 0 {
-		sm.lastVolumeID = totalVolumes[len(totalVolumes)-1].ID
+	totalVolumesCount, lastVol := countAndMaxID(sm.db, &types.Volume{}, "created_at < ?", nextDay)
+	if totalVolumesCount > 0 {
+		sm.lastVolumeID = lastVol
 	}
 
 	stat := &types.Stat{
@@ -314,46 +390,31 @@ func (sm *StatManager) updateDailyStat(t time.Time) {
 	day := t.Format("2006-01-02")
 	nextDay := t.Add(24 * time.Hour)
 
-	// Get daily counts using incremental updates with optimized queries
-	var dailyAccounts []types.Account
-	sm.db.Model(&types.Account{}).
-		Where("id > ? AND created_at < ? AND created_at >= ?", sm.lastAccountID, nextDay, t).
-		Order("id ASC").
-		Find(&dailyAccounts)
-	if len(dailyAccounts) > 0 {
-		sm.lastAccountID = dailyAccounts[len(dailyAccounts)-1].ID
+	// Daily counts via incremental id ranges; COUNT(*)+MAX(id) avoids materializing
+	// the day's rows just to len() them (a high-volume day could be millions).
+	dailyAccountsCount, lastAcc := countAndMaxID(sm.db, &types.Account{},
+		"id > ? AND created_at < ? AND created_at >= ?", sm.lastAccountID, nextDay, t)
+	if dailyAccountsCount > 0 {
+		sm.lastAccountID = lastAcc
 	}
-	dailyAccountsCount := int64(len(dailyAccounts))
 
-	var dailyBuckets []types.Bucket
-	sm.db.Model(&types.Bucket{}).
-		Where("id > ? AND created_at < ? AND created_at >= ?", sm.lastBucketID, nextDay, t).
-		Order("id ASC").
-		Find(&dailyBuckets)
-	if len(dailyBuckets) > 0 {
-		sm.lastBucketID = dailyBuckets[len(dailyBuckets)-1].ID
+	dailyBucketsCount, lastBkt := countAndMaxID(sm.db, &types.Bucket{},
+		"id > ? AND created_at < ? AND created_at >= ?", sm.lastBucketID, nextDay, t)
+	if dailyBucketsCount > 0 {
+		sm.lastBucketID = lastBkt
 	}
-	dailyBucketsCount := int64(len(dailyBuckets))
 
-	var dailyNeedles []types.Needle
-	sm.db.Model(&types.Needle{}).
-		Where("id > ? AND created_at < ? AND created_at >= ?", sm.lastNeedleID, nextDay, t).
-		Order("id ASC").
-		Find(&dailyNeedles)
-	if len(dailyNeedles) > 0 {
-		sm.lastNeedleID = dailyNeedles[len(dailyNeedles)-1].ID
+	dailyNeedlesCount, lastNdl := countAndMaxID(sm.db, &types.Needle{},
+		"id > ? AND created_at < ? AND created_at >= ?", sm.lastNeedleID, nextDay, t)
+	if dailyNeedlesCount > 0 {
+		sm.lastNeedleID = lastNdl
 	}
-	dailyNeedlesCount := int64(len(dailyNeedles))
 
-	var dailyVolumes []types.Volume
-	sm.db.Model(&types.Volume{}).
-		Where("id > ? AND created_at < ? AND created_at >= ?", sm.lastVolumeID, nextDay, t).
-		Order("id ASC").
-		Find(&dailyVolumes)
-	if len(dailyVolumes) > 0 {
-		sm.lastVolumeID = dailyVolumes[len(dailyVolumes)-1].ID
+	dailyVolumesCount, lastVol := countAndMaxID(sm.db, &types.Volume{},
+		"id > ? AND created_at < ? AND created_at >= ?", sm.lastVolumeID, nextDay, t)
+	if dailyVolumesCount > 0 {
+		sm.lastVolumeID = lastVol
 	}
-	dailyVolumesCount := int64(len(dailyVolumes))
 
 	sm.mu.Lock()
 	stat, ok := sm.stats[day]
