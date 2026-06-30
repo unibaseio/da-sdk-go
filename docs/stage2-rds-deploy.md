@@ -49,12 +49,45 @@ time pgloader scripts/sqlite-to-pg.load
 Rough expectation for 34M rows: tens of minutes (depends on RDS class + network).
 `create no indexes` keeps the load fast; the hub builds indexes next.
 
-### 1c. Let the writer create the gorm schema + indexes
+### 1c. Add primary keys + reset sequences (pgloader's `create no indexes` dropped the PKs)
+
+**Critical.** pgloader's `create no indexes` (and a CSV `\copy`) leave the tables
+**without a PRIMARY KEY on `id`**. Without it every `ORDER BY id` — i.e. the
+global (unscoped) list endpoints — degrades to a full seq scan + sort (the
+unscoped `/api/listNeedle` measured ~5s on 34M rows). Add the PKs after the load,
+**before** first start. Do the big table online (CONCURRENTLY), the small ones
+inline:
+```bash
+PG="postgres://hubuser:PASSWORD@HUB-RDS...:5432/hub?sslmode=require"
+# needles (34M): build the unique index online, then promote to PK
+psql "$PG" -c "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS needles_pkey ON needles (id);"
+psql "$PG" -c "ALTER TABLE needles ADD CONSTRAINT needles_pkey PRIMARY KEY USING INDEX needles_pkey;"
+# small tables: instant
+psql "$PG" -c "ALTER TABLE accounts ADD PRIMARY KEY (id);
+ALTER TABLE buckets ADD PRIMARY KEY (id);
+ALTER TABLE volumes ADD PRIMARY KEY (id);
+ALTER TABLE conversations ADD PRIMARY KEY (id);
+ALTER TABLE stat_records ADD PRIMARY KEY (id);"
+```
+Then reset the id sequences to MAX(id) so new inserts don't collide with the
+bulk-loaded rows:
+```bash
+psql "$PG" -c "DO \$\$ DECLARE t text; BEGIN
+  FOR t IN SELECT unnest(ARRAY['accounts','buckets','needles','volumes','stat_records','conversations'])
+  LOOP EXECUTE format('SELECT setval(pg_get_serial_sequence(%L,''id''), COALESCE((SELECT MAX(id) FROM %I),1))', t, t); END LOOP;
+END \$\$;"
+```
+> The hub's `loadGORM` adds any missing PK idempotently as a backstop too — but
+> doing it here (CONCURRENTLY for needles) avoids a multi-minute **blocking** PK
+> build at first startup.
+
+### 1d. Let the writer create the gorm schema + indexes
 
 Point the writer at Postgres and start it once. On first connect it runs
 `AutoMigrate` (reconciles schema) and `CREATE INDEX IF NOT EXISTS …` including
-the covering `idx_needles_lower_owner_size` — **this index build on 34M rows is
-the one-time, multi-minute, write-locking step.**
+the partial covering `idx_needles_lower_owner_size_live` (`WHERE deleted_at IS
+NULL`) — **this index build on 34M rows is the one-time, multi-minute,
+write-locking step.**
 
 Add to the writer's compose `environment:` and start:
 ```yaml
@@ -69,7 +102,14 @@ docker logs -f docker-compose_dimo-hub_1 2>&1 | grep -iE "gorm backend|memstat r
 # expect: "gorm backend: postgres (shared index)" then later "memstat refreshed: ..."
 ```
 
-### 1d. Verify row counts match
+After the index build, set the visibility map + planner stats so the partial
+indexes serve **index-only** scans (a fresh bulk load leaves both stale, and the
+`LOWER(owner)` expression indexes only get stats once they exist):
+```bash
+psql "$PG" -c "VACUUM (ANALYZE) needles;"
+```
+
+### 1e. Verify row counts match
 
 ```bash
 SQLITE=/tmp/gorm.migrate.db PG="postgres://hubuser:PASSWORD@HUB-RDS...:5432/hub?sslmode=require" \
