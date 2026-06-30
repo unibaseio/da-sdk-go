@@ -9,11 +9,14 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
@@ -187,6 +190,12 @@ func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader)
 
 	s.addNeedle(addr, bucket, key, lm.Index, lm.Start, lm.Size)
 
+	// wake the drain loop (coalescing, never blocks the writer)
+	select {
+	case s.uploadNotify <- struct{}{}:
+	default:
+	}
+
 	mm := types.MemeMeta{
 		File:  fmt.Sprintf("%s/%d.log", addr, lm.Index),
 		Start: lm.Start,
@@ -309,8 +318,8 @@ func (s *Server) uploadTo() {
 	}
 
 	policy := types.Policy{
-		N: 6,
-		K: 4,
+		N: uint8(env.Int("HUB_RS_N", 6)),
+		K: uint8(env.Int("HUB_RS_K", 4)),
 	}
 
 	cm, err := contract.NewContractManage(sk, s.rp.Repo().Config().Chain.Type)
@@ -318,121 +327,164 @@ func (s *Server) uploadTo() {
 		panic(err)
 	}
 
+	tick := time.Duration(env.Int("HUB_UPLOAD_TICK_SEC", 30)) * time.Second
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
 	for {
-		time.Sleep(time.Minute)
-		logger.Info("check uploaded info")
-		err := cm.CheckBalance(au.Addr)
-		if err != nil {
-			time.Sleep(time.Minute)
+		// event-driven: drain on a new write, with a periodic fallback tick.
+		select {
+		case <-s.shutdownChan:
+			return
+		case <-s.uploadNotify:
+		case <-ticker.C:
+		}
+		if err := cm.CheckBalance(au.Addr); err != nil {
+			logger.Warnf("upload: balance check failed: %v", err)
 			continue
 		}
+		s.drainAll(cm, au, policy)
+	}
+}
 
-		logger.Info("check log inst: ", s.fscnt)
+// drainAll fans the per-owner drains out across a bounded worker pool. Each
+// owner is an independent log instance, so they run concurrently; concurrent
+// AddPiece is safe via the serialized-nonce manager (one cm shared). Within a
+// single owner, drainInstance keeps volumes ordered — the per-owner offset
+// advances sequentially. Worker count: HUB_UPLOAD_WORKERS (default NumCPU).
+func (s *Server) drainAll(cm *contract.ContractManage, au types.Auth, policy types.Policy) {
+	s.RLock()
+	n := s.fscnt
+	s.RUnlock()
 
-		for i := uint32(0); i < s.fscnt; i++ {
-			dsKey := types.NewKey(types.DsLogFS, LOGINST, i)
-			val, err := s.rp.MetaStore().Get(dsKey)
-			if err != nil {
-				break
-			}
+	workers := env.Int("HUB_UPLOAD_WORKERS", runtime.NumCPU())
+	if workers < 1 {
+		workers = 1
+	}
+	if uint32(workers) > n {
+		workers = int(n)
+	}
+	logger.Infof("upload drain: %d owners, %d workers", n, workers)
 
-			key := string(val)
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for i := uint32(0); i < n; i++ {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(idx uint32) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			s.drainInstance(cm, au, policy, idx)
+		}(i)
+	}
+	wg.Wait()
+}
 
-			logger.Debugf("check: %s %d", key, i)
-			dsKey = types.NewKey(types.DsLogFS, key)
-			val, err = s.rp.MetaStore().Get(dsKey)
-			if err != nil || len(val) != 8 {
-				continue
-			}
-			curIndex := binary.BigEndian.Uint64(val)
+// drainInstance uploads + commits one owner's (log instance idx) pending
+// volumes in order, advancing that owner's offset as each volume lands. Encode
+// (CPU) and AddPiece (chain) of different owners overlap because drainInstance
+// runs concurrently per owner.
+func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, policy types.Policy, idx uint32) {
+	dsKey := types.NewKey(types.DsLogFS, LOGINST, idx)
+	val, err := s.rp.MetaStore().Get(dsKey)
+	if err != nil {
+		return
+	}
 
-			next := logfs.GetIndex(s.local.String(), key)
-			dsKey = types.NewKey(types.DsLogFS, LOGINST, key)
-			val, err = s.rp.MetaStore().Get(dsKey)
-			if err == nil && len(val) == 8 {
-				next = binary.BigEndian.Uint64(val)
-			}
+	key := string(val)
 
-			logger.Debugf("check: %s %d %d", key, next, curIndex)
-			if next >= curIndex {
-				continue
-			}
+	logger.Debugf("check: %s %d", key, idx)
+	dsKey = types.NewKey(types.DsLogFS, key)
+	val, err = s.rp.MetaStore().Get(dsKey)
+	if err != nil || len(val) != 8 {
+		return
+	}
+	curIndex := binary.BigEndian.Uint64(val)
 
-			for i := next; i < curIndex; i++ {
-				fname := fmt.Sprintf("%s/%d.vol", key, i)
-				fp := filepath.Join(s.rp.Path(), LOGFS, key, fmt.Sprintf("%d.vol", i))
+	next := logfs.GetIndex(s.local.String(), key)
+	dsKey = types.NewKey(types.DsLogFS, LOGINST, key)
+	val, err = s.rp.MetaStore().Get(dsKey)
+	if err == nil && len(val) == 8 {
+		next = binary.BigEndian.Uint64(val)
+	}
 
-				fr, err := sdk.GetFileReceipt(sdk.ServerURL, au, fname)
-				if err == nil {
-					logger.Infof("%s/%d.vol is already uploaded, check its piece onchain", key, i)
-					if fr.ChainType != s.rp.Repo().Config().Chain.Type {
-						buf := make([]byte, 8)
-						binary.BigEndian.PutUint64(buf, i+1)
-						s.rp.MetaStore().Put(dsKey, buf)
-						logger.Warnf("new chain type detected, ignore previous one")
-						continue
-					}
-					er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
-					if err != nil {
-						break
-					}
-					suc := 0
-					for _, pn := range fr.Pieces {
-						for _, st := range er.Edges {
-							pr, err := sdk.GetPieceReceipt(st.ExposeURL, au, pn)
-							if err == nil {
-								if pr.Serial > 0 {
-									suc++
-								} else {
-									txn, err := cm.AddPiece(pr.PieceCore)
-									if err == nil {
-										s.addVolume(key, i, pr.Name, txn)
-										suc++
-									}
-								}
-							}
-						}
-					}
-					if suc == len(fr.Pieces) {
-						buf := make([]byte, 8)
-						binary.BigEndian.PutUint64(buf, i+1)
-						s.rp.MetaStore().Put(dsKey, buf)
-						continue
-					}
-					continue
-				}
-				// upload to stream and submit to gateway
-				res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fp, fname)
-				if err != nil {
-					if strings.Contains(err.Error(), "already has piece") {
-						logger.Warnf("piece of file %s found on server, skip", fp)
-						continue
-					}
-					break
-				}
-				pcs, err := sdk.CheckFileFull(res, streamer, fp)
-				if err != nil {
-					break
-				}
-				log.Printf("upload %s to %s, sha256: %s\n", fp, streamer, res.Hash)
-				log.Printf("submit %s to chain\n", res.Name)
-				// submit meta to chain
-				var terr error
-				for _, pc := range pcs {
-					txn, err := cm.AddPiece(pc)
-					if err != nil {
-						terr = err
-						break
-					}
-					s.addVolume(key, i, pc.Name, txn)
-				}
-				if terr != nil {
-					break
-				}
+	logger.Debugf("check: %s %d %d", key, next, curIndex)
+	if next >= curIndex {
+		return
+	}
+
+	for i := next; i < curIndex; i++ {
+		fname := fmt.Sprintf("%s/%d.vol", key, i)
+		fp := filepath.Join(s.rp.Path(), LOGFS, key, fmt.Sprintf("%d.vol", i))
+
+		fr, err := sdk.GetFileReceipt(sdk.ServerURL, au, fname)
+		if err == nil {
+			logger.Infof("%s/%d.vol is already uploaded, check its piece onchain", key, i)
+			if fr.ChainType != s.rp.Repo().Config().Chain.Type {
 				buf := make([]byte, 8)
 				binary.BigEndian.PutUint64(buf, i+1)
 				s.rp.MetaStore().Put(dsKey, buf)
+				logger.Warnf("new chain type detected, ignore previous one")
+				continue
 			}
+			er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
+			if err != nil {
+				break
+			}
+			suc := 0
+			for _, pn := range fr.Pieces {
+				for _, st := range er.Edges {
+					pr, err := sdk.GetPieceReceipt(st.ExposeURL, au, pn)
+					if err == nil {
+						if pr.Serial > 0 {
+							suc++
+						} else {
+							txn, err := cm.AddPiece(pr.PieceCore)
+							if err == nil {
+								s.addVolume(key, i, pr.Name, txn)
+								suc++
+							}
+						}
+					}
+				}
+			}
+			if suc == len(fr.Pieces) {
+				buf := make([]byte, 8)
+				binary.BigEndian.PutUint64(buf, i+1)
+				s.rp.MetaStore().Put(dsKey, buf)
+				continue
+			}
+			continue
 		}
+		// upload to stream and submit to gateway
+		res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fp, fname)
+		if err != nil {
+			if strings.Contains(err.Error(), "already has piece") {
+				logger.Warnf("piece of file %s found on server, skip", fp)
+				continue
+			}
+			break
+		}
+		pcs, err := sdk.CheckFileFull(res, streamer, fp)
+		if err != nil {
+			break
+		}
+		log.Printf("upload %s to %s, sha256: %s\n", fp, streamer, res.Hash)
+		log.Printf("submit %s to chain\n", res.Name)
+		// submit meta to chain
+		var terr error
+		for _, pc := range pcs {
+			txn, err := cm.AddPiece(pc)
+			if err != nil {
+				terr = err
+				break
+			}
+			s.addVolume(key, i, pc.Name, txn)
+		}
+		if terr != nil {
+			break
+		}
+		buf := make([]byte, 8)
+		binary.BigEndian.PutUint64(buf, i+1)
+		s.rp.MetaStore().Put(dsKey, buf)
 	}
 }

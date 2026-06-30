@@ -93,6 +93,11 @@ type Server struct {
 	// Add channels for graceful shutdown
 	shutdownChan   chan struct{}
 	checkpointStop chan struct{}
+
+	// uploadNotify wakes the uploadTo drain loop when new data is written
+	// (event-driven), so a write isn't stuck behind the periodic tick. Buffered
+	// size 1 + non-blocking send = a coalescing signal (never blocks the writer).
+	uploadNotify chan struct{}
 }
 
 func NewServer(rp repo.Repo) (*Server, error) {
@@ -130,6 +135,7 @@ func NewServer(rp repo.Repo) (*Server, error) {
 
 		shutdownChan:   make(chan struct{}),
 		checkpointStop: make(chan struct{}),
+		uploadNotify:   make(chan struct{}, 1),
 	}
 
 	if s.readonly {
