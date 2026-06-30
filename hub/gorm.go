@@ -159,6 +159,25 @@ func (s *Server) loadGORM() {
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_conversations_name ON conversations(name);")
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_buckets_lower_owner_id ON buckets(LOWER(owner), id);")
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_conversations_lower_owner_id ON conversations(LOWER(owner), id);")
+
+		// Ensure a PRIMARY KEY on id for every table (Postgres). A gorm/AutoMigrate-
+		// created table always has it, but a table BULK-LOADED by an external tool
+		// can be missing it: pgloader's "create no indexes" drops the PK too, and
+		// AutoMigrate won't add a PK to a pre-existing table. Without it, every
+		// ORDER BY id (the global list endpoints) degrades to a full seq scan + sort
+		// — e.g. the unscoped /api/listNeedle was ~5s on 34M rows. Add it
+		// idempotently. On a large table this is a one-time, blocking build, so the
+		// migration should add needles' PK CONCURRENTLY before first start (see
+		// docs/stage2-rds-deploy.md); then this just finds it present and skips.
+		if driver == "postgres" || driver == "pg" {
+			for _, t := range []string{"accounts", "buckets", "needles", "volumes", "stat_records", "conversations"} {
+				db.Exec(fmt.Sprintf(`DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = '%s'::regclass AND contype = 'p') THEN
+    ALTER TABLE %s ADD PRIMARY KEY (id);
+  END IF;
+END $$;`, t, t))
+			}
+		}
 	}
 
 	// Periodic WAL checkpoint is SQLite-only; Postgres self-manages durability.
