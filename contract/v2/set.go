@@ -177,7 +177,7 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	}
 
 	com.Logger.Debug("register node: ", au.From, val)
-	tx, err := ti.Approve(au,c.NodeAddr, val)
+	tx, err := ti.Approve(au, c.NodeAddr, val)
 	if err != nil {
 		return err
 	}
@@ -268,7 +268,7 @@ func (c *ContractManage) addPieceImpl(ctx context.Context, pc types.PieceCore, o
 
 	gtoken := c.BalanceOf(au.From)
 	com.Logger.Debug("submitpiece0: ", gtoken)
-	tx, err := ti.Approve(au,c.PieceAddr, val)
+	tx, err := ti.Approve(au, c.PieceAddr, val)
 	if err != nil {
 		return "", err
 	}
@@ -417,7 +417,7 @@ func (c *ContractManage) ChallengeRS(_pn, _rn string, _pri uint8) error {
 		return err
 	}
 
-	tx, err := ti.Approve(au,c.RSProofAddr, com.DefaultPenalty)
+	tx, err := ti.Approve(au, c.RSProofAddr, com.DefaultPenalty)
 	if err != nil {
 		return err
 	}
@@ -611,7 +611,7 @@ func (c *ContractManage) ChallengeKZG(addr common.Address, _ep uint64) error {
 		return err
 	}
 
-	tx, err := ti.Approve(au,c.EProofAddr, com.DefaultPenalty)
+	tx, err := ti.Approve(au, c.EProofAddr, com.DefaultPenalty)
 	if err != nil {
 		return err
 	}
@@ -695,7 +695,7 @@ func (c *ContractManage) ChallengeSum(addr common.Address, _ep uint64, _qIndex u
 	}
 
 	if len(sum) > 0 {
-		tx, err := ti.Approve(au,c.EProofAddr, com.DefaultPenalty)
+		tx, err := ti.Approve(au, c.EProofAddr, com.DefaultPenalty)
 		if err != nil {
 			return err
 		}
@@ -766,7 +766,7 @@ func (c *ContractManage) ProveSum(_ep uint64, coms []bls.G1, _pf []byte) error {
 		return err
 	}
 
-	tx, err := ti.Approve(au,c.EProofAddr, com.DefaultPenalty)
+	tx, err := ti.Approve(au, c.EProofAddr, com.DefaultPenalty)
 	if err != nil {
 		return err
 	}
