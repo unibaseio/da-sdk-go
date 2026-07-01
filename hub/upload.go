@@ -62,6 +62,9 @@ func (s *Server) uploadData(c *gin.Context) {
 		return
 	}
 
+	// Charge only after a successful write. Failed writes create no billing.
+	s.recordUploadWrite(addr, bucket, file.Filename, uint64(file.Size))
+
 	c.JSON(http.StatusOK, mm)
 }
 
@@ -102,7 +105,23 @@ func (s *Server) upload(c *gin.Context) {
 		return
 	}
 
+	// Charge only after a successful write. Failed writes create no billing.
+	s.recordUploadWrite(mjson.Owner, mjson.Bucket, mjson.ID, uint64(len(mjson.Message)))
+
 	c.JSON(http.StatusOK, mm)
+}
+
+// recordUploadWrite records a successful write in the metering ledger. It is a
+// no-op unless metering is enabled and write charging is on. In this first
+// version a ledger failure is logged but does NOT fail the upload — accounting
+// must not disturb storage. (Once stable this may be made fail-closed.)
+func (s *Server) recordUploadWrite(owner, bucket, object string, bytes uint64) {
+	if !s.metering.ShouldChargeWrites() {
+		return
+	}
+	if _, err := s.metering.RecordWrite(owner, bucket, object, bytes); err != nil {
+		logger.Warnf("metering: RecordWrite failed for owner=%s object=%s: %v", owner, object, err)
+	}
 }
 
 func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader) (types.MemeMeta, error) {

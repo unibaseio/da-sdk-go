@@ -55,6 +55,16 @@ func (m *Manager) Config() Config {
 	return m.cfg
 }
 
+// ShouldChargeWrites reports whether write events should be recorded. Nil-safe.
+func (m *Manager) ShouldChargeWrites() bool {
+	return m.Enabled() && m.cfg.ChargeWrites
+}
+
+// ShouldChargeReads reports whether read events should be recorded. Nil-safe.
+func (m *Manager) ShouldChargeReads() bool {
+	return m.Enabled() && m.cfg.ChargeReads
+}
+
 // ----------------------------------------------------------------------------
 // Pricing
 // ----------------------------------------------------------------------------
