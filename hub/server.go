@@ -67,7 +67,8 @@ type Server struct {
 
 	statManager *StatManager
 
-	metering *metering.Manager
+	metering       *metering.Manager
+	meteringWorker *metering.Worker
 
 	bucketDisplayLock sync.RWMutex
 	bucketDisplay     map[string]types.BucketDisplay
@@ -137,6 +138,10 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	s.metering = metering.NewManager(s.gdb, metering.LoadConfigFromEnv())
 	if s.metering.Enabled() {
 		logger.Info("metering enabled")
+	}
+	if s.metering.AutoSettleEnabled() {
+		s.meteringWorker = s.metering.NewWorker()
+		s.meteringWorker.Start()
 	}
 
 	go s.uploadTo()
@@ -213,6 +218,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Signal checkpoint routine to stop and perform final checkpoint
 	close(s.checkpointStop)
+
+	// Stop the metering auto-settlement worker (if running)
+	if s.meteringWorker != nil {
+		logger.Info("stopping metering worker...")
+		s.meteringWorker.Stop()
+	}
 
 	// First shutdown the HTTP server
 	if s.httpServer != nil {
