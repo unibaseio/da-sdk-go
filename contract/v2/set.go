@@ -8,6 +8,7 @@ import (
 	"time"
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/token"
 	"github.com/unibaseio/da-sdk-go/lib/bls"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
@@ -15,6 +16,29 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 )
+
+// waitForAllowance polls until the RPC observes owner's token allowance for
+// spender to be at least min. Guards against RPC read-after-write lag on
+// load-balanced endpoints (e.g. Alchemy on base-sepolia): an Approve tx can be
+// mined (CheckTx confirms it) yet the very next estimateGas / eth_call land on
+// a replica that hasn't caught up, read a stale allowance of 0, and revert the
+// in-contract safeTransferFrom with "execution reverted". CheckTx confirms the
+// tx is mined; this confirms the read side caught up. Mirrors waitForCode in
+// contract/deploy/deploy_v2.go, which fixed the same race for a fresh proxy.
+func (c *ContractManage) waitForAllowance(ctx context.Context, ti *token.Token, owner, spender common.Address, min *big.Int) error {
+	for i := 0; i < 30; i++ {
+		cur, err := ti.Allowance(&bind.CallOpts{Context: ctx, From: owner}, owner, spender)
+		if err == nil && cur.Cmp(min) >= 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for allowance %s -> %s aborted: %w", owner.Hex(), spender.Hex(), ctx.Err())
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return fmt.Errorf("timed out waiting for allowance %s -> %s >= %s", owner.Hex(), spender.Hex(), min.String())
+}
 
 // Attest records this validator's on-chain liveness for the given epoch in the
 // reward pool (FixB+A2). No-op if the pool address isn't configured.
@@ -161,6 +185,11 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	if err != nil {
 		return err
 	}
+	// Wait for the RPC to observe the approve before Stake reads the allowance
+	// on a possibly-stale replica. See waitForAllowance.
+	if err = c.waitForAllowance(ctx, ti, au.From, c.NodeAddr, val); err != nil {
+		return err
+	}
 	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
 	if err != nil {
 		return err
@@ -245,6 +274,12 @@ func (c *ContractManage) addPieceImpl(ctx context.Context, pc types.PieceCore, o
 	}
 	err = c.CheckTxCtx(ctx, tx.Hash())
 	if err != nil {
+		return "", err
+	}
+	// Wait for the RPC's read side to observe the approve before addPiece's
+	// estimateGas reads the allowance (else a stale replica reverts the
+	// in-contract safeTransferFrom). See waitForAllowance.
+	if err = c.waitForAllowance(ctx, ti, au.From, c.PieceAddr, val); err != nil {
 		return "", err
 	}
 
@@ -388,6 +423,11 @@ func (c *ContractManage) ChallengeRS(_pn, _rn string, _pri uint8) error {
 	}
 	err = c.CheckTx(tx.Hash())
 	if err != nil {
+		return err
+	}
+	// Wait for the RPC to observe the penalty approve before Challenge reads the
+	// allowance on a possibly-stale replica. See waitForAllowance.
+	if err = c.waitForAllowance(ctx, ti, au.From, c.RSProofAddr, com.DefaultPenalty); err != nil {
 		return err
 	}
 
@@ -579,6 +619,11 @@ func (c *ContractManage) ChallengeKZG(addr common.Address, _ep uint64) error {
 	if err != nil {
 		return err
 	}
+	// Wait for the RPC to observe the penalty approve before ChalKZG reads the
+	// allowance on a possibly-stale replica. See waitForAllowance.
+	if err = c.waitForAllowance(ctx, ti, au.From, c.EProofAddr, com.DefaultPenalty); err != nil {
+		return err
+	}
 
 	pi, err := c.NewEProof(ctx)
 	if err != nil {
@@ -658,6 +703,11 @@ func (c *ContractManage) ChallengeSum(addr common.Address, _ep uint64, _qIndex u
 		if err != nil {
 			return err
 		}
+		// Wait for the RPC to observe the penalty approve before Challenge reads
+		// the allowance on a possibly-stale replica. See waitForAllowance.
+		if err = c.waitForAllowance(ctx, ti, au.From, c.EProofAddr, com.DefaultPenalty); err != nil {
+			return err
+		}
 	}
 
 	pi, err := c.NewEProof(ctx)
@@ -722,6 +772,11 @@ func (c *ContractManage) ProveSum(_ep uint64, coms []bls.G1, _pf []byte) error {
 	}
 	err = c.CheckTx(tx.Hash())
 	if err != nil {
+		return err
+	}
+	// Wait for the RPC to observe the penalty approve before ProveCom reads the
+	// allowance on a possibly-stale replica. See waitForAllowance.
+	if err = c.waitForAllowance(ctx, ti, au.From, c.EProofAddr, com.DefaultPenalty); err != nil {
 		return err
 	}
 
