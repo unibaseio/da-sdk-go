@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,13 @@ type Server struct {
 	cmMu sync.Mutex
 	cm   *contract.ContractManage
 
+	// cached per-owner memory stats, recomputed in the background
+	memStat *memStatCache
+
+	// readonly = a reader replica (HUB_READONLY): shares the index DB but does not
+	// own local writes — skips upload routes, chain submitter, writer loop, DDL.
+	readonly bool
+
 	httpServer *http.Server
 
 	// Add channels for graceful shutdown
@@ -118,10 +126,17 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		lfs:           make(map[string]*logfs.LogFS),
 
 		missCache: newMissCache(),
+		memStat:   &memStatCache{},
+
+		readonly: os.Getenv("HUB_READONLY") != "",
 
 		shutdownChan:   make(chan struct{}),
 		checkpointStop: make(chan struct{}),
 		uploadNotify:   make(chan struct{}, 1),
+	}
+
+	if s.readonly {
+		logger.Warn("HUB_READONLY set: running as a read-only replica (no writes, no chain submit, no schema DDL)")
 	}
 
 	err = s.register()
@@ -133,14 +148,30 @@ func NewServer(rp repo.Repo) (*Server, error) {
 
 	s.loadGORM()
 
+	// StatManager's background loop writes StatRecord; on a reader replica we
+	// create it (so /api/stat doesn't nil-panic) but don't start the writer.
 	sm := NewStatManager(s.gdb)
-	err = sm.Start(context.Background())
-	if err != nil {
-		return nil, err
+	if !s.readonly {
+		err = sm.Start(context.Background())
+		if err != nil {
+			return nil, err
+		}
 	}
 	s.statManager = sm
 
-	go s.uploadTo()
+	// chain submission is a write path — writer only.
+	if !s.readonly {
+		go s.uploadTo()
+	}
+
+	// memory-stats recompute is a full-index scan over the needles table. Run it
+	// on the WRITER only: if every replica ran it independently against the shared
+	// DB, the heavy scan would be multiplied N times. Stats are low-QPS
+	// (dashboard), so the ALB routes /api/memoryStat + /api/memoryOverview to the
+	// writer (like uploads); a replica that gets one serves an empty snapshot.
+	if !s.readonly {
+		s.startMemStats(context.Background())
+	}
 
 	s.registRoute()
 
@@ -195,8 +226,19 @@ func (s *Server) registRoute() {
 	authed.Use(AuthMiddleware())
 	authed.Use(RateLimit())
 
-	s.addUpload(authed)
-	s.addSeal(authed) // seal is a write path (Upload + AddPiece)
+	if s.readonly {
+		// reader replicas must not write locally — reject writes (ALB routes writes to the primary).
+		s.addUploadReadonly(authed)
+	} else {
+		s.addUpload(authed)
+		s.addSeal(authed) // seal is a write path (Upload + AddPiece)
+	}
+}
+
+// isSQLite reports whether the gorm backend is SQLite (vs Postgres).
+func (s *Server) isSQLite() bool {
+	return s.gdb != nil && s.gdb.Dialector.Name() == "sqlite"
+
 }
 
 // ListenAndServe starts the HTTP server
@@ -219,8 +261,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// Stop the statistics manager
-	if s.statManager != nil {
+	// Stop the statistics manager (Stop() writes a final record — writer only)
+	if s.statManager != nil && !s.readonly {
 		logger.Info("stopping statistics manager...")
 		s.statManager.Stop()
 	}
@@ -244,22 +286,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		if err != nil {
 			logger.Errorf("failed to get SQL database: %v", err)
 		} else {
-			// Execute SQLite specific commands for data persistence
-			logger.Info("executing SQLite persistence commands...")
+			// SQLite-only WAL persistence; Postgres manages its own durability.
+			if s.isSQLite() {
+				logger.Info("executing SQLite persistence commands...")
 
-			// Force a final checkpoint to ensure WAL data is written to main database
-			if err := s.gdb.Exec("PRAGMA wal_checkpoint(FULL);").Error; err != nil {
-				logger.Errorf("failed to execute final WAL checkpoint: %v", err)
-			}
+				// Force a final checkpoint to ensure WAL data is written to main database
+				if err := s.gdb.Exec("PRAGMA wal_checkpoint(FULL);").Error; err != nil {
+					logger.Errorf("failed to execute final WAL checkpoint: %v", err)
+				}
 
-			// Synchronize data to disk
-			if err := s.gdb.Exec("PRAGMA synchronous = FULL;").Error; err != nil {
-				logger.Errorf("failed to set synchronous mode: %v", err)
-			}
+				// Synchronize data to disk
+				if err := s.gdb.Exec("PRAGMA synchronous = FULL;").Error; err != nil {
+					logger.Errorf("failed to set synchronous mode: %v", err)
+				}
 
-			// Force fsync to ensure data is written to disk
-			if err := s.gdb.Exec("PRAGMA wal_checkpoint(TRUNCATE);").Error; err != nil {
-				logger.Errorf("failed to truncate WAL: %v", err)
+				// Force fsync to ensure data is written to disk
+				if err := s.gdb.Exec("PRAGMA wal_checkpoint(TRUNCATE);").Error; err != nil {
+					logger.Errorf("failed to truncate WAL: %v", err)
+				}
 			}
 
 			// Close the SQL database connection

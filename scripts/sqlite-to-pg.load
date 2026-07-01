@@ -1,0 +1,32 @@
+/*
+ * pgloader config: migrate the hub's SQLite gorm index → Postgres (RDS).
+ *
+ * Loads TABLES + ROWS only (create no indexes) so the bulk load of the large
+ * needles table stays fast — the hub creates the gorm indexes (incl. the
+ * covering LOWER(owner),size index) itself on first start against Postgres.
+ *
+ * Usage:
+ *   1. set the real SQLite path and RDS DSN below (keep the password out of
+ *      version control — edit a local copy).
+ *   2. run against a STATIC copy of gorm.db (stop the hub or use a snapshot):
+ *        pgloader scripts/sqlite-to-pg.load
+ *   3. verify with scripts/verify-migration.sh
+ *   4. start the writer hub with HUB_DB_DRIVER=postgres + HUB_DB_DSN=...
+ *
+ * Requires: pgloader (apt-get install -y pgloader)
+ */
+
+LOAD DATABASE
+     FROM sqlite:///tmp/gorm.migrate.db
+     INTO postgresql://hubuser:PASSWORD@HUB-RDS.xxxx.ap-southeast-1.rds.amazonaws.com:5432/hub
+
+ WITH include drop,        -- drop+recreate target tables (first migration only)
+      create tables,
+      create no indexes,   -- hub builds gorm indexes itself, post-load
+      reset sequences,
+      workers = 4, concurrency = 1,
+      batch rows = 25000,
+      batch size = 64MB
+
+  SET work_mem to '256MB',
+      maintenance_work_mem to '1GB';
