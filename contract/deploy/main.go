@@ -94,6 +94,7 @@ func main() {
 	rewardTok := flag.String("dao-reward-token", "", "reward token address for vUB APY (default: reuse UB token)")
 	slotsFlag := flag.Uint64("slots", 0, "epoch length in blocks (default 16000; use a small value on local anvil)")
 	mptFlag := flag.Int64("min-prove-time", 0, "min prove time in blocks (default 8000)")
+	tokenFlag := flag.String("token", "", "reuse an EXISTING ERC20 as the stake/penalty token (skip deploying a fresh test token); e.g. the canonical UB on this chain")
 	flag.Parse()
 
 	daoGovTokenKind = *govToken
@@ -121,7 +122,14 @@ func main() {
 		return
 	}
 	defer client.Close()
-	DeployTokenTest(client, *sk)
+	if *tokenFlag != "" {
+		// reuse an existing ERC20 (e.g. the canonical UB) instead of deploying a
+		// fresh test token — all 5 token-bearing impls get this address at init.
+		tokenAddr = common.HexToAddress(*tokenFlag)
+		log.Println("reusing existing token: ", tokenAddr.Hex())
+	} else {
+		DeployTokenTest(client, *sk)
+	}
 	deployall_v2(client, *sk)
 }
 
