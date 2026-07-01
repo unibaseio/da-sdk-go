@@ -1,11 +1,13 @@
 package metering
 
 import (
+	"context"
 	"math/big"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"gorm.io/gorm"
@@ -45,6 +47,16 @@ type Manager struct {
 	// as decimal strings and updated with math/big in Go rather than via SQL
 	// integer arithmetic. This assumes a single hub instance (see plan).
 	accountLocks keyedMutex
+
+	// erc20 is the token client used for chain balance/allowance checks and
+	// settlement transfers. It is nil when chain features are off or config is
+	// invalid; callers must handle nil. Held as an interface so tests can inject
+	// a fake without a live RPC node.
+	erc20 erc20API
+
+	// provider is the spender/recipient address for allowance checks and
+	// transferFrom. Derived from HUB_PROVIDER_ADDRESS or the provider key.
+	provider common.Address
 }
 
 // NewManager builds a Manager. db must be a live *gorm.DB with the metering
@@ -56,7 +68,37 @@ func NewManager(db *gorm.DB, cfg Config) *Manager {
 	cfg.ReadPerRequestWei = orZero(cfg.ReadPerRequestWei)
 	cfg.DefaultCreditLimitWei = orZero(cfg.DefaultCreditLimitWei)
 	cfg.SettleThresholdWei = orZero(cfg.SettleThresholdWei)
-	return &Manager{db: db, cfg: cfg}
+
+	m := &Manager{db: db, cfg: cfg}
+
+	// Build the token client when chain features are requested. A build error
+	// is logged, not fatal: CanWrite reports chain_check_failed and settlement
+	// surfaces the misconfiguration, but the hub still starts.
+	if cfg.CheckChain || cfg.SettlementMode == "erc8183" {
+		ec, err := newERC20Client(cfg)
+		if err != nil {
+			logger.Warnf("metering: erc20 client not available: %v", err)
+		} else {
+			m.erc20 = ec
+			m.provider = resolveProvider(cfg, ec)
+			if (m.provider == common.Address{}) {
+				logger.Warnf("metering: provider address unset; allowance checks will use zero address")
+			}
+		}
+	}
+	return m
+}
+
+// resolveProvider picks the provider address from explicit config, else derives
+// it from the provider private key.
+func resolveProvider(cfg Config, ec *ERC20Client) common.Address {
+	if common.IsHexAddress(cfg.ProviderAddress) {
+		return common.HexToAddress(cfg.ProviderAddress)
+	}
+	if addr, ok := ec.providerFromKey(); ok {
+		return addr
+	}
+	return common.Address{}
 }
 
 // orZero returns n, or a fresh zero *big.Int when n is nil.
@@ -336,12 +378,68 @@ func (m *Manager) CanWrite(owner string, estimatedBytes uint64) (*CanWriteResult
 		return res, nil
 	}
 
-	// Chain balance/allowance checks (HUB_METERING_CHECK_CHAIN) are wired in a
-	// later phase. Until then local credit is authoritative.
+	// Chain balance/allowance checks run only when HUB_METERING_CHECK_CHAIN is
+	// on. Otherwise local credit is authoritative and no RPC call is made.
+	if m.cfg.CheckChain {
+		m.applyChainChecks(owner, required, res)
+		return res, nil
+	}
 
 	res.Allowed = true
 	res.Reason = reasonAllowed
 	return res, nil
+}
+
+// applyChainChecks reads on-chain balance and allowance and sets the decision
+// on res. Any RPC/config problem is reported as chain_check_failed (a refusal
+// surfaced as 402), never as a Go error, so upload handlers do not return 500.
+func (m *Manager) applyChainChecks(owner string, required *big.Int, res *CanWriteResult) {
+	if m.erc20 == nil {
+		res.Allowed = false
+		res.Reason = reasonChainCheckFailed
+		res.Action = "check_provider_config"
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ownerAddr := common.HexToAddress(owner)
+
+	bal, err := m.erc20.BalanceOf(ctx, ownerAddr)
+	if err != nil {
+		logger.Warnf("metering: balanceOf(%s) failed: %v", owner, err)
+		res.Allowed = false
+		res.Reason = reasonChainCheckFailed
+		res.Action = "retry"
+		return
+	}
+	res.BalanceWei = bal.String()
+
+	allow, err := m.erc20.Allowance(ctx, ownerAddr, m.provider)
+	if err != nil {
+		logger.Warnf("metering: allowance(%s) failed: %v", owner, err)
+		res.Allowed = false
+		res.Reason = reasonChainCheckFailed
+		res.Action = "retry"
+		return
+	}
+	res.AllowanceWei = allow.String()
+
+	if bal.Cmp(required) < 0 {
+		res.Allowed = false
+		res.Reason = reasonInsufficientBalance
+		res.Action = "deposit"
+		return
+	}
+	if allow.Cmp(required) < 0 {
+		res.Allowed = false
+		res.Reason = reasonInsufficientAllow
+		res.Action = "approve"
+		return
+	}
+
+	res.Allowed = true
+	res.Reason = reasonAllowed
 }
 
 // ----------------------------------------------------------------------------
