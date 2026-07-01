@@ -730,23 +730,10 @@ func DeployValidatorRewardImpl(client *ethclient.Client, sk string) (common.Addr
 	return tAddr, nil
 }
 
-// waitForCode blocks until the RPC sees deployed bytecode at addr. A proxy's
-// estimateGas delegatecalls its impl's initialize; if it runs before the just-
-// deployed impl has propagated to the queried replica, ERC1967 upgradeToAndCall
-// sees an empty impl and reverts. Impls followed immediately by their proxy
-// (ValidatorReward) hit this; ones with other deploys in between do not.
-func waitForCode(client *ethclient.Client, addr common.Address) error {
-	for i := 0; i < 30; i++ {
-		code, err := client.CodeAt(context.Background(), addr, nil)
-		if err == nil && len(code) > 0 {
-			return nil
-		}
-		time.Sleep(time.Second)
-	}
-	return fmt.Errorf("no code at %s after wait (impl not propagated)", addr.Hex())
-}
-
 func DeployValidatorRewardProxy(client *ethclient.Client, sk string, implAddr, token, owner common.Address) (common.Address, error) {
+	// Wait for the just-deployed impl to be visible before the proxy's estimateGas
+	// delegatecalls its initialize — otherwise ERC1967 upgradeToAndCall sees an
+	// empty impl and reverts. (Other proxies already gate on this; VR didn't.)
 	if err := waitForCode(client, implAddr); err != nil {
 		return common.Address{}, err
 	}
