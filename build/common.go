@@ -3,7 +3,6 @@ package build
 import "os"
 
 const (
-	ServerURL    = "http://54.251.11.180:8080"
 	OPSepolia    = "op-sepolia"
 	OPBNBTestnet = "opbnb-testnet"
 	//BNBTestnet   = "bnb-testnet-v2"
@@ -11,6 +10,16 @@ const (
 	BNBTestnetV2  = "bnb-testnet-v2"
 	BNBTestnetDAO = "bnb-testnet-dao"
 )
+
+// ServerURL is the default gateway endpoint that hubs/clients use as their
+// remote. Override at runtime with the SERVER_URL env var (e.g. via docker
+// compose) so the address isn't baked into the binary.
+var ServerURL = func() string {
+	if v := os.Getenv("SERVER_URL"); v != "" {
+		return v
+	}
+	return "http://54.251.11.180:8080"
+}()
 
 func CheckChain() string {
 	ct := os.Getenv("CHAIN_TYPE")
