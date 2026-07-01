@@ -54,6 +54,10 @@ type Manager struct {
 	// a fake without a live RPC node.
 	erc20 erc20API
 
+	// erc8183 is the escrow client used by erc8183 settlement mode. Nil unless
+	// SettlementMode=erc8183 and config is valid. Interface for testability.
+	erc8183 erc8183API
+
 	// provider is the spender/recipient address for allowance checks and
 	// transferFrom. Derived from HUB_PROVIDER_ADDRESS or the provider key.
 	provider common.Address
@@ -74,7 +78,7 @@ func NewManager(db *gorm.DB, cfg Config) *Manager {
 	// Build the token client when chain features are requested. A build error
 	// is logged, not fatal: CanWrite reports chain_check_failed and settlement
 	// surfaces the misconfiguration, but the hub still starts.
-	if cfg.CheckChain || cfg.SettlementMode == "erc8183" {
+	if cfg.CheckChain || cfg.SettlementMode == modeERC8183 {
 		ec, err := newERC20Client(cfg)
 		if err != nil {
 			logger.Warnf("metering: erc20 client not available: %v", err)
@@ -83,6 +87,18 @@ func NewManager(db *gorm.DB, cfg Config) *Manager {
 			m.provider = resolveProvider(cfg, ec)
 			if (m.provider == common.Address{}) {
 				logger.Warnf("metering: provider address unset; allowance checks will use zero address")
+			}
+		}
+	}
+
+	if cfg.SettlementMode == modeERC8183 {
+		ec8, err := newERC8183Client(cfg)
+		if err != nil {
+			logger.Warnf("metering: erc8183 client not available: %v", err)
+		} else {
+			m.erc8183 = ec8
+			if (m.provider == common.Address{}) {
+				m.provider = ec8.provider
 			}
 		}
 	}

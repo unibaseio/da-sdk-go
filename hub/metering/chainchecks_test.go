@@ -16,8 +16,14 @@ type fakeERC20 struct {
 	allowance *big.Int
 	err       error
 
+	// transfer* control TransferFrom for settlement tests (zero-valued by
+	// default: returns the zero hash and nil error, preserving prior behavior).
+	transferHash common.Hash
+	transferErr  error
+
 	balanceCalls   int
 	allowanceCalls int
+	transferCalls  int
 }
 
 func (f *fakeERC20) BalanceOf(ctx context.Context, owner common.Address) (*big.Int, error) {
@@ -37,7 +43,8 @@ func (f *fakeERC20) Allowance(ctx context.Context, owner, spender common.Address
 }
 
 func (f *fakeERC20) TransferFrom(ctx context.Context, from, to common.Address, amount *big.Int) (common.Hash, error) {
-	return common.Hash{}, nil
+	f.transferCalls++
+	return f.transferHash, f.transferErr
 }
 
 const chainOwner = "0xaaaa0000000000000000000000000000000000aa"
