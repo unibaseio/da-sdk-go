@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/unibaseio/da-sdk-go/docs"
+	"github.com/unibaseio/da-sdk-go/hub/metering"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/piece"
@@ -65,6 +66,8 @@ type Server struct {
 	auth types.Auth
 
 	statManager *StatManager
+
+	metering *metering.Manager
 
 	bucketDisplayLock sync.RWMutex
 	bucketDisplay     map[string]types.BucketDisplay
@@ -129,6 +132,13 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	}
 	s.statManager = sm
 
+	// Metering accounting layer. Disabled by default; when off it is inert and
+	// existing upload/download behavior is unchanged.
+	s.metering = metering.NewManager(s.gdb, metering.LoadConfigFromEnv())
+	if s.metering.Enabled() {
+		logger.Info("metering enabled")
+	}
+
 	go s.uploadTo()
 
 	s.registRoute()
@@ -185,6 +195,11 @@ func (s *Server) registRoute() {
 	authed.Use(RateLimit())
 
 	s.addUpload(authed)
+
+	// Metering routes: public read-only (pricing/usage) on pub; authenticated
+	// (sync/settle, later phases) on authed. CtxAuthAddr is injected as the
+	// signer extractor so the metering package need not import hub.
+	s.metering.RegisterRoutes(pub, authed, CtxAuthAddr)
 }
 
 // ListenAndServe starts the HTTP server

@@ -56,6 +56,11 @@ func (s *Server) loadGORM() {
 	db.AutoMigrate(&types.StatRecord{})
 	db.AutoMigrate(&types.Conversation{})
 
+	// Metering ledger (accounting layer; inert unless HUB_METERING_ENABLED=true)
+	db.AutoMigrate(&types.MeterAccount{})
+	db.AutoMigrate(&types.MeterEvent{})
+	db.AutoMigrate(&types.MeterSettlement{})
+
 	// Add indexes
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_owner ON needles(owner);")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_needles_bucket ON needles(bucket);")
