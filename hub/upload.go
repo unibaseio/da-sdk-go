@@ -56,6 +56,13 @@ func (s *Server) uploadData(c *gin.Context) {
 		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("empty file")))
 		return
 	}
+
+	// Payment preflight before touching storage. Returns 402 if the write
+	// would exceed the owner's credit limit (or, later, chain balance/allowance).
+	if !s.checkWriteAdmission(c, addr, uint64(file.Size)) {
+		return
+	}
+
 	mm, err := s.logFSWrite(addr, bucket, file.Filename, fr)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
@@ -96,6 +103,11 @@ func (s *Server) upload(c *gin.Context) {
 		}
 	}
 
+	// Payment preflight before touching storage.
+	if !s.checkWriteAdmission(c, mjson.Owner, uint64(len(mjson.Message))) {
+		return
+	}
+
 	var buf bytes.Buffer
 	buf.WriteString(mjson.Message)
 
@@ -109,6 +121,29 @@ func (s *Server) upload(c *gin.Context) {
 	s.recordUploadWrite(mjson.Owner, mjson.Bucket, mjson.ID, uint64(len(mjson.Message)))
 
 	c.JSON(http.StatusOK, mm)
+}
+
+// checkWriteAdmission runs the metering payment preflight. It returns true
+// (allow) immediately when metering/write-charging is off. On rejection it
+// writes a 402 Payment Required with the decision body and returns false; the
+// caller MUST return. A local ledger read error is not a payment refusal, so
+// this fails open (allow + warn) rather than blocking uploads — consistent with
+// the first-version rule that accounting must not disturb storage.
+func (s *Server) checkWriteAdmission(c *gin.Context, owner string, estimatedBytes uint64) bool {
+	if !s.metering.ShouldChargeWrites() {
+		return true
+	}
+	res, err := s.metering.CanWrite(owner, estimatedBytes)
+	if err != nil {
+		logger.Warnf("metering: CanWrite failed for owner=%s, allowing write: %v", owner, err)
+		return true
+	}
+	if !res.Allowed {
+		logger.Infof("metering: write rejected for owner=%s reason=%s required=%s", owner, res.Reason, res.RequiredWei)
+		c.JSON(http.StatusPaymentRequired, res)
+		return false
+	}
+	return true
 }
 
 // recordUploadWrite records a successful write in the metering ledger. It is a

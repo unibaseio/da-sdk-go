@@ -2,6 +2,7 @@ package metering
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -29,6 +30,7 @@ type PricingResponse struct {
 func (m *Manager) RegisterRoutes(pub, authed *gin.RouterGroup, signer SignerFunc) {
 	pub.GET("/metering/pricing", m.handlePricing)
 	pub.GET("/metering/usage", m.handleUsage)
+	pub.GET("/metering/can-write", m.handleCanWrite)
 }
 
 func (m *Manager) handlePricing(c *gin.Context) {
@@ -59,4 +61,34 @@ func (m *Manager) handleUsage(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, usage)
+}
+
+// handleCanWrite is a read-only preflight query. It always returns 200 with the
+// decision body (the "allowed" flag conveys the result); the 402 status is
+// reserved for real upload attempts.
+func (m *Manager) handleCanWrite(c *gin.Context) {
+	owner := c.Query("owner")
+	if owner == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "owner is required"})
+		return
+	}
+	if !common.IsHexAddress(owner) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "owner must be a 0x-prefixed Ethereum address"})
+		return
+	}
+	var bytes uint64
+	if s := c.Query("bytes"); s != "" {
+		n, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bytes must be a non-negative integer"})
+			return
+		}
+		bytes = n
+	}
+	res, err := m.CanWrite(owner, bytes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, res)
 }

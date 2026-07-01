@@ -2,9 +2,12 @@ package hub
 
 import (
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/unibaseio/da-sdk-go/hub/metering"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"gorm.io/driver/sqlite"
@@ -95,5 +98,52 @@ func TestRecordUploadWriteEnabledCreatesEvent(t *testing.T) {
 	}
 	if ev.Bytes != 2500 || ev.Operation != "write" {
 		t.Errorf("event bytes=%d op=%s, want 2500/write", ev.Bytes, ev.Operation)
+	}
+}
+
+// checkWriteAdmission allows when metering is disabled (no 402, no body).
+func TestCheckWriteAdmissionDisabledAllows(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newMeteringTestDB(t)
+	s := &Server{metering: metering.NewManager(db, metering.Config{
+		Enabled:               false,
+		WriteBaseWei:          big.NewInt(100),
+		DefaultCreditLimitWei: big.NewInt(1),
+	})}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	if !s.checkWriteAdmission(c, "0xabc0000000000000000000000000000000000010", 100000) {
+		t.Fatal("disabled metering should allow the write")
+	}
+}
+
+// checkWriteAdmission returns 402 when the write exceeds the credit limit.
+func TestCheckWriteAdmissionCreditLimit402(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newMeteringTestDB(t)
+	s := &Server{metering: metering.NewManager(db, metering.Config{
+		Enabled:               true,
+		ChargeWrites:          true,
+		WriteBaseWei:          big.NewInt(100),
+		DefaultCreditLimitWei: big.NewInt(150),
+	})}
+	owner := "0xabc0000000000000000000000000000000000011"
+
+	// First write accrues 100 unsettled (allowed).
+	w1 := httptest.NewRecorder()
+	c1, _ := gin.CreateTestContext(w1)
+	if !s.checkWriteAdmission(c1, owner, 1) {
+		t.Fatal("first write should be allowed")
+	}
+	s.recordUploadWrite(owner, "b", "o", 1)
+
+	// Second write: required 200 > 150 -> 402.
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	if s.checkWriteAdmission(c2, owner, 1) {
+		t.Fatal("second write should be rejected")
+	}
+	if w2.Code != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402", w2.Code)
 	}
 }

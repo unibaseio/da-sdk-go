@@ -23,6 +23,15 @@ const (
 	eventUnsettled = "unsettled"
 	eventSettling  = "settling"
 	eventSettled   = "settled"
+
+	// CanWrite reasons
+	reasonMeteringDisabled    = "metering_disabled"
+	reasonAccountDisabled     = "account_disabled"
+	reasonCreditLimitExceeded = "credit_limit_exceeded"
+	reasonInsufficientAllow   = "insufficient_allowance"
+	reasonInsufficientBalance = "insufficient_balance"
+	reasonChainCheckFailed    = "chain_check_failed"
+	reasonAllowed             = "allowed"
 )
 
 // Manager owns pricing, the usage ledger, and (in later phases) write-admission
@@ -39,9 +48,23 @@ type Manager struct {
 }
 
 // NewManager builds a Manager. db must be a live *gorm.DB with the metering
-// tables migrated.
+// tables migrated. Nil wei amounts are normalized to zero so fee arithmetic
+// never dereferences a nil *big.Int.
 func NewManager(db *gorm.DB, cfg Config) *Manager {
+	cfg.WriteBaseWei = orZero(cfg.WriteBaseWei)
+	cfg.WritePerKBWei = orZero(cfg.WritePerKBWei)
+	cfg.ReadPerRequestWei = orZero(cfg.ReadPerRequestWei)
+	cfg.DefaultCreditLimitWei = orZero(cfg.DefaultCreditLimitWei)
+	cfg.SettleThresholdWei = orZero(cfg.SettleThresholdWei)
 	return &Manager{db: db, cfg: cfg}
+}
+
+// orZero returns n, or a fresh zero *big.Int when n is nil.
+func orZero(n *big.Int) *big.Int {
+	if n == nil {
+		return big.NewInt(0)
+	}
+	return n
 }
 
 // Enabled reports whether metering is on. It is nil-safe so callers can guard
@@ -234,6 +257,91 @@ func (m *Manager) GetUsage(owner string) (*UsageResponse, error) {
 		CreditLimitWei:    normWei(acct.CreditLimitWei),
 		LastSettledAt:     acct.LastSettledAt,
 	}, nil
+}
+
+// ----------------------------------------------------------------------------
+// Write admission
+// ----------------------------------------------------------------------------
+
+// CanWriteResult is the admission decision for a prospective write.
+type CanWriteResult struct {
+	Allowed         bool   `json:"allowed"`
+	Reason          string `json:"reason"`
+	RequiredWei     string `json:"required_wei"`
+	EstimatedFeeWei string `json:"estimated_fee_wei"`
+	UnsettledFeeWei string `json:"unsettled_fee_wei"`
+	CreditLimitWei  string `json:"credit_limit_wei"`
+	BalanceWei      string `json:"balance_wei,omitempty"`
+	AllowanceWei    string `json:"allowance_wei,omitempty"`
+	Action          string `json:"action,omitempty"`
+}
+
+// CanWrite decides whether owner may perform a write of estimatedBytes.
+//
+//	estimated_fee = PriceWrite(estimatedBytes)
+//	required      = unsettled_fee + estimated_fee
+//
+// Rejects when the account is disabled, or (credit_limit > 0 and required >
+// credit_limit). Chain balance/allowance checks are applied only when
+// HUB_METERING_CHECK_CHAIN=true (added in a later phase). When metering is
+// disabled it always allows. A non-nil error means a local lookup failed and
+// the caller should decide its own fail-open/closed policy.
+func (m *Manager) CanWrite(owner string, estimatedBytes uint64) (*CanWriteResult, error) {
+	owner = strings.ToLower(owner)
+	est := m.PriceWrite(estimatedBytes)
+
+	res := &CanWriteResult{
+		EstimatedFeeWei: est.String(),
+	}
+
+	if !m.Enabled() {
+		res.Allowed = true
+		res.Reason = reasonMeteringDisabled
+		res.RequiredWei = est.String()
+		res.UnsettledFeeWei = "0"
+		res.CreditLimitWei = "0"
+		return res, nil
+	}
+
+	unsettled := big.NewInt(0)
+	creditLimit := new(big.Int).Set(m.cfg.DefaultCreditLimitWei)
+	disabled := false
+
+	var acct types.MeterAccount
+	r := m.db.Where("owner = ?", owner).First(&acct)
+	if r.Error == nil {
+		unsettled = parseWei(acct.UnsettledFeeWei)
+		creditLimit = parseWei(acct.CreditLimitWei)
+		disabled = !acct.Enabled || acct.Status == statusDisabled
+	} else if r.Error != gorm.ErrRecordNotFound {
+		return nil, r.Error
+	}
+
+	required := new(big.Int).Add(unsettled, est)
+	res.RequiredWei = required.String()
+	res.UnsettledFeeWei = unsettled.String()
+	res.CreditLimitWei = creditLimit.String()
+
+	if disabled {
+		res.Allowed = false
+		res.Reason = reasonAccountDisabled
+		res.Action = "contact_provider"
+		return res, nil
+	}
+
+	if creditLimit.Sign() > 0 && required.Cmp(creditLimit) > 0 {
+		res.Allowed = false
+		res.Reason = reasonCreditLimitExceeded
+		res.Action = "settle"
+		return res, nil
+	}
+
+	// Chain balance/allowance checks (HUB_METERING_CHECK_CHAIN) are wired in a
+	// later phase. Until then local credit is authoritative.
+
+	res.Allowed = true
+	res.Reason = reasonAllowed
+	return res, nil
 }
 
 // ----------------------------------------------------------------------------
