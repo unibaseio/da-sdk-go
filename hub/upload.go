@@ -128,7 +128,8 @@ func (s *Server) uploadData(c *gin.Context) {
 		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("empty file")))
 		return
 	}
-	mm, err := s.logFSWrite(addr, bucket, file.Filename, fr)
+	// kind: memory (default) or knowledgebase — small-object/coalesce path either way.
+	mm, err := s.logFSWriteEx(addr, bucket, file.Filename, memKind(c.PostForm("kind")), false, fr)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
@@ -168,7 +169,7 @@ func (s *Server) upload(c *gin.Context) {
 	var buf bytes.Buffer
 	buf.WriteString(mjson.Message)
 
-	mm, err := s.logFSWrite(mjson.Owner, mjson.Bucket, mjson.ID, &buf)
+	mm, err := s.logFSWriteEx(mjson.Owner, mjson.Bucket, mjson.ID, memKind(mjson.Kind), false, &buf)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
@@ -177,10 +178,14 @@ func (s *Server) upload(c *gin.Context) {
 	c.JSON(http.StatusOK, mm)
 }
 
-// logFSWrite is the memory path (small-write coalescing). Preserved verbatim
-// as a thin wrapper so existing callers/behavior are unchanged.
-func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader) (types.MemeMeta, error) {
-	return s.logFSWriteEx(addr, bucket, key, "memory", false, r)
+// memKind normalizes the kind for the small-object (coalesce) upload path:
+// only "memory" (default) and "knowledgebase" (RAG chunk) belong here; empty or
+// a large-file kind (model/dataset — those use /uploadDir) falls back to memory.
+func memKind(k string) string {
+	if k == "knowledgebase" {
+		return k
+	}
+	return "memory"
 }
 
 // logFSWriteEx writes one object to the owner's logfs + indexes it.
