@@ -233,6 +233,10 @@ func (s *Server) registRoute() {
 		s.addUpload(authed)
 		s.addSeal(authed) // seal is a write path (Upload + AddPiece)
 	}
+
+	// /v1 — resource-oriented wallet-native façade over the same Server (see v1.go).
+	// Old /api/* above is untouched.
+	s.registV1()
 }
 
 // isSQLite reports whether the gorm backend is SQLite (vs Postgres).
