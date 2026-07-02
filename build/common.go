@@ -16,7 +16,8 @@ const (
 )
 
 // ServerURL is the default DA server the SDK/CLI talks to; override with
-// SERVER_URL for other deployments.
+// SERVER_URL for other deployments. (Supersedes the plain os.Getenv form from
+// PR#26 — same behavior/default, routed through lib/env for consistency.)
 var ServerURL = env.Str(env.ServerURL, "http://54.251.11.180:8080")
 
 const chainTypeHint = "please set env 'CHAIN_TYPE' to one of 'base', 'base-sepolia', 'bsc-mainnet', 'eth-mainnet', 'bnb-testnet-v2' or 'bnb-testnet-dao'"
