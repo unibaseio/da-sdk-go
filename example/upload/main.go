@@ -1,100 +1,114 @@
-// example/upload — reference client for the hub /v1 upload API (S3-shaped,
-// wallet-native). See da/HUB_API_V1_SPEC.md.
+// example/upload — reference client for DIRECT DA upload (client → stream → chain).
 //
-// Flow:  PUT /v1/buckets/{bucket} {kind}                 (declare bucket + kind once)
-//        PUT /v1/buckets/{bucket}/objects/{key}?wait=1    (upload one object)
+// The lean, SDK-direct path (no hub): discover a stream via the gateway (or pin
+// one with -stream), upload the file/dir straight to that stream, then the
+// client's own wallet submits AddPiece on-chain. This is best for one-off
+// files/dirs (fewest hops, no hub copy, user owns the piece). Continuous small
+// writes (agent memory) should use the hub instead (batching + object store).
 //
-// Auth: every write carries Authorization = hex(json(BuildAuth(...))); the
-// recovered signer must equal the object owner (the bucket's owner).
-//
-//	go run ./example/upload -sk <hexkey> -bucket my-models -kind model \
-//	    -path ./weights.bin -hub http://127.0.0.1:8086 -wait
+//	go run ./example/upload -sk <hexkey> -path ./weights.bin \
+//	    -gateway http://<gateway> [-stream 0x<streamAddr>] [-name myfile]
 package main
 
 import (
-	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/mitchellh/go-homedir"
+	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	"github.com/unibaseio/da-sdk-go/lib/key"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/sdk"
 )
 
 func main() {
-	hub := flag.String("hub", envOr("HUB_URL", "http://127.0.0.1:8086"), "hub base URL")
-	skstr := flag.String("sk", "", "owner private key (hex); generated if empty")
-	bucket := flag.String("bucket", "", "bucket (namespace) to upload into")
-	kind := flag.String("kind", "file", "bucket kind: memory|knowledgebase|file|model|dataset")
-	keyName := flag.String("key", "", "object key (default: file basename)")
-	path := flag.String("path", "", "file to upload")
-	wait := flag.Bool("wait", true, "block until the object is committed on-chain")
+	gateway := flag.String("gateway", envOr("UNIBASE_GATEWAY", ""), "gateway URL (stream discovery + metadata)")
+	stream := flag.String("stream", "", "pin a stream node address (else the gateway picks an online one)")
+	skstr := flag.String("sk", "", "funded wallet private key (hex): holds ETH gas + UB bond")
+	chain := flag.String("chain", envOr("CHAIN_TYPE", "base-sepolia"), "chain type")
+	path := flag.String("path", "", "file or directory to upload")
+	name := flag.String("name", "", "public object name for a single file (default: file basename)")
+	n := flag.Int("n", 6, "erasure-code N")
+	kk := flag.Int("k", 4, "erasure-code K")
 	flag.Parse()
 
-	if *bucket == "" || *path == "" {
-		log.Fatal("need -bucket and -path")
+	if *gateway == "" || *skstr == "" || *path == "" {
+		log.Fatal("need -gateway, -sk, -path")
 	}
-
-	// owner key: the signer of every write; owner == this address.
 	sk, err := crypto.HexToECDSA(strings.TrimPrefix(*skstr, "0x"))
 	if err != nil {
-		if sk, err = crypto.GenerateKey(); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("=== generated key: %s ===\n", hex.EncodeToString(crypto.FromECDSA(sk)))
+		log.Fatalf("bad -sk: %v", err)
 	}
-	owner := crypto.PubkeyToAddress(sk.PublicKey).Hex()
-	privk := hex.EncodeToString(crypto.FromECDSA(sk))
-
-	// authHeader signs a fresh auth envelope (±10min window) per request.
-	authHeader := func() string {
-		au := sdk.BuildAuth(owner, privk, []byte("hub"))
-		b, _ := json.Marshal(au)
-		return hex.EncodeToString(b)
+	// -stream pins a preferred stream (SDK reads STREAM_PRIORITY).
+	if *stream != "" {
+		os.Setenv("STREAM_PRIORITY", *stream)
 	}
 
-	fp, _ := homedir.Expand(*path)
-	data, err := os.ReadFile(fp)
+	au, err := key.BuildAuth(sk, []byte("upload"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	key := *keyName
-	if key == "" {
-		key = filepath.Base(fp)
-	}
+	sdk.Login(*gateway, au) // optional server-side charge/registration
 
-	client := &http.Client{Timeout: 300 * time.Second}
-	send := func(method, url, ctype, body string) {
-		r, _ := http.NewRequest(method, url, strings.NewReader(body))
-		r.Header.Set("Content-Type", ctype)
-		r.Header.Set("Authorization", authHeader())
-		resp, err := client.Do(r)
-		if err != nil {
-			log.Fatalf("%s %s: %v", method, url, err)
+	cm, err := contract.NewContractManage(sk, *chain)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := cm.CheckBalance(au.Addr); err != nil {
+		log.Fatalf("wallet %s: %v (needs ETH gas + UB)", au.Addr.Hex(), err)
+	}
+	policy := types.Policy{N: uint8(*n), K: uint8(*kk)}
+
+	fp, _ := homedir.Expand(*path)
+	fi, err := os.Stat(fp)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !fi.IsDir() {
+		nm := *name
+		if nm == "" {
+			nm = filepath.Base(fp)
 		}
-		defer resp.Body.Close()
-		rb, _ := io.ReadAll(resp.Body)
-		fmt.Printf("%s %s -> %d\n  %s\n", method, url, resp.StatusCode, string(rb))
+		must(uploadOne(cm, au, policy, *gateway, fp, nm))
+		return
 	}
+	// directory: upload each file under its basename
+	err = filepath.Walk(fp, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		return uploadOne(cm, au, policy, *gateway, p, filepath.Base(p))
+	})
+	must(err)
+}
 
-	// 1) ensure the bucket exists with its kind (idempotent; kind immutable)
-	send("PUT", *hub+"/v1/buckets/"+*bucket, "application/json", fmt.Sprintf(`{"kind":%q}`, *kind))
-
-	// 2) upload the object; ?wait=1 blocks until the DA AddPiece lands on-chain
-	//    (200 + committed receipt: commitment + chain), else 202 staged.
-	url := *hub + "/v1/buckets/" + *bucket + "/objects/" + key
-	if *wait {
-		url += "?wait=1"
+func uploadOne(cm *contract.ContractManage, au types.Auth, policy types.Policy, gateway, fp, nm string) error {
+	ff, streamer, err := sdk.Upload(gateway, au, policy, fp, nm) // → stream (direct) + UploadFileMeta(gateway)
+	if err != nil {
+		return err
 	}
-	send("PUT", url, "application/octet-stream", string(data))
+	pcs, err := sdk.CheckFileFull(ff, streamer, fp) // trustless: verify the streamer encoded the real bytes
+	if err != nil {
+		return err
+	}
+	for _, pc := range pcs {
+		if _, err := cm.AddPiece(pc); err != nil { // client's own wallet stakes + submits on-chain
+			return err
+		}
+	}
+	fmt.Printf("uploaded %s → name=%s streamer=%s sha256=%s pieces=%d\n", fp, ff.Name, streamer.Hex(), ff.Hash, len(pcs))
+	return nil
+}
+
+func must(err error) {
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func envOr(k, def string) string {

@@ -1,81 +1,65 @@
-// example/download — reference client for the hub /v1 read API (S3-shaped).
-// See da/HUB_API_V1_SPEC.md.
+// example/download — reference client for DIRECT DA download (gateway → pieces).
 //
-// Reads are public (content is client-encrypted), so no signature is needed:
+// Lean, SDK-direct path (no hub): fetch the file receipt from the gateway and
+// reconstruct the bytes from its DA pieces (store replicas via the stream WS
+// relay, or the streamer's staging copy). No funds needed — but the request
+// still carries a signed Authorization (an ephemeral key is fine).
 //
-//	GET /v1/buckets/{bucket}/objects/{key}          (metadata + verifiable receipt)
-//	GET /v1/buckets/{bucket}/objects/{key}/content  (raw bytes)
-//	GET /v1/buckets/{bucket}/objects/{key}/proof    (verification bundle)
-//
-//	go run ./example/download -bucket my-models -key weights.bin \
-//	    -owner 0x... -out ./weights.bin -hub http://127.0.0.1:8086
+//	go run ./example/download -gateway http://<gateway> -name <fileName> -out ./out.bin
 package main
 
 import (
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"net/url"
 	"os"
-	"time"
+	"strings"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/mitchellh/go-homedir"
+	"github.com/unibaseio/da-sdk-go/lib/key"
+	"github.com/unibaseio/da-sdk-go/sdk"
 )
 
 func main() {
-	hub := flag.String("hub", envOr("HUB_URL", "http://127.0.0.1:8086"), "hub base URL")
-	bucket := flag.String("bucket", "", "bucket (namespace)")
-	key := flag.String("key", "", "object key")
-	owner := flag.String("owner", "", "owner address (scopes the lookup; optional)")
-	out := flag.String("out", "", "output file (default: stdout summary only)")
+	gateway := flag.String("gateway", envOr("UNIBASE_GATEWAY", ""), "gateway URL")
+	name := flag.String("name", "", "file name (as registered on upload)")
+	out := flag.String("out", "", "output file; '-' or empty writes stdout")
+	skstr := flag.String("sk", "", "signing key (hex); optional — ephemeral if empty (no funds needed)")
 	flag.Parse()
 
-	if *bucket == "" || *key == "" {
-		log.Fatal("need -bucket and -key")
+	if *gateway == "" || *name == "" {
+		log.Fatal("need -gateway and -name")
 	}
 
-	client := &http.Client{Timeout: 120 * time.Second}
-	base := *hub + "/v1/buckets/" + *bucket + "/objects/" + url.PathEscape(*key)
-	q := ""
-	if *owner != "" {
-		q = "?owner=" + *owner
-	}
-
-	get := func(u string) ([]byte, int) {
-		resp, err := client.Get(u)
-		if err != nil {
-			log.Fatalf("GET %s: %v", u, err)
+	// reads need a valid signed Authorization but no funds; ephemeral key is fine.
+	sk, err := crypto.HexToECDSA(strings.TrimPrefix(*skstr, "0x"))
+	if err != nil {
+		if sk, err = crypto.GenerateKey(); err != nil {
+			log.Fatal(err)
 		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		return b, resp.StatusCode
 	}
-
-	// 1) receipt (metadata: size, sha256, commitment, chain, status)
-	meta, code := get(base + q)
-	fmt.Printf("GET object -> %d\n  %s\n", code, string(meta))
-
-	// 2) verification bundle
-	proof, pcode := get(base + "/proof" + q)
-	fmt.Printf("GET proof -> %d\n  %s\n", pcode, string(proof))
-
-	// 3) content
-	body, ccode := get(base + "/content" + q)
-	if ccode != http.StatusOK {
-		fmt.Printf("GET content -> %d\n  %s\n", ccode, string(body))
-		return
-	}
-	if *out == "" {
-		fmt.Printf("GET content -> %d (%d bytes; pass -out to save)\n", ccode, len(body))
-		return
-	}
-	fp, _ := homedir.Expand(*out)
-	if err := os.WriteFile(fp, body, 0o644); err != nil {
+	au, err := key.BuildAuth(sk, []byte("download"))
+	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("GET content -> %d, wrote %d bytes to %s\n", ccode, len(body), fp)
+
+	w := os.Stdout
+	if *out != "" && *out != "-" {
+		fp, _ := homedir.Expand(*out)
+		f, err := os.Create(fp)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		w = f
+	}
+	if err := sdk.Download(*gateway, au, *name, nil, w); err != nil {
+		log.Fatal(err)
+	}
+	if w != os.Stdout {
+		fmt.Fprintf(os.Stderr, "downloaded %s → %s\n", *name, w.Name())
+	}
 }
 
 func envOr(k, def string) string {

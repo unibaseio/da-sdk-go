@@ -1,12 +1,11 @@
 package main
 
 import (
-	"encoding/hex"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,26 +13,31 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/mitchellh/go-homedir"
+	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	"github.com/unibaseio/da-sdk-go/lib/key"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/sdk"
 	"github.com/urfave/cli/v2"
 )
 
-// commonFlags are shared by every leaf command (defined per-command so they
-// resolve from the subcommand context and can appear in any position).
+// commonFlags are shared by every leaf command (per-command so they resolve
+// from the subcommand context and work in any position).
 func commonFlags(extra ...cli.Flag) []cli.Flag {
 	base := []cli.Flag{
-		&cli.StringFlag{Name: "hub", EnvVars: []string{"UNIBASE_HUB"}, Value: "http://127.0.0.1:8086", Usage: "hub base URL"},
-		&cli.StringFlag{Name: "key", EnvVars: []string{"UNIBASE_KEY"}, Usage: "owner private key (hex); required for writes"},
+		&cli.StringFlag{Name: "gateway", EnvVars: []string{"UNIBASE_GATEWAY"}, Usage: "gateway URL (stream discovery + metadata)"},
+		&cli.StringFlag{Name: "key", EnvVars: []string{"UNIBASE_KEY"}, Usage: "funded wallet private key (hex); required for upload"},
 		&cli.BoolFlag{Name: "json", Usage: "machine-readable JSON output"},
 	}
 	return append(base, extra...)
 }
 
-// daCommand is the `ubcli da` group — the DA hub /v1 object store.
+// daCommand — `ubcli da`: DIRECT DA storage (client → stream → chain). The lean
+// SDK-direct path; no hub. (The hub is a separate service for continuous small
+// writes / the object-store API.)
 func daCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "da",
-		Usage: "verifiable object storage (upload/download/list) on Unibase DA",
+		Usage: "verifiable decentralized storage — direct upload/download",
 		Subcommands: []*cli.Command{
 			daUploadCmd(),
 			daDownloadCmd(),
@@ -42,173 +46,173 @@ func daCommand() *cli.Command {
 	}
 }
 
-// ---- v1 client -------------------------------------------------------------
-
-type v1Client struct {
-	hub, owner, privk string
-	isJSON            bool
-	hc                *http.Client
+func requireGateway(c *cli.Context) (string, error) {
+	gw := strings.TrimRight(c.String("gateway"), "/")
+	if gw == "" {
+		return "", fmt.Errorf("need --gateway (or UNIBASE_GATEWAY)")
+	}
+	return gw, nil
 }
 
-// newClient builds a client from the global flags. needKey=true (writes) errors
-// if no key; reads leave owner empty.
-func newClient(c *cli.Context, needKey bool) (*v1Client, error) {
-	cl := &v1Client{
-		hub:    strings.TrimRight(c.String("hub"), "/"),
-		isJSON: c.Bool("json"),
-		hc:     &http.Client{Timeout: 300 * time.Second},
+func loadKey(c *cli.Context) (*ecdsa.PrivateKey, error) {
+	k := strings.TrimPrefix(c.String("key"), "0x")
+	if k == "" {
+		return nil, fmt.Errorf("upload needs a funded wallet key (--key or UNIBASE_KEY): ETH gas + UB bond")
 	}
-	if k := strings.TrimPrefix(c.String("key"), "0x"); k != "" {
-		sk, err := crypto.HexToECDSA(k)
-		if err != nil {
-			return nil, fmt.Errorf("bad --key/UNIBASE_KEY: %w", err)
-		}
-		cl.owner = crypto.PubkeyToAddress(sk.PublicKey).Hex()
-		cl.privk = k
-	} else if needKey {
-		return nil, fmt.Errorf("this command writes and needs a wallet key (--key or UNIBASE_KEY)")
-	}
-	return cl, nil
+	return crypto.HexToECDSA(k)
 }
-
-func (c *v1Client) authHeader() string {
-	au := sdk.BuildAuth(c.owner, c.privk, []byte("hub"))
-	b, _ := json.Marshal(au)
-	return hex.EncodeToString(b)
-}
-
-func (c *v1Client) do(method, path, ctype string, body io.Reader, signed bool) (int, []byte, error) {
-	r, err := http.NewRequest(method, c.hub+path, body)
-	if err != nil {
-		return 0, nil, err
-	}
-	if ctype != "" {
-		r.Header.Set("Content-Type", ctype)
-	}
-	if signed {
-		r.Header.Set("Authorization", c.authHeader())
-	}
-	resp, err := c.hc.Do(r)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-	rb, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, rb, nil
-}
-
-// ---- commands --------------------------------------------------------------
 
 func daUploadCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "upload",
-		Usage: "upload a file (or stdin) as an object; auto-creates the bucket",
+		Usage: "upload a file or directory directly to a stream node (client submits AddPiece)",
 		Flags: commonFlags(
-			&cli.StringFlag{Name: "bucket", Required: true, Usage: "bucket (namespace)"},
-			&cli.StringFlag{Name: "kind", Value: "file", Usage: "bucket kind: memory|knowledgebase|file|model|dataset"},
-			&cli.StringFlag{Name: "name", Usage: "object key (default: file basename, or 'stdin')"},
-			&cli.StringFlag{Name: "path", Usage: "file to upload; '-' or empty reads stdin"},
-			&cli.BoolFlag{Name: "wait", Usage: "block until committed on-chain (returns commitment + tx)"},
+			&cli.StringFlag{Name: "path", Required: true, Usage: "file or directory to upload"},
+			&cli.StringFlag{Name: "name", Usage: "public name for a single file (default: basename)"},
+			&cli.StringFlag{Name: "stream", Usage: "pin a stream node address (else gateway picks an online one)"},
+			&cli.StringFlag{Name: "chain", EnvVars: []string{"CHAIN_TYPE"}, Value: "base-sepolia", Usage: "chain type"},
+			&cli.IntFlag{Name: "n", Value: 6, Usage: "erasure-code N"},
+			&cli.IntFlag{Name: "k", Value: 4, Usage: "erasure-code K"},
 		),
 		Action: func(c *cli.Context) error {
-			cl, err := newClient(c, true)
+			gw, err := requireGateway(c)
 			if err != nil {
 				return err
 			}
-			bucket := c.String("bucket")
-
-			// read content (file or stdin)
-			var data []byte
-			key := c.String("name")
-			if p := c.String("path"); p != "" && p != "-" {
-				fp, _ := homedir.Expand(p)
-				if data, err = os.ReadFile(fp); err != nil {
-					return err
-				}
-				if key == "" {
-					key = filepath.Base(fp)
-				}
-			} else {
-				if data, err = io.ReadAll(os.Stdin); err != nil {
-					return err
-				}
-				if key == "" {
-					key = "stdin"
-				}
-			}
-			if len(data) == 0 {
-				return fmt.Errorf("nothing to upload (empty file/stdin)")
-			}
-
-			// 1) ensure bucket (idempotent; kind immutable → 409)
-			code, body, err := cl.do("PUT", "/v1/buckets/"+url.PathEscape(bucket), "application/json",
-				strings.NewReader(fmt.Sprintf(`{"kind":%q}`, c.String("kind"))), true)
+			sk, err := loadKey(c)
 			if err != nil {
 				return err
 			}
-			if code != http.StatusOK && code != http.StatusCreated {
-				return fmt.Errorf("create bucket: HTTP %d %s", code, body)
+			if s := c.String("stream"); s != "" {
+				os.Setenv("STREAM_PRIORITY", s) // SDK prefers this stream in discovery
 			}
-
-			// 2) put object
-			path := "/v1/buckets/" + url.PathEscape(bucket) + "/objects/" + url.PathEscape(key)
-			if c.Bool("wait") {
-				path += "?wait=1"
-			}
-			code, body, err = cl.do("PUT", path, "application/octet-stream", strings.NewReader(string(data)), true)
+			au, err := key.BuildAuth(sk, []byte("upload"))
 			if err != nil {
 				return err
 			}
-			if code != http.StatusOK && code != http.StatusAccepted {
-				return fmt.Errorf("upload: HTTP %d %s", code, body)
+			sdk.Login(gw, au)
+			cm, err := contract.NewContractManage(sk, c.String("chain"))
+			if err != nil {
+				return err
 			}
-			return cl.emitReceipt(body)
+			if err := cm.CheckBalance(au.Addr); err != nil {
+				return fmt.Errorf("wallet %s: %w (needs ETH gas + UB)", au.Addr.Hex(), err)
+			}
+			policy := types.Policy{N: uint8(c.Int("n")), K: uint8(c.Int("k"))}
+
+			fp, _ := homedir.Expand(c.String("path"))
+			fi, err := os.Stat(fp)
+			if err != nil {
+				return err
+			}
+			isJSON := c.Bool("json")
+			if !fi.IsDir() {
+				nm := c.String("name")
+				if nm == "" {
+					nm = filepath.Base(fp)
+				}
+				return uploadOne(cm, au, policy, gw, fp, nm, isJSON)
+			}
+			return filepath.Walk(fp, func(p string, info os.FileInfo, e error) error {
+				if e != nil || info.IsDir() {
+					return e
+				}
+				return uploadOne(cm, au, policy, gw, p, filepath.Base(p), isJSON)
+			})
 		},
 	}
+}
+
+func uploadOne(cm *contract.ContractManage, au types.Auth, policy types.Policy, gw, fp, nm string, isJSON bool) error {
+	ff, streamer, err := sdk.Upload(gw, au, policy, fp, nm) // direct → stream + UploadFileMeta(gateway)
+	if err != nil {
+		return err
+	}
+	pcs, err := sdk.CheckFileFull(ff, streamer, fp) // trustless: verify streamer encoded the real bytes
+	if err != nil {
+		return err
+	}
+	var tx string
+	for _, pc := range pcs {
+		t, err := cm.AddPiece(pc) // client's own wallet stakes + submits on-chain
+		if err != nil {
+			return err
+		}
+		tx = t
+	}
+	if isJSON {
+		b, _ := json.Marshal(map[string]any{
+			"name": ff.Name, "sha256": ff.Hash, "streamer": streamer.Hex(),
+			"pieces": len(pcs), "lastTx": tx, "chainType": ff.ChainType,
+		})
+		fmt.Println(string(b))
+	} else {
+		fmt.Printf("%s → name=%s sha256=%s streamer=%s pieces=%d tx=%s\n",
+			fp, ff.Name, ff.Hash, streamer.Hex(), len(pcs), tx)
+	}
+	return nil
 }
 
 func daDownloadCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "download",
-		Usage: "download an object's bytes to a file or stdout",
+		Usage: "download a file by name (reconstructed from DA pieces); public, no key needed",
 		Flags: commonFlags(
-			&cli.StringFlag{Name: "bucket", Required: true},
-			&cli.StringFlag{Name: "name", Required: true, Usage: "object key"},
-			&cli.StringFlag{Name: "owner", Usage: "owner address (scopes lookup; optional)"},
-			&cli.StringFlag{Name: "out", Usage: "output file; '-' or empty writes stdout (pipe-friendly)"},
+			&cli.StringFlag{Name: "name", Required: true, Usage: "file name (as registered on upload)"},
+			&cli.StringFlag{Name: "out", Usage: "output file; '-' or empty writes stdout"},
 		),
 		Action: func(c *cli.Context) error {
-			cl, err := newClient(c, false)
+			gw, err := requireGateway(c)
 			if err != nil {
 				return err
 			}
-			base := "/v1/buckets/" + url.PathEscape(c.String("bucket")) + "/objects/" + url.PathEscape(c.String("name"))
-			q := ""
-			if o := c.String("owner"); o != "" {
-				q = "?owner=" + o
+			// Reads still need a valid signed Authorization (gateway/stream reject
+			// "nil authorization"), but no funds — use --key if given, else an
+			// ephemeral key just to sign the request.
+			sk, err := loadKey(c)
+			if err != nil {
+				if sk, err = crypto.GenerateKey(); err != nil {
+					return err
+				}
 			}
-			code, body, err := cl.do("GET", base+"/content"+q, "", nil, false)
+			au, err := key.BuildAuth(sk, []byte("download"))
 			if err != nil {
 				return err
 			}
-			if code != http.StatusOK {
-				return fmt.Errorf("download: HTTP %d %s", code, body)
-			}
+			name := c.String("name")
 			out := c.String("out")
 			if out == "" || out == "-" {
-				os.Stdout.Write(body) // pure bytes → pipeable
-				return nil
+				// stdout: single attempt (can't retry a consumed pipe)
+				return sdk.Download(gw, au, name, nil, os.Stdout)
 			}
+			// file: retry to ride out the gateway's post-AddPiece piece-index sync
+			// lag ("record not found" right after upload). Re-create (truncate)
+			// each attempt so a partial write never lingers — memory-safe for large files.
 			fp, _ := homedir.Expand(out)
-			if err := os.WriteFile(fp, body, 0o644); err != nil {
-				return err
+			var lastErr error
+			for attempt := 1; attempt <= 6; attempt++ {
+				f, err := os.Create(fp)
+				if err != nil {
+					return err
+				}
+				lastErr = sdk.Download(gw, au, name, nil, f)
+				f.Close()
+				if lastErr == nil {
+					if c.Bool("json") {
+						fmt.Printf(`{"name":%q,"out":%q}`+"\n", name, fp)
+					} else {
+						fmt.Fprintf(os.Stderr, "downloaded %s → %s\n", name, fp)
+					}
+					return nil
+				}
+				if !strings.Contains(lastErr.Error(), "record not found") {
+					break // a real error, not the sync-lag race
+				}
+				fmt.Fprintf(os.Stderr, "not indexed yet (gateway syncing AddPiece), retry %d/6…\n", attempt)
+				time.Sleep(5 * time.Second)
 			}
-			if cl.isJSON {
-				fmt.Printf(`{"out":%q,"bytes":%d}`+"\n", fp, len(body))
-			} else {
-				fmt.Printf("wrote %d bytes to %s\n", len(body), fp)
-			}
-			return nil
+			os.Remove(fp)
+			return lastErr
 		},
 	}
 }
@@ -216,102 +220,48 @@ func daDownloadCmd() *cli.Command {
 func daLsCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "ls",
-		Usage: "list objects in a bucket, or list buckets",
+		Usage: "list files on the gateway",
 		Flags: commonFlags(
-			&cli.StringFlag{Name: "bucket", Usage: "list objects in this bucket; omit to list buckets"},
-			&cli.StringFlag{Name: "owner", Usage: "filter by owner"},
-			&cli.StringFlag{Name: "kind", Usage: "filter buckets by kind"},
 			&cli.IntFlag{Name: "limit", Value: 32},
 		),
 		Action: func(c *cli.Context) error {
-			cl, err := newClient(c, false)
+			gw, err := requireGateway(c)
 			if err != nil {
 				return err
 			}
-			q := url.Values{}
-			if o := c.String("owner"); o != "" {
-				q.Set("owner", o)
-			}
-			q.Set("limit", fmt.Sprintf("%d", c.Int("limit")))
-
-			var path, field string
-			if b := c.String("bucket"); b != "" {
-				path = "/v1/buckets/" + url.PathEscape(b) + "/objects?" + q.Encode()
-				field = "objects"
-			} else {
-				if k := c.String("kind"); k != "" {
-					q.Set("kind", k)
-				}
-				path = "/v1/buckets?" + q.Encode()
-				field = "buckets"
-			}
-			code, body, err := cl.do("GET", path, "", nil, false)
+			u := fmt.Sprintf("%s/api/listFile?start=0&count=%d", gw, c.Int("limit"))
+			resp, err := (&http.Client{Timeout: 30 * time.Second}).Get(u)
 			if err != nil {
 				return err
 			}
-			if code != http.StatusOK {
-				return fmt.Errorf("ls: HTTP %d %s", code, body)
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != 200 {
+				return fmt.Errorf("ls: HTTP %d %s", resp.StatusCode, body)
 			}
-			if cl.isJSON {
+			if c.Bool("json") {
 				os.Stdout.Write(body)
 				fmt.Println()
 				return nil
 			}
-			return printList(body, field)
+			var r struct {
+				Files []struct {
+					Name, Hash, Owner string
+					Size              int64
+				}
+			}
+			if json.Unmarshal(body, &r) != nil {
+				os.Stdout.Write(body)
+				return nil
+			}
+			for _, f := range r.Files {
+				h := f.Hash
+				if len(h) > 16 {
+					h = h[:16]
+				}
+				fmt.Printf("%-40s %10d  %s  owner=%s\n", f.Name, f.Size, h, f.Owner)
+			}
+			return nil
 		},
 	}
-}
-
-// ---- output helpers --------------------------------------------------------
-
-// emitReceipt prints the object receipt: raw JSON when --json, else a summary.
-func (c *v1Client) emitReceipt(body []byte) error {
-	if c.isJSON {
-		os.Stdout.Write(body)
-		fmt.Println()
-		return nil
-	}
-	var r struct {
-		Bucket, Key, Status, Commitment, Availability string
-		Size                                          uint64
-		Chain                                         *struct{ TxHash string }
-	}
-	json.Unmarshal(body, &r)
-	tx := ""
-	if r.Chain != nil {
-		tx = r.Chain.TxHash
-	}
-	fmt.Printf("%s/%s  %d bytes  status=%s\n", r.Bucket, r.Key, r.Size, r.Status)
-	if r.Commitment != "" {
-		fmt.Printf("  commitment=%s\n  tx=%s (%s)\n", r.Commitment, tx, r.Availability)
-	}
-	return nil
-}
-
-func printList(body []byte, field string) error {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(body, &m); err != nil {
-		os.Stdout.Write(body)
-		return nil
-	}
-	if field == "buckets" {
-		var bs []struct{ Name, Owner, Kind string }
-		json.Unmarshal(m["buckets"], &bs)
-		for _, b := range bs {
-			fmt.Printf("%-40s kind=%-14s owner=%s\n", b.Name, b.Kind, b.Owner)
-		}
-	} else {
-		var os_ []struct {
-			Key, Status, Commitment string
-			Size                    uint64
-		}
-		json.Unmarshal(m["objects"], &os_)
-		for _, o := range os_ {
-			fmt.Printf("%-40s %10d  %-9s %s\n", o.Key, o.Size, o.Status, o.Commitment)
-		}
-	}
-	if nc := strings.Trim(string(m["nextCursor"]), `"`); nc != "" {
-		fmt.Printf("(more: --... cursor=%s)\n", nc)
-	}
-	return nil
 }

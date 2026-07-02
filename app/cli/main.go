@@ -1,13 +1,17 @@
-// ubcli — the Unibase CLI. First module: DA (hub /v1 object store).
+// ubcli — the Unibase CLI. First module: DA (direct decentralized storage).
 //
-// Designed to be agent-friendly: --json structured output, stdin/stdout piping,
-// no interactive prompts (key via --key or UNIBASE_KEY), clear exit codes.
+// Direct path (no hub): the client discovers a stream via the gateway (or -stream
+// pins one), uploads straight to it, and the client's own wallet submits AddPiece
+// on-chain. Continuous small writes (agent memory) use the hub service instead.
 //
-//	export UNIBASE_HUB=http://127.0.0.1:8086
-//	export UNIBASE_KEY=<hex private key>          # writes only; reads are public
-//	ubcli da upload   --bucket my-models --kind model --path ./weights.bin --wait
-//	ubcli da download --bucket my-models --name weights.bin --out ./weights.bin
-//	ubcli da ls       --bucket my-models --json
+// Agent-friendly: --json output, stdin/stdout piping, no interactive prompts
+// (key via --key or UNIBASE_KEY), clear exit codes.
+//
+//	export UNIBASE_GATEWAY=http://<gateway>
+//	export UNIBASE_KEY=<hex private key>          # upload only; reads are public
+//	ubcli da upload   --path ./weights.bin [--stream 0x<addr>] [--name w.bin]
+//	ubcli da download --name weights.bin --out ./weights.bin
+//	ubcli da ls       --json
 package main
 
 import (
