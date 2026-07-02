@@ -1,140 +1,105 @@
+// example/upload — reference client for the hub /v1 upload API (S3-shaped,
+// wallet-native). See da/HUB_API_V1_SPEC.md.
+//
+// Flow:  PUT /v1/buckets/{bucket} {kind}                 (declare bucket + kind once)
+//        PUT /v1/buckets/{bucket}/objects/{key}?wait=1    (upload one object)
+//
+// Auth: every write carries Authorization = hex(json(BuildAuth(...))); the
+// recovered signer must equal the object owner (the bucket's owner).
+//
+//	go run ./example/upload -sk <hexkey> -bucket my-models -kind model \
+//	    -path ./weights.bin -hub http://127.0.0.1:8086 -wait
 package main
 
 import (
-	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
-	com "github.com/unibaseio/da-sdk-go/contract/common"
-	contract "github.com/unibaseio/da-sdk-go/contract/v2"
-	"github.com/unibaseio/da-sdk-go/lib/key"
-	"github.com/unibaseio/da-sdk-go/lib/types"
-	"github.com/unibaseio/da-sdk-go/sdk"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/mitchellh/go-homedir"
+	"github.com/unibaseio/da-sdk-go/sdk"
 )
 
 func main() {
-	skstr := flag.String("sk", "", "private key for sending transaction")
-	pathstr := flag.String("path", "", "dir or file path to upload")
-	//mf := flag.Bool("model", false, "upload type: model or regular file/dir")
-	fname := flag.Bool("name", false, "file name in public, default is sha256")
+	hub := flag.String("hub", envOr("HUB_URL", "http://127.0.0.1:8086"), "hub base URL")
+	skstr := flag.String("sk", "", "owner private key (hex); generated if empty")
+	bucket := flag.String("bucket", "", "bucket (namespace) to upload into")
+	kind := flag.String("kind", "file", "bucket kind: memory|knowledgebase|file|model|dataset")
+	keyName := flag.String("key", "", "object key (default: file basename)")
+	path := flag.String("path", "", "file to upload")
+	wait := flag.Bool("wait", true, "block until the object is committed on-chain")
 	flag.Parse()
 
-	sk, err := crypto.HexToECDSA(*skstr)
+	if *bucket == "" || *path == "" {
+		log.Fatal("need -bucket and -path")
+	}
+
+	// owner key: the signer of every write; owner == this address.
+	sk, err := crypto.HexToECDSA(strings.TrimPrefix(*skstr, "0x"))
 	if err != nil {
-		sk, err = crypto.GenerateKey()
-		if err != nil {
-			return
+		if sk, err = crypto.GenerateKey(); err != nil {
+			log.Fatal(err)
 		}
-		skbyte := crypto.FromECDSA(sk)
-		fmt.Printf("=== generate privatekey: %s ===\n", hex.EncodeToString(skbyte))
+		fmt.Printf("=== generated key: %s ===\n", hex.EncodeToString(crypto.FromECDSA(sk)))
+	}
+	owner := crypto.PubkeyToAddress(sk.PublicKey).Hex()
+	privk := hex.EncodeToString(crypto.FromECDSA(sk))
+
+	// authHeader signs a fresh auth envelope (±10min window) per request.
+	authHeader := func() string {
+		au := sdk.BuildAuth(owner, privk, []byte("hub"))
+		b, _ := json.Marshal(au)
+		return hex.EncodeToString(b)
 	}
 
-	fp, err := homedir.Expand(*pathstr)
+	fp, _ := homedir.Expand(*path)
+	data, err := os.ReadFile(fp)
 	if err != nil {
-		return
+		log.Fatal(err)
+	}
+	key := *keyName
+	if key == "" {
+		key = filepath.Base(fp)
 	}
 
-	err = UploadFile(sk, fp, *fname)
-	if err != nil {
-		log.Println(err)
+	client := &http.Client{Timeout: 300 * time.Second}
+	send := func(method, url, ctype, body string) {
+		r, _ := http.NewRequest(method, url, strings.NewReader(body))
+		r.Header.Set("Content-Type", ctype)
+		r.Header.Set("Authorization", authHeader())
+		resp, err := client.Do(r)
+		if err != nil {
+			log.Fatalf("%s %s: %v", method, url, err)
+		}
+		defer resp.Body.Close()
+		rb, _ := io.ReadAll(resp.Body)
+		fmt.Printf("%s %s -> %d\n  %s\n", method, url, resp.StatusCode, string(rb))
 	}
+
+	// 1) ensure the bucket exists with its kind (idempotent; kind immutable)
+	send("PUT", *hub+"/v1/buckets/"+*bucket, "application/json", fmt.Sprintf(`{"kind":%q}`, *kind))
+
+	// 2) upload the object; ?wait=1 blocks until the DA AddPiece lands on-chain
+	//    (200 + committed receipt: commitment + chain), else 202 staged.
+	url := *hub + "/v1/buckets/" + *bucket + "/objects/" + key
+	if *wait {
+		url += "?wait=1"
+	}
+	send("PUT", url, "application/octet-stream", string(data))
 }
 
-func UploadFile(sk *ecdsa.PrivateKey, fp string, fname bool) error {
-	au, err := key.BuildAuth(sk, []byte("upload"))
-	if err != nil {
-		return err
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
 	}
-
-	// charge from server
-	sdk.Login(sdk.ServerURL, au)
-
-	cm, err := contract.NewContractManage(sk, com.BaseSepolia)
-	if err != nil {
-		return err
-	}
-
-	err = cm.CheckBalance(au.Addr)
-	if err != nil {
-		return err
-	}
-
-	fi, err := os.Stat(fp)
-	if err != nil {
-		return err
-	}
-
-	policy := types.Policy{
-		N: 6,
-		K: 4,
-	}
-
-	if !fi.IsDir() {
-		nm := ""
-		if fname {
-			nm = filepath.Base(fp)
-		}
-
-		// upload to stream and submit to gateway
-		res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fp, nm)
-		if err != nil {
-			return err
-		}
-		pcs, err := sdk.CheckFileFull(res, streamer, fp)
-		if err != nil {
-			return err
-		}
-		log.Printf("upload %s to %s, sha256: %s\n", fp, streamer, res.Hash)
-		log.Printf("submit %s to chain\n", res.Name)
-
-		// submit meta to chain
-		for _, pc := range pcs {
-			_, err = cm.AddPiece(pc)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	}
-
-	// recursive upload files in directory
-	return filepath.Walk(fp, func(fileName string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if fi.IsDir() {
-			return nil
-		}
-		nm := ""
-		if fname {
-			nm = filepath.Base(fileName)
-		}
-		res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fileName, nm)
-		if err != nil {
-			return nil
-		}
-		pcs, err := sdk.CheckFileFull(res, streamer, fp)
-		if err != nil {
-			return err
-		}
-
-		log.Printf("upload %s to %s, sha256: %s\n", fp, streamer, res.Hash)
-		log.Printf("submit %s to chain\n", res.Name)
-
-		// submit meta to chain
-		for _, pc := range pcs {
-			_, err = cm.AddPiece(pc)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return def
 }
