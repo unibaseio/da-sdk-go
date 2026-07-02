@@ -15,6 +15,9 @@ type Bucket struct {
 	gorm.Model
 	Name  string
 	Owner string
+	// Kind = object-store scenario: "memory" (small coalesced needles),
+	// "model" / "dataset" (large-file folders). Empty = legacy memory bucket.
+	Kind string
 }
 
 type BucketDisplay struct {

@@ -229,12 +229,12 @@ END $$;`, t, t))
 				}
 				bucketName, ok := meta["name"].(string)
 				if ok {
-					s.addBucket(needle.Owner, bucketName)
+					s.addBucket(needle.Owner, bucketName, "memory")
 					// update needle
 					db.Model(&needle).Update("bucket", bucketName)
 				} else {
 					bucketName := needle.Owner
-					s.addBucket(needle.Owner, bucketName)
+					s.addBucket(needle.Owner, bucketName, "memory")
 					// update needle
 					db.Model(&needle).Update("bucket", bucketName)
 				}
@@ -260,7 +260,11 @@ func (s *Server) addAccount(owner string) {
 }
 
 // TODO: bucket is global unique
-func (s *Server) addBucket(owner, bucket string) error {
+// kind = object-store scenario ("memory"/"model"/"dataset"); empty defaults to memory.
+func (s *Server) addBucket(owner, bucket, kind string) error {
+	if kind == "" {
+		kind = "memory"
+	}
 	var gbucket types.Bucket
 	// read-before-write (uniqueness/ownership gate): force the writer so two quick
 	// uploads of the same bucket name can't both miss it on a lagging replica.
@@ -270,6 +274,10 @@ func (s *Server) addBucket(owner, bucket string) error {
 			logger.Infof("bucket: %s is owned by %s", bucket, gbucket.Owner)
 			return fmt.Errorf("bucket: %s is owned by %s", bucket, gbucket.Owner)
 		}
+		// backfill kind on a legacy/empty-kind bucket (idempotent, memory unaffected).
+		if gbucket.Kind == "" && kind != "memory" {
+			s.gdb.Model(&gbucket).Update("kind", kind)
+		}
 		logger.Info("already has bucket: ", bucket)
 		return nil
 	}
@@ -277,6 +285,7 @@ func (s *Server) addBucket(owner, bucket string) error {
 	s.gdb.Create(&types.Bucket{
 		Name:  bucket,
 		Owner: owner,
+		Kind:  kind,
 	})
 	logger.Info("create bucket: ", bucket)
 	return nil
@@ -421,11 +430,17 @@ func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) 
 	return res, nil
 }
 
-func (s *Server) listBucket(owner string, offset, limit int) ([]types.BucketDisplay, error) {
+func (s *Server) listBucket(owner, kind string, offset, limit int) ([]types.BucketDisplay, error) {
 	var buckets []types.Bucket
 	q := s.gdb
 	if owner != "" {
 		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	}
+	// kind filter: "memory" also matches legacy empty-kind rows; others exact.
+	if kind == "memory" {
+		q = q.Where("kind = ? OR kind = '' OR kind IS NULL", kind)
+	} else if kind != "" {
+		q = q.Where("kind = ?", kind)
 	}
 	result := q.Order("id desc").Limit(limit).Offset(offset).Find(&buckets)
 	if result.Error != nil {

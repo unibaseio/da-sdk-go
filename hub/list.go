@@ -164,8 +164,8 @@ func (s *Server) listBucketByGet(c *gin.Context) {
 	if length == 0 {
 		length = 32
 	}
-	// result is []types.BucketDisplay containing bucket metadata, descriptions, states, transport info, and statistics
-	res, err := s.listBucket(owner, offset, length)
+	// kind: optional scenario filter (memory/model/dataset); empty = all kinds.
+	res, err := s.listBucket(owner, c.Query("kind"), offset, length)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
@@ -198,8 +198,8 @@ func (s *Server) listBucketByPost(c *gin.Context) {
 	if length == 0 {
 		length = 32
 	}
-	// result is []types.BucketDisplay containing bucket metadata, descriptions, states, transport info, and statistics
-	res, err := s.listBucket(owner, offset, length)
+	// kind: optional scenario filter (memory/model/dataset); empty = all kinds.
+	res, err := s.listBucket(owner, c.PostForm("kind"), offset, length)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return

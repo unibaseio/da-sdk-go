@@ -27,6 +27,7 @@ import (
 func (s *Server) addUpload(g *gin.RouterGroup) {
 	g.Group("/").POST("/uploadData", s.uploadData)
 	g.Group("/").POST("/upload", s.upload)
+	g.Group("/").POST("/uploadDir", s.uploadDir) // large-file folder (model/dataset)
 }
 
 // addUploadReadonly registers the write paths on a read-only replica so they
@@ -39,6 +40,62 @@ func (s *Server) addUploadReadonly(g *gin.RouterGroup) {
 	}
 	g.Group("/").POST("/uploadData", reject)
 	g.Group("/").POST("/upload", reject)
+	g.Group("/").POST("/uploadDir", reject)
+}
+
+// uploadDir ingests a folder of large files (model/dataset scenario) in ONE
+// multipart request: each file becomes its own DA-backed object under bucket.
+// kind is "model" or "dataset"; bucket = the repo name. Unlike memory's
+// small-write coalescing, each file is written with the passthrough-large
+// policy (its own volume) so it uploads to DA promptly and cleanly.
+func (s *Server) uploadDir(c *gin.Context) {
+	addr := c.PostForm("owner")
+	if !RequireOwnerMatch(c, addr) {
+		return
+	}
+	kind := c.PostForm("kind")
+	if kind != "model" && kind != "dataset" {
+		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("kind must be 'model' or 'dataset'")))
+		return
+	}
+	bucket := c.PostForm("bucket")
+	if bucket == "" {
+		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("bucket (repo name) required")))
+		return
+	}
+
+	form, err := c.MultipartForm()
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	files := form.File["files"]
+	if len(files) == 0 {
+		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("no files (use form field 'files')")))
+		return
+	}
+
+	metas := make([]types.MemeMeta, 0, len(files))
+	for _, fh := range files {
+		if fh.Size == 0 {
+			c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("empty file: %s", fh.Filename)))
+			return
+		}
+		fr, err := fh.Open()
+		if err != nil {
+			c.JSON(599, lerror.ToAPIError("hub", err))
+			return
+		}
+		mm, err := s.logFSWriteEx(addr, bucket, fh.Filename, kind, true, fr)
+		fr.Close()
+		if err != nil {
+			c.JSON(599, lerror.ToAPIError("hub", err))
+			return
+		}
+		metas = append(metas, mm)
+	}
+
+	c.JSON(http.StatusOK, metas)
 }
 
 func (s *Server) uploadData(c *gin.Context) {
@@ -120,7 +177,18 @@ func (s *Server) upload(c *gin.Context) {
 	c.JSON(http.StatusOK, mm)
 }
 
+// logFSWrite is the memory path (small-write coalescing). Preserved verbatim
+// as a thin wrapper so existing callers/behavior are unchanged.
 func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader) (types.MemeMeta, error) {
+	return s.logFSWriteEx(addr, bucket, key, "memory", false, r)
+}
+
+// logFSWriteEx writes one object to the owner's logfs + indexes it.
+//   - kind:  bucket scenario ("memory"/"model"/"dataset").
+//   - large: passthrough-large policy — seal any pending small-write volume
+//     first, then seal this object into its own volume (isolated, uploads
+//     promptly). large=false keeps the memory coalescing behavior.
+func (s *Server) logFSWriteEx(addr string, bucket string, key string, kind string, large bool, r io.Reader) (types.MemeMeta, error) {
 	var err error
 	if addr == "" {
 		addr = s.local.String()
@@ -135,7 +203,7 @@ func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader)
 		bucket = addr
 	}
 
-	err = s.addBucket(addr, bucket)
+	err = s.addBucket(addr, bucket, kind)
 	if err != nil {
 		return types.MemeMeta{}, err
 	}
@@ -175,9 +243,24 @@ func (s *Server) logFSWrite(addr string, bucket string, key string, r io.Reader)
 		return types.MemeMeta{}, err
 	}
 
+	// passthrough-large: isolate this object — seal any pending small-write
+	// volume first so the big file doesn't share a volume with tiny needles.
+	if large {
+		if err := fs.Roll(); err != nil {
+			return types.MemeMeta{}, err
+		}
+	}
+
 	err = fs.Put([]byte(key), rbytes)
 	if err != nil {
 		return types.MemeMeta{}, err
+	}
+
+	// seal the large object into its own completed volume so it uploads promptly.
+	if large {
+		if err := fs.Roll(); err != nil {
+			return types.MemeMeta{}, err
+		}
 	}
 
 	// Drop any stale "missing" marker so this key is immediately downloadable.
