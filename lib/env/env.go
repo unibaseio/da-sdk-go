@@ -23,9 +23,10 @@ const (
 	// per-chain overrides are CHAIN_RPC_<id> / CHAIN_RPC_FILTER_<id>; build them
 	// with ChainRPC+"_"+id etc.
 
-	GasLimit = "GAS_LIMIT"
-	GasPrice = "GAS_PRICE"
-	GasTip   = "GAS_TIP"
+	GasLimit      = "GAS_LIMIT"
+	GasPrice      = "GAS_PRICE"
+	GasTip        = "GAS_TIP"
+	GasFeeCapMult = "GAS_FEECAP_MULT" // EIP-1559 feeCap = mult*baseFee + tip (default 3); bump under bursty basefee to avoid stalled txs
 
 	LogLevel = "LOG_LEVEL"
 	LogFile  = "LOG_FILE"

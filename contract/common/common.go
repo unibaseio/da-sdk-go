@@ -331,9 +331,16 @@ func MakeAuthBySk(ep string, chainID *big.Int, sk *ecdsa.PrivateKey) (*bind.Tran
 			Logger.Warn("invalid GAS_TIP: ", v)
 		}
 	}
-	// feeCap = 2*baseFee + tip: survives a doubling of baseFee while pending;
-	// only the actual baseFee+tip is paid, the cap is not.
-	feeCap := new(big.Int).Mul(header.BaseFee, big.NewInt(2))
+	// feeCap = mult*baseFee + tip: survives a mult-fold rise of baseFee while
+	// pending (default 3). Only the actual baseFee+tip is paid, the cap is not —
+	// so extra headroom is free insurance against a tx stalling under a basefee
+	// burst (which, with the serialized nonce, would gap-block everything behind
+	// it until nonceStuckTimeout). Bump via GAS_FEECAP_MULT under heavy load.
+	mult := env.Int64(env.GasFeeCapMult, 3)
+	if mult < 1 {
+		mult = 1
+	}
+	feeCap := new(big.Int).Mul(header.BaseFee, big.NewInt(mult))
 	feeCap.Add(feeCap, tip)
 
 	auth.GasTipCap = tip
