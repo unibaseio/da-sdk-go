@@ -53,6 +53,7 @@ type MeterSettlement struct {
 
 	TransferTx  string
 	CreateJobTx string
+	SetBudgetTx string
 	FundTx      string
 	SubmitTx    string
 	JobID       string

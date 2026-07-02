@@ -75,6 +75,14 @@ func (m *Manager) handleSettle(signer SignerFunc) gin.HandlerFunc {
 		}
 		resp, err := m.Settle(owner)
 		if err != nil {
+			// A failed chain settlement still carries useful state (settlement
+			// id, tx hashes produced before the failure) — return it alongside
+			// the error instead of discarding it. 502 marks the failure as
+			// upstream (chain/RPC), not a hub bug.
+			if resp != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "settlement": resp})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

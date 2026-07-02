@@ -102,17 +102,33 @@ func NewManager(db *gorm.DB, cfg Config) *Manager {
 			}
 		}
 	}
+
+	// Clean up settlements a previous process left mid-flight, before any
+	// traffic can observe (or settle around) their reserved events.
+	if cfg.Enabled {
+		m.recoverInterruptedSettlements()
+	}
 	return m
 }
 
-// resolveProvider picks the provider address from explicit config, else derives
-// it from the provider private key.
+// resolveProvider picks the address used as the ERC-20 spender (allowance
+// checks) and transferFrom recipient. When a signing key is configured it wins:
+// transferFrom is signed by the key, so allowances must be granted to the
+// key-derived address or the pull reverts. HUB_PROVIDER_ADDRESS applies only to
+// key-less (read-only chain check) deployments, where it declares the address
+// that will eventually spend.
 func resolveProvider(cfg Config, ec *ERC20Client) common.Address {
+	keyAddr, hasKey := ec.providerFromKey()
 	if common.IsHexAddress(cfg.ProviderAddress) {
-		return common.HexToAddress(cfg.ProviderAddress)
+		cfgAddr := common.HexToAddress(cfg.ProviderAddress)
+		if hasKey && cfgAddr != keyAddr {
+			logger.Warnf("metering: HUB_PROVIDER_ADDRESS %s differs from the key-derived address %s; using the key address (it is the actual transferFrom spender)", cfg.ProviderAddress, keyAddr.Hex())
+			return keyAddr
+		}
+		return cfgAddr
 	}
-	if addr, ok := ec.providerFromKey(); ok {
-		return addr
+	if hasKey {
+		return keyAddr
 	}
 	return common.Address{}
 }
@@ -491,23 +507,39 @@ func addWei(base string, delta *big.Int) *big.Int {
 
 // keyedMutex hands out one mutex per string key so callers can serialize work
 // on a single key while allowing different keys to proceed concurrently.
+// Entries are reference-counted and removed once unused, so the map does not
+// grow without bound as new owners appear.
 type keyedMutex struct {
 	mu sync.Mutex
-	m  map[string]*sync.Mutex
+	m  map[string]*keyedMutexEntry
+}
+
+type keyedMutexEntry struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func (k *keyedMutex) lock(key string) func() {
 	k.mu.Lock()
 	if k.m == nil {
-		k.m = make(map[string]*sync.Mutex)
+		k.m = make(map[string]*keyedMutexEntry)
 	}
-	mu, ok := k.m[key]
+	e, ok := k.m[key]
 	if !ok {
-		mu = &sync.Mutex{}
-		k.m[key] = mu
+		e = &keyedMutexEntry{}
+		k.m[key] = e
 	}
+	e.refs++
 	k.mu.Unlock()
 
-	mu.Lock()
-	return mu.Unlock
+	e.mu.Lock()
+	return func() {
+		e.mu.Unlock()
+		k.mu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(k.m, key)
+		}
+		k.mu.Unlock()
+	}
 }

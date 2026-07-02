@@ -65,8 +65,12 @@ func newERC8183Client(cfg Config) (*ERC8183Client, error) {
 		return nil, fmt.Errorf("provider private key: %w", err)
 	}
 	provider := crypto.PubkeyToAddress(sk.PublicKey)
-	if common.IsHexAddress(cfg.ProviderAddress) {
-		provider = common.HexToAddress(cfg.ProviderAddress)
+	// transferFrom is signed by the key, so the ERC-20 spender is always the
+	// key-derived address. A different HUB_PROVIDER_ADDRESS would make the
+	// allowance check pass against one address while the actual pull reverts
+	// under another, so it is a hard configuration error.
+	if common.IsHexAddress(cfg.ProviderAddress) && common.HexToAddress(cfg.ProviderAddress) != provider {
+		return nil, fmt.Errorf("HUB_PROVIDER_ADDRESS %s does not match the address derived from HUB_PROVIDER_PRIVATE_KEY (%s)", cfg.ProviderAddress, provider.Hex())
 	}
 	return &ERC8183Client{
 		rpcURL:        cfg.ChainRPCURL,

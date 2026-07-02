@@ -31,7 +31,7 @@ HUB_METERING_AUTO_SETTLE=false        # run the background settlement worker
 HUB_METERING_SETTLE_INTERVAL_SEC=300  # worker scan interval
 HUB_METERING_SETTLE_THRESHOLD_WEI=0   # only settle accounts at/above this
 
-HUB_PROVIDER_ADDRESS=                 # provider/spender address
+HUB_PROVIDER_ADDRESS=                 # provider/spender address (see note below)
 HUB_PROVIDER_PRIVATE_KEY=             # signs transferFrom + ERC-8183 txs
 HUB_ERC20_TOKEN_ADDR=                 # payment token
 HUB_ERC8183_CONTRACT_ADDR=            # escrow contract
@@ -48,6 +48,15 @@ Notes:
   preflight.
 - `HUB_METERING_SETTLEMENT_MODE=offchain` clears local debt only. Use `erc8183`
   once the ledger is stable and the provider wallet is funded for gas.
+- `transferFrom` is signed by `HUB_PROVIDER_PRIVATE_KEY`, so the ERC-20 spender
+  users must approve is always the key-derived address. When both are set,
+  `HUB_PROVIDER_ADDRESS` must equal that address; in `erc8183` mode a mismatch
+  is a hard configuration error (settlement refuses to run). Set
+  `HUB_PROVIDER_ADDRESS` alone only for key-less deployments that just read
+  balance/allowance.
+- Before `erc8183` settlement can fund the escrow job, the provider wallet must
+  have approved the ERC-8183 contract to spend the payment token. Escrowed
+  funds are released back to the provider only after evaluator sign-off.
 
 ## Pricing model
 
@@ -166,9 +175,12 @@ The deliverable is `sha256` of a canonical settlement report:
 }
 ```
 
+Every step waits for its receipt and fails on revert — including `transferFrom`,
+so a pull that reverts (insufficient balance or allowance) never clears debt.
 Debt is cleared only after all chain calls succeed. The settlement response and
-record hold the transfer / create-job / fund / submit tx hashes, the job id, and
-the report hash.
+record hold the transfer / create-job / set-budget / fund / submit tx hashes,
+the job id, and the report hash. Each hash is persisted as soon as its step
+confirms, so a crash mid-sequence leaves an accurate on-disk record.
 
 ## Retry behavior
 
@@ -181,6 +193,23 @@ error and any tx hashes produced before the failure.
 The critical invariant: never clear unsettled debt before chain settlement
 succeeds.
 
+## Crash recovery
+
+A settlement interrupted by a crash or restart leaves its events reserved
+(`settling`) and its record `pending`/`submitting`. At startup the hub recovers
+each such settlement using the persisted transfer tx hash, which is written
+only after the transfer receipt confirms success:
+
+- no transfer hash: no funds moved. Events revert to `unsettled`, the
+  settlement is marked `failed`, and the next settlement retries the debt.
+- transfer hash present: the user paid. The settlement is finalized as
+  `confirmed` and the covered debt is cleared; its error field notes that the
+  escrow sequence may be incomplete, for manual follow-up.
+
+A crash in the narrow window after the transfer mined but before its hash was
+persisted is recovered as "not paid" and can double-charge on retry; reconcile
+such cases from the provider wallet's tx history.
+
 ## Background worker
 
 With `HUB_METERING_AUTO_SETTLE=true` a worker scans every
@@ -188,6 +217,11 @@ With `HUB_METERING_AUTO_SETTLE=true` a worker scans every
 unsettled fee is at or above `HUB_METERING_SETTLE_THRESHOLD_WEI` and settling
 each. A failure or panic settling one account is logged and never aborts the
 scan or crashes the hub. The worker stops during hub shutdown.
+
+In `erc8183` mode the worker requires `HUB_METERING_SETTLE_THRESHOLD_WEI > 0`;
+with a zero threshold every nonzero debt would trigger a full on-chain
+settlement sequence per scan, burning gas far in excess of the fee, so the
+worker refuses to start and logs a warning.
 
 This version assumes a single hub instance. For multi-replica deployment, add DB
 locking or leader election before enabling the worker in production.

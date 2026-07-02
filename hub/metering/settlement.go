@@ -29,6 +29,7 @@ const (
 type SettleTx struct {
 	Transfer  string `json:"transfer,omitempty"`
 	CreateJob string `json:"create_job,omitempty"`
+	SetBudget string `json:"set_budget,omitempty"`
 	Fund      string `json:"fund,omitempty"`
 	Submit    string `json:"submit,omitempty"`
 }
@@ -71,12 +72,14 @@ func unsettledForOwner(tx *gorm.DB, owner string) (events []types.MeterEvent, am
 	return events, amount, fromID, toID, nil
 }
 
-// clearDebt marks the unsettled events (id in [fromID,toID]) as settled under
-// settlementID and subtracts amount from the account's unsettled fee. It must
-// run inside a transaction while holding the owner lock. LastSettledAt is set.
-func clearDebt(tx *gorm.DB, owner string, amount *big.Int, fromID, toID, settlementID uint) error {
+// settleReserved marks the events in [fromID,toID] currently in fromStatus as
+// settled under settlementID and subtracts amount from the account's unsettled
+// fee. The range is bounded on both ends so stray events from an unrelated
+// (e.g. interrupted) settlement are never swept in. It must run inside a
+// transaction while holding the owner lock. LastSettledAt is set.
+func settleReserved(tx *gorm.DB, owner, fromStatus string, amount *big.Int, fromID, toID, settlementID uint) error {
 	if err := tx.Model(&types.MeterEvent{}).
-		Where("owner = ? AND status = ? AND id <= ?", owner, eventUnsettled, toID).
+		Where("owner = ? AND status = ? AND id >= ? AND id <= ?", owner, fromStatus, fromID, toID).
 		Updates(map[string]interface{}{"status": eventSettled, "settlement_id": settlementID}).Error; err != nil {
 		return err
 	}
@@ -128,7 +131,7 @@ func (m *Manager) SettleOffchain(owner string) (*SettleResponse, error) {
 		if err := tx.Create(&settlement).Error; err != nil {
 			return err
 		}
-		if err := clearDebt(tx, owner, amount, fromID, toID, settlement.ID); err != nil {
+		if err := settleReserved(tx, owner, eventUnsettled, amount, fromID, toID, settlement.ID); err != nil {
 			return err
 		}
 
@@ -225,8 +228,11 @@ func (m *Manager) SettleERC8183(owner string) (*SettleResponse, error) {
 		return resp, nil
 	}
 
-	// Phase B: chain calls (no lock held; may take minutes).
-	chainErr := m.runERC8183Settlement(owner, amount, report, resp)
+	// Phase B: chain calls (no lock held; may take minutes). Each completed
+	// step is persisted on the settlement row immediately, so a crash
+	// mid-sequence leaves enough on disk for startup recovery to tell whether
+	// funds actually moved.
+	chainErr := m.runERC8183Settlement(owner, amount, report, resp, settlementID)
 
 	// Phase C: finalize.
 	unlock = m.accountLocks.lock(owner)
@@ -251,25 +257,7 @@ func (m *Manager) SettleERC8183(owner string) (*SettleResponse, error) {
 	}
 
 	serr := m.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&types.MeterEvent{}).
-			Where("owner = ? AND status = ? AND id <= ?", owner, eventSettling, toID).
-			Updates(map[string]interface{}{"status": eventSettled, "settlement_id": settlementID}).Error; err != nil {
-			return err
-		}
-
-		var acct types.MeterAccount
-		if err := tx.Where("owner = ?", owner).First(&acct).Error; err != nil {
-			return err
-		}
-		remaining := new(big.Int).Sub(parseWei(acct.UnsettledFeeWei), amount)
-		if remaining.Sign() < 0 {
-			remaining = big.NewInt(0)
-		}
-		now := time.Now()
-		if err := tx.Model(&types.MeterAccount{}).Where("owner = ?", owner).Updates(map[string]interface{}{
-			"unsettled_fee_wei": remaining.String(),
-			"last_settled_at":   &now,
-		}).Error; err != nil {
+		if err := settleReserved(tx, owner, eventSettling, amount, fromID, toID, settlementID); err != nil {
 			return err
 		}
 		return tx.Model(&types.MeterSettlement{}).Where("id = ?", settlementID).
@@ -293,6 +281,7 @@ func settlementTxFields(resp *SettleResponse, status, errStr string) map[string]
 		"error":         errStr,
 		"transfer_tx":   resp.Tx.Transfer,
 		"create_job_tx": resp.Tx.CreateJob,
+		"set_budget_tx": resp.Tx.SetBudget,
 		"fund_tx":       resp.Tx.Fund,
 		"submit_tx":     resp.Tx.Submit,
 		"job_id":        resp.JobID,
@@ -300,10 +289,23 @@ func settlementTxFields(resp *SettleResponse, status, errStr string) map[string]
 	}
 }
 
+// persistSettleProgress records the chain progress made so far (tx hashes, job
+// id, report hash) on the settlement row and moves it to "submitting". Failures
+// are logged, not returned: progress persistence is best-effort and must not
+// abort a chain sequence that is succeeding.
+func (m *Manager) persistSettleProgress(settlementID uint, resp *SettleResponse) {
+	if err := m.db.Model(&types.MeterSettlement{}).Where("id = ?", settlementID).
+		Updates(settlementTxFields(resp, settlementSubmitting, "")).Error; err != nil {
+		logger.Warnf("metering: persist progress for settlement %d failed: %v", settlementID, err)
+	}
+}
+
 // runERC8183Settlement executes the on-chain settlement sequence, populating
-// resp.Tx / JobID / ReportHash as each step completes so partial progress is
-// recorded even on failure.
-func (m *Manager) runERC8183Settlement(owner string, amount *big.Int, report SettlementReport, resp *SettleResponse) error {
+// resp.Tx / JobID / ReportHash and persisting them on the settlement row as
+// each step completes, so partial progress survives failures and crashes. The
+// transfer hash in particular is written only after its receipt confirms
+// success — startup recovery relies on that to decide whether funds moved.
+func (m *Manager) runERC8183Settlement(owner string, amount *big.Int, report SettlementReport, resp *SettleResponse, settlementID uint) error {
 	if m.erc20 == nil || m.erc8183 == nil {
 		return fmt.Errorf("chain clients not configured for erc8183 settlement")
 	}
@@ -317,6 +319,7 @@ func (m *Manager) runERC8183Settlement(owner string, amount *big.Int, report Set
 		return fmt.Errorf("transferFrom: %w", err)
 	}
 	resp.Tx.Transfer = th.Hex()
+	m.persistSettleProgress(settlementID, resp)
 
 	// 2. Create the escrow job.
 	expiredAt := big.NewInt(time.Now().Add(time.Hour).Unix())
@@ -327,11 +330,15 @@ func (m *Manager) runERC8183Settlement(owner string, amount *big.Int, report Set
 	}
 	resp.Tx.CreateJob = cjTx.Hex()
 	resp.JobID = jobID.String()
+	m.persistSettleProgress(settlementID, resp)
 
 	// 3. Set the budget.
-	if _, err := m.erc8183.SetBudget(ctx, jobID, amount); err != nil {
+	sbTx, err := m.erc8183.SetBudget(ctx, jobID, amount)
+	if err != nil {
 		return fmt.Errorf("setBudget: %w", err)
 	}
+	resp.Tx.SetBudget = sbTx.Hex()
+	m.persistSettleProgress(settlementID, resp)
 
 	// 4. Fund the job.
 	fTx, err := m.erc8183.Fund(ctx, jobID, amount)
@@ -339,6 +346,7 @@ func (m *Manager) runERC8183Settlement(owner string, amount *big.Int, report Set
 		return fmt.Errorf("fund: %w", err)
 	}
 	resp.Tx.Fund = fTx.Hex()
+	m.persistSettleProgress(settlementID, resp)
 
 	// 5. Submit the report hash as the deliverable.
 	deliverable, hexHash, err := report.Hash()
@@ -351,6 +359,74 @@ func (m *Manager) runERC8183Settlement(owner string, amount *big.Int, report Set
 		return fmt.Errorf("submit: %w", err)
 	}
 	resp.Tx.Submit = sTx.Hex()
+	m.persistSettleProgress(settlementID, resp)
 
 	return nil
+}
+
+// ----------------------------------------------------------------------------
+// Startup recovery
+// ----------------------------------------------------------------------------
+
+// recoverInterruptedSettlements handles erc8183 settlements left mid-flight by
+// a crash or restart. Their events are stuck in "settling": excluded from every
+// future settlement while still counting against the owner's credit, so
+// without recovery that debt can never be cleared. Runs once at startup,
+// before the hub serves traffic.
+//
+// The transfer tx hash is persisted only after its receipt confirms success,
+// so it decides the outcome:
+//   - no transfer_tx: no funds moved. Revert the events to unsettled and mark
+//     the settlement failed; the next settlement retries the debt.
+//   - transfer_tx set: the user has paid. Finalize the settlement as confirmed
+//     and clear the covered debt; the note records that the escrow sequence
+//     may be incomplete. (A crash in the window after the transfer mined but
+//     before its hash was persisted still reverts, which can double-charge on
+//     retry; reconcile such cases manually from the provider's tx history.)
+func (m *Manager) recoverInterruptedSettlements() {
+	var stale []types.MeterSettlement
+	err := m.db.Where("mode = ? AND status IN ?", modeERC8183,
+		[]string{settlementPending, settlementSubmitting}).Find(&stale).Error
+	if err != nil {
+		logger.Warnf("metering: scan for interrupted settlements failed: %v", err)
+		return
+	}
+	for _, s := range stale {
+		if err := m.recoverSettlement(s); err != nil {
+			logger.Errorf("metering: recover settlement %d (owner %s) failed: %v", s.ID, s.Owner, err)
+		}
+	}
+}
+
+func (m *Manager) recoverSettlement(s types.MeterSettlement) error {
+	unlock := m.accountLocks.lock(s.Owner)
+	defer unlock()
+
+	if s.TransferTx == "" {
+		logger.Warnf("metering: settlement %d (owner %s) interrupted before transfer; reverting events to unsettled", s.ID, s.Owner)
+		return m.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&types.MeterEvent{}).
+				Where("owner = ? AND status = ? AND id >= ? AND id <= ?", s.Owner, eventSettling, s.FromEventID, s.ToEventID).
+				Update("status", eventUnsettled).Error; err != nil {
+				return err
+			}
+			return tx.Model(&types.MeterSettlement{}).Where("id = ?", s.ID).
+				Updates(map[string]interface{}{
+					"status": settlementFailed,
+					"error":  "interrupted before transfer; recovered at startup",
+				}).Error
+		})
+	}
+
+	logger.Warnf("metering: settlement %d (owner %s) interrupted after transfer %s; finalizing as confirmed", s.ID, s.Owner, s.TransferTx)
+	return m.db.Transaction(func(tx *gorm.DB) error {
+		if err := settleReserved(tx, s.Owner, eventSettling, parseWei(s.AmountWei), s.FromEventID, s.ToEventID, s.ID); err != nil {
+			return err
+		}
+		return tx.Model(&types.MeterSettlement{}).Where("id = ?", s.ID).
+			Updates(map[string]interface{}{
+				"status": settlementConfirmed,
+				"error":  "recovered at startup: transfer confirmed, escrow sequence may be incomplete",
+			}).Error
+	})
 }

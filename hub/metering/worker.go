@@ -20,9 +20,19 @@ type Worker struct {
 	done      chan struct{}
 }
 
-// AutoSettleEnabled reports whether the auto-settlement worker should run.
+// AutoSettleEnabled reports whether the auto-settlement worker should run. In
+// erc8183 mode it additionally requires a positive settle threshold: with a
+// zero threshold every nonzero debt (even 1 wei) would trigger a full on-chain
+// settlement sequence per scan, burning gas far in excess of the fee.
 func (m *Manager) AutoSettleEnabled() bool {
-	return m.Enabled() && m.cfg.AutoSettle
+	if !m.Enabled() || !m.cfg.AutoSettle {
+		return false
+	}
+	if m.cfg.SettlementMode == modeERC8183 && m.cfg.SettleThresholdWei.Sign() <= 0 {
+		logger.Warnf("metering: auto-settle disabled: erc8183 mode requires HUB_METERING_SETTLE_THRESHOLD_WEI > 0")
+		return false
+	}
+	return true
 }
 
 // NewWorker builds the worker from config. Interval defaults to 300s when unset.

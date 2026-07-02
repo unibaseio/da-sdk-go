@@ -93,7 +93,9 @@ func (e *ERC20Client) Allowance(ctx context.Context, owner, spender common.Addre
 }
 
 // TransferFrom pulls amount from `from` to `to` using the provider key. It
-// submits the transaction and returns its hash without waiting for a receipt.
+// waits for the receipt and fails on revert: settlement clears debt based on
+// this call succeeding, so a submitted-but-reverted transfer (insufficient
+// balance/allowance) must be reported as an error, not a success.
 func (e *ERC20Client) TransferFrom(ctx context.Context, from, to common.Address, amount *big.Int) (common.Hash, error) {
 	if e.sk == nil {
 		return common.Hash{}, fmt.Errorf("provider private key not configured")
@@ -113,6 +115,13 @@ func (e *ERC20Client) TransferFrom(ctx context.Context, from, to common.Address,
 	tx, err := tk.TransferFrom(auth, from, to, amount)
 	if err != nil {
 		return common.Hash{}, err
+	}
+	rcpt, err := bind.WaitMined(ctx, client, tx)
+	if err != nil {
+		return tx.Hash(), err
+	}
+	if rcpt.Status != 1 {
+		return tx.Hash(), fmt.Errorf("transferFrom reverted (tx %s)", tx.Hash().Hex())
 	}
 	return tx.Hash(), nil
 }

@@ -57,6 +57,7 @@ type MeteringCanWrite struct {
 type MeteringSettleTx struct {
 	Transfer  string `json:"transfer,omitempty"`
 	CreateJob string `json:"create_job,omitempty"`
+	SetBudget string `json:"set_budget,omitempty"`
 	Fund      string `json:"fund,omitempty"`
 	Submit    string `json:"submit,omitempty"`
 }

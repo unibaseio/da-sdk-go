@@ -68,9 +68,11 @@ func LoadConfigFromEnv() Config {
 func envBool(key string, fallback bool) bool {
 	if v := os.Getenv(key); v != "" {
 		b, err := strconv.ParseBool(v)
-		if err == nil {
-			return b
+		if err != nil {
+			logger.Warnf("metering: %s=%q is not a valid bool, using default %v", key, v, fallback)
+			return fallback
 		}
+		return b
 	}
 	return fallback
 }
@@ -85,9 +87,11 @@ func envString(key, fallback string) string {
 func envInt64(key string, fallback int64) int64 {
 	if v := os.Getenv(key); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
-		if err == nil {
-			return n
+		if err != nil {
+			logger.Warnf("metering: %s=%q is not a valid integer, using default %d", key, v, fallback)
+			return fallback
 		}
+		return n
 	}
 	return fallback
 }
@@ -97,9 +101,11 @@ func envInt64(key string, fallback int64) int64 {
 func envBigInt(key string, fallback *big.Int) *big.Int {
 	if v := os.Getenv(key); v != "" {
 		n, ok := new(big.Int).SetString(v, 10)
-		if ok {
-			return n
+		if !ok {
+			logger.Warnf("metering: %s=%q is not a valid base-10 integer, using default %s", key, v, fallback.String())
+			return new(big.Int).Set(fallback)
 		}
+		return n
 	}
 	return new(big.Int).Set(fallback)
 }
