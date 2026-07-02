@@ -29,7 +29,7 @@ func commonFlags(extra ...cli.Flag) []cli.Flag {
 	return append(base, extra...)
 }
 
-// daCommand is the `unibase da` group — the DA hub /v1 object store.
+// daCommand is the `ubcli da` group — the DA hub /v1 object store.
 func daCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "da",
