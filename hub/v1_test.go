@@ -175,4 +175,63 @@ func TestV1Objects(t *testing.T) {
 	if w := do(t, s, "PUT", "/v1/buckets/repo/objects/x", auth, "hello"); w.Code != http.StatusForbidden {
 		t.Fatalf("PUT wrong-owner: got %d want 403 body %s", w.Code, w.Body.String())
 	}
+
+	// proof: committed object → 200 + commitment; staged → 425
+	w = do(t, s, "GET", "/v1/buckets/repo/objects/a.bin/proof?owner="+owner, "", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "a11abaaf") {
+		t.Fatalf("proof committed: got %d body %s", w.Code, w.Body.String())
+	}
+	if w := do(t, s, "GET", "/v1/buckets/repo/objects/b.bin/proof?owner="+owner, "", ""); w.Code != http.StatusTooEarly {
+		t.Fatalf("proof staged: got %d want 425", w.Code)
+	}
+}
+
+func TestV1DeleteBucket(t *testing.T) {
+	s := newV1TestServer(t)
+	addr, pk := testKey(t)
+	auth := authHeader(addr, pk)
+
+	if w := do(t, s, "PUT", "/v1/buckets/tmp", auth, `{"kind":"file"}`); w.Code != http.StatusCreated {
+		t.Fatalf("create: %d", w.Code)
+	}
+	// delete someone else's / non-existent
+	if w := do(t, s, "DELETE", "/v1/buckets/nope", auth, ""); w.Code != http.StatusNotFound {
+		t.Fatalf("delete missing: got %d want 404", w.Code)
+	}
+	// delete own → 200, then gone → 404
+	if w := do(t, s, "DELETE", "/v1/buckets/tmp", auth, ""); w.Code != http.StatusOK {
+		t.Fatalf("delete own: got %d body %s", w.Code, w.Body.String())
+	}
+	if w := do(t, s, "GET", "/v1/buckets/tmp", "", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("get after delete: got %d want 404", w.Code)
+	}
+}
+
+func TestV1BucketsCursor(t *testing.T) {
+	s := newV1TestServer(t)
+	owner := "0xabc0000000000000000000000000000000000009"
+	s.gdb.Create(&types.Bucket{Name: "b1", Owner: owner, Kind: "file"})
+	s.gdb.Create(&types.Bucket{Name: "b2", Owner: owner, Kind: "file"})
+	s.gdb.Create(&types.Bucket{Name: "b3", Owner: owner, Kind: "file"})
+
+	// page 1: limit=2 → 2 buckets + a nextCursor
+	w := do(t, s, "GET", "/v1/buckets?owner="+owner+"&limit=2", "", "")
+	var p struct {
+		Buckets    []types.Bucket `json:"buckets"`
+		NextCursor string         `json:"nextCursor"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &p)
+	if len(p.Buckets) != 2 || p.NextCursor == "" {
+		t.Fatalf("page1: got %d buckets, cursor %q", len(p.Buckets), p.NextCursor)
+	}
+	// page 2: use cursor → remaining 1, no further cursor
+	w = do(t, s, "GET", "/v1/buckets?owner="+owner+"&limit=2&cursor="+p.NextCursor, "", "")
+	var p2 struct {
+		Buckets    []types.Bucket `json:"buckets"`
+		NextCursor string         `json:"nextCursor"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &p2)
+	if len(p2.Buckets) != 1 || p2.NextCursor != "" {
+		t.Fatalf("page2: got %d buckets, cursor %q", len(p2.Buckets), p2.NextCursor)
+	}
 }

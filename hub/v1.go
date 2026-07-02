@@ -9,9 +9,12 @@ package hub
 // the other (one storage engine, two API façades).
 
 import (
+	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +23,7 @@ import (
 
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
+	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
@@ -54,6 +58,7 @@ type v1Receipt struct {
 	Bucket       string     `json:"bucket"`
 	Key          string     `json:"key"`
 	Size         uint64     `json:"size"`
+	Sha256       string     `json:"sha256,omitempty"`     // content sha256 (best-effort, from logfs meta)
 	Commitment   string     `json:"commitment,omitempty"` // DA piece (content-addressed id)
 	Status       string     `json:"status"`               // staged → committed
 	Chain        *v1Chain   `json:"chain,omitempty"`
@@ -105,6 +110,7 @@ func (s *Server) registV1() {
 	pub.GET("/buckets/:bucket/objects", s.v1ListObjects)
 	pub.GET("/buckets/:bucket/objects/:key", s.v1GetObject)
 	pub.GET("/buckets/:bucket/objects/:key/content", s.v1GetObjectContent)
+	pub.GET("/buckets/:bucket/objects/:key/proof", s.v1GetObjectProof)
 	pub.GET("/stats", s.v1Stats)
 	pub.GET("/overview", s.v1Overview)
 	pub.GET("/owners/:owner", s.v1GetOwner)
@@ -122,6 +128,7 @@ func (s *Server) registV1() {
 		w.POST("/buckets/:bucket/objects", reject)
 	} else {
 		w.PUT("/buckets/:bucket", s.v1PutBucket)
+		w.DELETE("/buckets/:bucket", s.v1DeleteBucket)
 		w.PUT("/buckets/:bucket/objects/:key", s.v1PutObject)
 		w.POST("/buckets/:bucket/objects", s.v1PostObjects)
 	}
@@ -179,19 +186,42 @@ func (s *Server) v1PutBucket(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"bucket": bucket, "owner": owner, "kind": body.Kind, "created": true})
 }
 
-// GET /v1/buckets?owner=&kind=&cursor=&limit=
+// GET /v1/buckets?owner=&kind=&cursor=&limit=  (cursor on bucket id)
 func (s *Server) v1ListBuckets(c *gin.Context) {
 	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}
 	limit := v1Limit(c)
-	res, err := s.listBucket(owner, c.Query("kind"), 0, limit) // reuse; offset 0 (buckets table small)
-	if err != nil {
+	kind := c.Query("kind")
+
+	q := s.gdb.Model(&types.Bucket{})
+	if owner != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	}
+	if kind == "memory" {
+		q = q.Where("kind = ? OR kind = '' OR kind IS NULL", kind)
+	} else if kind != "" {
+		q = q.Where("kind = ?", kind)
+	}
+	if cur := c.Query("cursor"); cur != "" {
+		id, err := strconv.ParseUint(cur, 10, 64)
+		if err != nil {
+			abortWithBadRequest(c, fmt.Errorf("invalid cursor"))
+			return
+		}
+		q = q.Where("id < ?", id)
+	}
+	var buckets []types.Bucket
+	if err := q.Order("id desc").Limit(limit).Find(&buckets).Error; err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"buckets": res})
+	var next string
+	if len(buckets) == limit {
+		next = strconv.FormatUint(uint64(buckets[len(buckets)-1].ID), 10)
+	}
+	c.JSON(http.StatusOK, gin.H{"buckets": buckets, "nextCursor": next})
 }
 
 // GET /v1/buckets/{bucket}
@@ -236,6 +266,15 @@ func (s *Server) v1PutObject(c *gin.Context) {
 	if _, err := s.logFSWriteEx(owner, bucket, key, b.Kind, large, strings.NewReader(string(data))); err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
+	}
+	// ?wait=1: block until the object commits on-chain (drainInstance AddPiece),
+	// then return 200 + committed receipt. Best for passthrough kinds (own volume,
+	// uploads promptly); small coalesce kinds may stay staged until the batch flush.
+	if c.Query("wait") == "1" {
+		if nd, done := s.v1WaitCommitted(c.Request.Context(), owner, bucket, key); done {
+			c.JSON(http.StatusOK, receiptFromNeedle(bucket, nd))
+			return
+		}
 	}
 	// staged: on logfs + indexed; committed later by drainInstance's AddPiece.
 	c.JSON(http.StatusAccepted, v1Receipt{Bucket: bucket, Key: key, Size: uint64(len(data)), Status: "staged", Availability: "pending"})
@@ -352,7 +391,9 @@ func (s *Server) v1GetObject(c *gin.Context) {
 		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", fmt.Errorf("no such object %s/%s", bucket, key)))
 		return
 	}
-	c.JSON(http.StatusOK, receiptFromNeedle(bucket, nds[0]))
+	rc := receiptFromNeedle(bucket, nds[0])
+	rc.Sha256 = s.objectSha256(nds[0].Owner, key) // best-effort
+	c.JSON(http.StatusOK, rc)
 }
 
 // GET /v1/buckets/{bucket}/objects/{key}/content — download bytes.
@@ -402,6 +443,126 @@ func (s *Server) v1GetOwner(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"owner": owner, "account": accs[0]})
+}
+
+// DELETE /v1/buckets/{bucket} — soft-delete the bucket + its index rows.
+// NOTE: on-chain DA pieces are immutable and persist forever; this only removes
+// the object from hub listings (a local index tombstone), not from DA.
+func (s *Server) v1DeleteBucket(c *gin.Context) {
+	owner := CtxAuthAddr(c)
+	bucket := c.Param("bucket")
+	b, ok := s.v1LookupBucket(bucket)
+	if !ok {
+		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", fmt.Errorf("no such bucket: %s", bucket)))
+		return
+	}
+	if !strings.EqualFold(b.Owner, owner) {
+		c.JSON(http.StatusForbidden, lerror.ToAPIError("hub", fmt.Errorf("bucket %s owned by another account", bucket)))
+		return
+	}
+	s.gdb.Where("name = ?", bucket).Delete(&types.Bucket{})
+	s.gdb.Where("bucket = ?", bucket).Delete(&types.Needle{})
+	c.JSON(http.StatusOK, gin.H{"bucket": bucket, "deleted": true,
+		"note": "removed from index; on-chain DA data is immutable and persists"})
+}
+
+// GET /v1/buckets/{bucket}/objects/{key}/proof — verification bundle. Returns
+// the DA commitment + on-chain pointer so anyone can independently verify:
+// fetch content → recompute commitment → confirm the piece is registered on-chain.
+// (Full ZK availability-proof export is a future enhancement.)
+func (s *Server) v1GetObjectProof(c *gin.Context) {
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
+	bucket := c.Param("bucket")
+	key := c.Param("key")
+	nds, err := s.getNeedleDisplay(owner, bucket, key)
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	if len(nds) == 0 {
+		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", fmt.Errorf("no such object %s/%s", bucket, key)))
+		return
+	}
+	n := nds[0]
+	if n.Piece == "" {
+		c.JSON(http.StatusTooEarly, lerror.ToAPIError("hub", fmt.Errorf("object not yet committed on-chain (status=staged)")))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"bucket":     bucket,
+		"key":        key,
+		"commitment": n.Piece, // DA piece (content-addressed id)
+		"sha256":     s.objectSha256(n.Owner, key),
+		"chain":      v1Chain{TxHash: n.TxHash, ChainType: n.ChainType},
+		"verify":     "fetch content, recompute the DA commitment, and confirm the piece is on-chain via the Piece contract (chain.txHash)",
+	})
+}
+
+// objectMeta resolves the logfs LogMeta for (owner,key) — loading the owner's
+// log instance if needed. Mirrors logFSReadOne's lfs resolution. Best-effort:
+// returns an error (never panics) when there's no repo/owner/key.
+func (s *Server) objectMeta(addr, key string) (*logfs.LogMeta, error) {
+	if s.rp == nil {
+		return nil, fmt.Errorf("no repo")
+	}
+	s.Lock()
+	fs, ok := s.lfs[addr]
+	if !ok {
+		dsKey := types.NewKey(types.DsLogFS, LOGINST, addr)
+		if has, err := s.rp.MetaStore().Has(dsKey); err == nil && has {
+			nfs, err := logfs.New(s.rp.MetaStore(), filepath.Join(s.rp.Path(), LOGFS), s.local.String(), addr)
+			if err != nil {
+				s.Unlock()
+				return nil, err
+			}
+			s.lfs[addr] = nfs
+			fs = nfs
+		} else {
+			s.Unlock()
+			return nil, fmt.Errorf("no such owner: %s", addr)
+		}
+	}
+	s.Unlock()
+	return fs.GetMeta([]byte(key))
+}
+
+// objectSha256 returns the content sha256 (hex) for an object, best-effort
+// (empty on any failure). Tries owner candidates (lowercase + legacy checksum).
+func (s *Server) objectSha256(owner, key string) string {
+	if owner == "" {
+		return ""
+	}
+	for _, cand := range ownerCandidates(owner) {
+		if m, err := s.objectMeta(cand, key); err == nil && len(m.Hash) > 0 {
+			return hex.EncodeToString(m.Hash)
+		}
+	}
+	return ""
+}
+
+// v1WaitCommitted polls until the object's volume lands on-chain (Piece set) or
+// a bounded deadline (HUB_V1_WAIT_SEC, default 90s) / request cancellation.
+func (s *Server) v1WaitCommitted(ctx context.Context, owner, bucket, key string) (types.NeedleDisplay, bool) {
+	maxWait := time.Duration(env.Int("HUB_V1_WAIT_SEC", 90)) * time.Second
+	timeout := time.After(maxWait)
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		nds, _ := s.getNeedleDisplay(owner, bucket, key)
+		if len(nds) > 0 && nds[0].Piece != "" {
+			return nds[0], true
+		}
+		select {
+		case <-ctx.Done():
+			return types.NeedleDisplay{}, false
+		case <-timeout:
+			return types.NeedleDisplay{}, false
+		case <-tick.C:
+		}
+	}
 }
 
 // ---- helpers ---------------------------------------------------------------
