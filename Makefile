@@ -26,6 +26,13 @@ hub: $(BUILD_DEPS)
 .PHONY: hub
 BINS+=bin/hub
 
+# unibase CLI — a client tool, built native (not cross-compiled).
+cli: $(BUILD_DEPS)
+	rm -f bin/unibase
+	go build $(GOFLAGS) -o bin/unibase ./app/cli
+.PHONY: cli
+BINS+=bin/unibase
+
 
 build: hub 
 

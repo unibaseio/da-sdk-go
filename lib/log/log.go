@@ -24,7 +24,10 @@ func Logger(name string) *zap.SugaredLogger {
 func init() {
 	mLoglevel = zap.NewAtomicLevel()
 
-	outputs := []string{"stdout"}
+	// Logs go to stderr (Unix convention: diagnostics on stderr, data on stdout).
+	// This keeps CLI/tool stdout clean for machine parsing; node logs under
+	// systemd/journald capture stderr identically. Override with LOG_FILE.
+	outputs := []string{"stderr"}
 	debugWriter, _, err := zap.Open(outputs...)
 	if err != nil {
 		panic(fmt.Sprintf("unable to open logging output: %v", err))
