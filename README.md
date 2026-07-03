@@ -27,7 +27,7 @@ Current DA solutions (EigenDA, Celestia, Avail, etc.) were designed for rollup t
 | **Consensus**               | Casper   | None    | Tendermint | BABE + GRANDPA | Tendermint | None |
 | **DAS Support**             | ❌        | ❌      | ✅        | ✅     | ✅  | ✅ |
 | **Proof Type**              | Validity Proof | Validity Proof | Fraud Proof | Validity Proof | Validity Proof | ✅ **Fraud Proof** |
-| **DA Settlement Layer**     | Ethereum | Ethereum | Celestia | Avail | 0G | ✅ **Base / BSC / Ethereum** |
+| **DA Settlement Layer**     | Ethereum | Ethereum | Celestia | Avail | 0G | ✅ **Base / Ethereum** |
 
 ---
 
@@ -64,10 +64,6 @@ Unibase DA follows a multi-layer architecture to ensure speed, reliability, and 
 
 ---
 
-## 🚀 SDK Quickstart
-
-```bash
-
 ## 📦 Installation
 
 ```bash
@@ -80,6 +76,16 @@ go build ./...
 
 ## 📚 Quick Usage
 
+Two access modes — pick by workload:
+
+- **Direct** (`ubcli` / `example/*`, recommended for one-off files & dirs): the client
+  discovers a stream via the gateway (or pins one), uploads **straight to it**, and the
+  client's **own wallet** submits the on-chain commitment. Fewest hops; the uploader owns
+  the piece.
+- **Hub** (a lightweight service exposing the S3-shaped `/v1` object-store API): best for
+  **continuous / many small writes** (e.g. AI agent memory). It batches writes and serves a
+  `bucket → object` API. See “Hub node” below.
+
 ### Supported chains
 
 Set `CHAIN_TYPE` to one of: `base-sepolia` (default), `base`, `bsc-mainnet`,
@@ -89,22 +95,31 @@ Override the RPC with `CHAIN_RPC_<chainID>` / `CHAIN_RPC_FILTER_<chainID>`
 `GAS_LIMIT`, `GAS_TIP` (EIP-1559 priority fee, wei), `GAS_PRICE` (legacy /
 zero-baseFee chains).
 
-### Upload a file/directory
+### `ubcli` — the CLI (direct upload/download)
 
 ```bash
-export CHAIN_TYPE=bnb-testnet-dao
-cd example/upload
-go build
-./upload --model=false --sk=<your_secret_key> --path=<your_local_path>
+make cli                       # builds bin/ubcli (native)
+export UNIBASE_GATEWAY=https://<gateway>     # stream discovery + metadata
+export UNIBASE_KEY=<hex key>                 # upload: funded wallet (ETH gas + UB bond)
+
+# upload a file or a whole directory (each file → its own on-chain commitment)
+ubcli da upload   --path ./weights.bin [--stream 0x<streamAddr>] [--name weights.bin]
+# download by name (reconstructed from DA pieces; reads sign with any key, no funds)
+ubcli da download --name weights.bin --out ./weights.bin
+ubcli da ls                                  # list files on the gateway
 ```
 
-### Download a file/directory
+`--stream` pins a specific stream node; omit it and the gateway picks an online one.
+Add `--json` to any command for machine-readable output (agent-friendly). Reads are public.
+
+### SDK examples (direct)
 
 ```bash
-export CHAIN_TYPE=bnb-testnet-dao
-cd example/download
-go build
-./download --model=false --sk=<your_secret_key> --name=<file_name> --path=<your_save_path>
+export CHAIN_TYPE=base-sepolia
+# upload a file/dir straight to a stream + client-side AddPiece
+go run ./example/upload   -gateway https://<gateway> -sk <key> -path <file|dir> [-stream 0x<addr>] [-name <name>]
+# reconstruct a file from its DA pieces
+go run ./example/download -gateway https://<gateway> -name <file_name> -out <save_path>
 ```
 
 ### ZK params
@@ -116,10 +131,12 @@ will not verify against the on-chain `KZG_VK`.
 
 ---
 
-## 🛰 Hub node
+## 🛰 Hub node — verifiable object store (`/v1`)
 
-The hub is a lightweight HTTP gateway for upload/download without running a full
-node:
+The hub is a lightweight service that turns Unibase DA into an **S3-shaped, wallet-native
+object store**: `owner → bucket{kind} → object{key} → DA piece(s)`. It's the right choice
+for **continuous / small writes** (agent memory, RAG chunks) — it batches writes and serves
+listing/download — whereas one-off large files are better via the direct CLI above.
 
 ```bash
 make hub               # builds bin/hub-edge (GOOS=linux; use `go build ./app/hub` for the host OS)
@@ -127,17 +144,33 @@ make hub               # builds bin/hub-edge (GOOS=linux; use `go build ./app/hu
 ./hub-edge daemon run -e http://<public-ip>:8084
 ```
 
-All `/api` routes (except `/api/info`) require a signed `Authorization` header
-(`sdk.DecodeAuth` format, ±10 min timestamp window) and enforce
-**owner == signer** on reads and writes. Tunables:
+### `/v1` API (resource-oriented)
+
+```
+PUT    /v1/buckets/{bucket}                 # declare a bucket + kind (idempotent; kind immutable)
+GET    /v1/buckets [?owner=&kind=&cursor=]  # list buckets
+PUT    /v1/buckets/{bucket}/objects/{key}   # put one object (raw body); ?wait=1 blocks until on-chain
+POST   /v1/buckets/{bucket}/objects         # batch put (multipart files[])
+GET    /v1/buckets/{bucket}/objects/{key}[/content|/proof]   # metadata / bytes / verification bundle
+GET    /v1/stats | /v1/overview | /v1/owners/{owner}
+```
+
+`kind ∈ {memory, knowledgebase, model, dataset, file}` — a bucket property (declared once)
+that selects the storage profile; you don't pass it per upload. Every write returns a
+**verifiable receipt**: `{commitment, chain:{txHash}, status: staged→committed, availability}`.
+
+**Auth:** writes require a signed `Authorization` header (`sdk.DecodeAuth` format, ±10 min
+window) and enforce **owner == signer**. Reads are **public** — stored content is
+client-encrypted, so listing/download exposes only ciphertext + metadata. The legacy `/api/*`
+surface stays for existing clients. Tunables:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `HUB_DB_DRIVER` / `HUB_DB_DSN` | sqlite | shared Postgres index for multi-instance read scaling |
+| `HUB_READONLY` | unset | run as a read-only replica (no writes/DDL/chain submit) |
 | `HUB_AUTH_DRIFT_SEC` | `600` | auth timestamp window |
-| `HUB_MAX_JSON_BYTES` | `4194304` (4 MiB) | JSON body cap |
-| `HUB_MAX_MULTIPART_BYTES` | `67108864` (64 MiB) | multipart body cap |
-| `HUB_RATE_IP_RPS` / `HUB_RATE_IP_BURST` | `10` / burst | per-IP rate limit |
-| `HUB_RATE_OWNER_RPS` / `HUB_RATE_OWNER_BURST` | `5` / burst | per-owner rate limit |
+| `HUB_MAX_JSON_BYTES` / `HUB_MAX_MULTIPART_BYTES` | 4 MiB / 64 MiB | body caps |
+| `HUB_RATE_IP_RPS` / `HUB_RATE_OWNER_RPS` | `1000` / `1000` | per-IP / per-owner rate limits |
 
 For local API smoke-testing without a chain or disk, use the standalone mock:
 `go run ./cmd/hub-mock`.
