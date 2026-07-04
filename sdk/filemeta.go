@@ -19,7 +19,7 @@ func UploadFileMeta(baseUrl string, auth types.Auth, fcws types.FileReceipt) err
 	}
 	form.Set("meta", hex.EncodeToString(fcwsb))
 
-	_, err = doRequest(context.TODO(), baseUrl, "/api/uploadFileMeta", "", auth, strings.NewReader(form.Encode()))
+	_, err = doRequest(context.TODO(), baseUrl, "/v1/uploadFileMeta", "", auth, strings.NewReader(form.Encode()))
 	return err
 }
 
@@ -29,7 +29,7 @@ func GetReplicaReceipt(baseUrl string, auth types.Auth, name string) (types.Repl
 	form.Set("name", name)
 	form.Set("chaintype", chaintype)
 
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/getReplicaReceipt", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/getReplicaReceipt", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}
@@ -58,7 +58,7 @@ func ListReplicaByEdge(baseUrl string, addr string, start, count int) (types.Lis
 		return res, err
 	}
 
-	baseUrl = baseUrl + "/api/listReplica?option=" + hex.EncodeToString(optyByte)
+	baseUrl = baseUrl + "/v1/listReplica?option=" + hex.EncodeToString(optyByte)
 	resByte, err := Get(context.TODO(), baseUrl)
 	if err != nil {
 		return res, err
@@ -76,7 +76,7 @@ func ListReplicaByEdge(baseUrl string, addr string, start, count int) (types.Lis
 func GetPieceOfEdge(baseUrl string, name string) (types.PieceReceipt, error) {
 	var res types.PieceReceipt
 
-	baseUrl = baseUrl + "/api/getPieceReceipt?name=" + name + "&chaintype=" + chaintype
+	baseUrl = baseUrl + "/v1/getPieceReceipt?name=" + name + "&chaintype=" + chaintype
 
 	resByte, err := Get(context.TODO(), baseUrl)
 	if err != nil {
@@ -107,7 +107,7 @@ func ListReplica(baseUrl string, auth types.Auth, filter string) (types.ListRepl
 	form := url.Values{}
 	form.Set("option", hex.EncodeToString(optyByte))
 
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/listReplica", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/listReplica", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}
@@ -127,7 +127,7 @@ func GetPieceReceipt(baseUrl string, auth types.Auth, name string) (types.PieceR
 	form.Set("name", name)
 	form.Set("chaintype", chaintype)
 
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/getPieceReceipt", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/getPieceReceipt", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}
@@ -156,7 +156,7 @@ func ListPiece(baseUrl string, auth types.Auth, filter string) (types.ListPieceR
 	form := url.Values{}
 	form.Set("option", hex.EncodeToString(optyByte))
 
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/listPiece", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/listPiece", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}
@@ -176,7 +176,7 @@ func GetFileReceipt(baseUrl string, auth types.Auth, name string) (types.FileRec
 	form.Set("name", name)
 	form.Set("chaintype", chaintype)
 
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/getFileReceipt", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/getFileReceipt", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}
@@ -205,7 +205,7 @@ func ListFile(baseUrl string, auth types.Auth, filter string) (types.ListFileRes
 	form := url.Values{}
 	form.Set("option", hex.EncodeToString(optyByte))
 
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/listFile", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/listFile", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}
@@ -225,7 +225,7 @@ func RequestPiece(baseUrl string, auth types.Auth, name string) (types.PieceWitn
 	form.Set("chaintype", chaintype)
 
 	var res types.PieceWitness
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/requestPiece", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/requestPiece", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}
@@ -243,7 +243,7 @@ func ConfirmPiece(baseUrl string, auth types.Auth, name, proof string) ([]byte, 
 	form.Set("name", name)
 	form.Set("chaintype", chaintype)
 
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/confirmPiece", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/confirmPiece", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}

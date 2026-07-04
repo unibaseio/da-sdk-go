@@ -145,7 +145,7 @@ func UploadData(baseUrl string, auth types.Auth, policy types.Policy, filePath s
 		}
 	}()
 
-	haddr := baseUrl + "/api/upload"
+	haddr := baseUrl + "/v1/upload"
 	hreq, err := http.NewRequest("POST", haddr, ipr)
 	if err != nil {
 		return res, err

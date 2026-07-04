@@ -21,7 +21,7 @@ func RegisterEdge(baseUrl string, auth types.Auth, em types.EdgeMeta) error {
 	form := url.Values{}
 	form.Set("txMsg", hex.EncodeToString(mmb))
 
-	_, err = doRequest(context.TODO(), baseUrl, "/api/registerEdge", "", auth, strings.NewReader(form.Encode()))
+	_, err = doRequest(context.TODO(), baseUrl, "/v1/registerEdge", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -35,7 +35,7 @@ func GetEdge(baseUrl string, auth types.Auth, eaddr common.Address) (types.EdgeR
 	form := url.Values{}
 	form.Set("name", eaddr.String())
 	form.Set("chaintype", chaintype)
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/getEdge", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/getEdge", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}
@@ -63,7 +63,7 @@ func ListEdge(baseUrl string, auth types.Auth, filter string) (types.ListEdgeRes
 	form := url.Values{}
 	form.Set("option", hex.EncodeToString(optyByte))
 
-	resByte, err := doRequest(context.TODO(), baseUrl, "/api/listEdge", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/listEdge", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}
