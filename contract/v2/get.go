@@ -358,25 +358,28 @@ func (c *ContractManage) GetRevenue(addr common.Address, typ string) (*big.Int, 
 	}
 }
 
+// CheckBalance verifies an account can operate: it must hold gas (ETH) and the
+// UB stake/settlement token. Returns a clear, actionable error that names the
+// account, the chain, and exactly what's missing — so callers can either abort
+// (uploads) or warn-and-continue (nodes, which self-heal once funded).
+//
+// One short grace retry per token lets an async faucet/recharge land, but there
+// is deliberately NO long blocking loop: the old 10×30s (up to 5-min) wait made
+// a drained node block startup and silently crash-loop with no HTTP/observability
+// — that masked a real fleet incident (store nodes drained by fraud-test slashing
+// looked "dead" when they were merely under-funded). Fail fast, say why.
 func (c *ContractManage) CheckBalance(addr common.Address) error {
-	val := c.BalanceOf(addr)
-	if val.Cmp(big.NewInt(0)) == 0 {
-		time.Sleep(30 * time.Second)
-		val = c.BalanceOf(addr)
-		if val.Cmp(big.NewInt(0)) == 0 {
-			return fmt.Errorf("not has gas token")
+	if c.BalanceOf(addr).Sign() == 0 {
+		time.Sleep(15 * time.Second) // grace: async faucet/recharge may be in flight
+		if c.BalanceOf(addr).Sign() == 0 {
+			return fmt.Errorf("account %s has 0 gas token (ETH) on chain %s — fund it to send transactions", addr.Hex(), c.Type)
 		}
 	}
-
-	val = c.BalanceOfToken(addr)
-	retry := 10
-	for retry > 0 {
-		if val.Cmp(big.NewInt(0)) > 0 {
-			return nil
+	if c.BalanceOfToken(addr).Sign() == 0 {
+		time.Sleep(15 * time.Second)
+		if c.BalanceOfToken(addr).Sign() == 0 {
+			return fmt.Errorf("account %s has 0 UB (stake/settlement token) on chain %s — fund it (node staking needs UB)", addr.Hex(), c.Type)
 		}
-		time.Sleep(30 * time.Second)
-		val = c.BalanceOfToken(addr)
-		retry--
 	}
-	return fmt.Errorf("not has erc20 token")
+	return nil
 }
