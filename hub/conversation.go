@@ -128,7 +128,7 @@ func (s *Server) conversationByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listConversation [get]
 func (s *Server) listConversationByGet(c *gin.Context) {
-	addr, ok := ResolveOwnerForList(c, c.Query("owner"))
+	addr, ok := RequireOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}

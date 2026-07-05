@@ -65,6 +65,9 @@ func (s *Server) getAccountByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listAccount [get]
 func (s *Server) listAccountByGet(c *gin.Context) {
+	if !RequireAuthenticated(c) { // account registry = global enumeration, not anonymous
+		return
+	}
 	offset, _ := strconv.Atoi(c.Query("offset"))
 	length, _ := strconv.Atoi(c.Query("length"))
 	if length == 0 {
@@ -92,6 +95,9 @@ func (s *Server) listAccountByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listAccount [post]
 func (s *Server) listAccountByPost(c *gin.Context) {
+	if !RequireAuthenticated(c) { // account registry = global enumeration, not anonymous
+		return
+	}
 	offset, _ := strconv.Atoi(c.PostForm("offset"))
 	length, _ := strconv.Atoi(c.PostForm("length"))
 	if length == 0 {
@@ -155,7 +161,7 @@ func (s *Server) getBucketByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError			"Internal server error"
 //	@Router			/api/listBucket [get]
 func (s *Server) listBucketByGet(c *gin.Context) {
-	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	owner, ok := RequireOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}
@@ -189,7 +195,7 @@ func (s *Server) listBucketByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError			"Internal server error"
 //	@Router			/api/listBucket [post]
 func (s *Server) listBucketByPost(c *gin.Context) {
-	owner, ok := ResolveOwnerForList(c, c.PostForm("owner"))
+	owner, ok := RequireOwnerForList(c, c.PostForm("owner"))
 	if !ok {
 		return
 	}
@@ -252,7 +258,7 @@ func (s *Server) getNeedleByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listNeedle [get]
 func (s *Server) listNeedleByGet(c *gin.Context) {
-	addr, ok := ResolveOwnerForList(c, c.Query("owner"))
+	addr, ok := RequireOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}
@@ -297,7 +303,7 @@ func (s *Server) listNeedleByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listNeedle [post]
 func (s *Server) listNeedleByPost(c *gin.Context) {
-	owner, ok := ResolveOwnerForList(c, c.PostForm("owner"))
+	owner, ok := RequireOwnerForList(c, c.PostForm("owner"))
 	if !ok {
 		return
 	}
@@ -339,7 +345,7 @@ func (s *Server) listNeedleByPost(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listVolume [get]
 func (s *Server) listVolumeByGet(c *gin.Context) {
-	addr, ok := ResolveOwnerForList(c, c.Query("owner"))
+	addr, ok := RequireOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}
@@ -371,7 +377,7 @@ func (s *Server) listVolumeByGet(c *gin.Context) {
 //	@Failure		599		{object}	lerror.APIError
 //	@Router			/api/listVolume [post]
 func (s *Server) listVolumeByPost(c *gin.Context) {
-	addr, ok := ResolveOwnerForList(c, c.PostForm("owner"))
+	addr, ok := RequireOwnerForList(c, c.PostForm("owner"))
 	if !ok {
 		return
 	}

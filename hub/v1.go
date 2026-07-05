@@ -188,7 +188,7 @@ func (s *Server) v1PutBucket(c *gin.Context) {
 
 // GET /v1/buckets?owner=&kind=&cursor=&limit=  (cursor on bucket id)
 func (s *Server) v1ListBuckets(c *gin.Context) {
-	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	owner, ok := RequireOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}
@@ -330,7 +330,7 @@ func (s *Server) v1PostObjects(c *gin.Context) {
 
 // GET /v1/buckets/{bucket}/objects?owner=&cursor=&limit=
 func (s *Server) v1ListObjects(c *gin.Context) {
-	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	owner, ok := RequireOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}

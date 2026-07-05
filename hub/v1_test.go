@@ -107,8 +107,8 @@ func TestV1Buckets(t *testing.T) {
 		t.Fatalf("idempotent PUT: got %d want 200", w.Code)
 	}
 
-	// list buckets (public) filtered by kind
-	w = do(t, s, "GET", "/v1/buckets?kind=knowledgebase", "", "")
+	// list buckets is enumeration → signed request scoped to the signer's own
+	w = do(t, s, "GET", "/v1/buckets?kind=knowledgebase", auth, "")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "kb1") {
 		t.Fatalf("list buckets: got %d body %s", w.Code, w.Body.String())
 	}
@@ -121,7 +121,9 @@ func TestV1Buckets(t *testing.T) {
 
 func TestV1Objects(t *testing.T) {
 	s := newV1TestServer(t)
-	owner := "0xabc0000000000000000000000000000000000001"
+	signer, spk := testKey(t)
+	owner := strings.ToLower(signer)
+	ownerAuth := authHeader(signer, spk)
 
 	// seed a bucket + two needles; one with an on-chain volume (committed), one without (staged)
 	s.gdb.Create(&types.Bucket{Name: "repo", Owner: owner, Kind: "model"})
@@ -129,8 +131,11 @@ func TestV1Objects(t *testing.T) {
 	s.gdb.Create(&types.Needle{Owner: owner, Bucket: "repo", Name: "b.bin", File: 11, Size: 200})
 	s.gdb.Create(&types.Volume{Owner: owner, File: 10, Piece: "a11abaaf", TxHash: "0xdead", ChainType: "base-sepolia"})
 
-	// list objects
-	w := do(t, s, "GET", "/v1/buckets/repo/objects?owner="+owner, "", "")
+	// list objects is enumeration → anonymous is rejected, signed owner works
+	if w := do(t, s, "GET", "/v1/buckets/repo/objects?owner="+owner, "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("anon list objects: got %d want 401", w.Code)
+	}
+	w := do(t, s, "GET", "/v1/buckets/repo/objects?owner="+owner, ownerAuth, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("list objects: got %d body %s", w.Code, w.Body.String())
 	}
@@ -209,13 +214,16 @@ func TestV1DeleteBucket(t *testing.T) {
 
 func TestV1BucketsCursor(t *testing.T) {
 	s := newV1TestServer(t)
-	owner := "0xabc0000000000000000000000000000000000009"
+	signer, spk := testKey(t)
+	owner := strings.ToLower(signer)
+	auth := authHeader(signer, spk)
 	s.gdb.Create(&types.Bucket{Name: "b1", Owner: owner, Kind: "file"})
 	s.gdb.Create(&types.Bucket{Name: "b2", Owner: owner, Kind: "file"})
 	s.gdb.Create(&types.Bucket{Name: "b3", Owner: owner, Kind: "file"})
 
+	// bucket listing is enumeration → requires a signed owner request
 	// page 1: limit=2 → 2 buckets + a nextCursor
-	w := do(t, s, "GET", "/v1/buckets?owner="+owner+"&limit=2", "", "")
+	w := do(t, s, "GET", "/v1/buckets?owner="+owner+"&limit=2", auth, "")
 	var p struct {
 		Buckets    []types.Bucket `json:"buckets"`
 		NextCursor string         `json:"nextCursor"`
@@ -225,7 +233,7 @@ func TestV1BucketsCursor(t *testing.T) {
 		t.Fatalf("page1: got %d buckets, cursor %q", len(p.Buckets), p.NextCursor)
 	}
 	// page 2: use cursor → remaining 1, no further cursor
-	w = do(t, s, "GET", "/v1/buckets?owner="+owner+"&limit=2&cursor="+p.NextCursor, "", "")
+	w = do(t, s, "GET", "/v1/buckets?owner="+owner+"&limit=2&cursor="+p.NextCursor, auth, "")
 	var p2 struct {
 		Buckets    []types.Bucket `json:"buckets"`
 		NextCursor string         `json:"nextCursor"`

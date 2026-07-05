@@ -88,6 +88,45 @@ func MaxBodySize() gin.HandlerFunc {
 // context under ctxAuthAddrKey.
 //
 // Any /api/* request that isn't in authBypassPaths must carry a valid signature.
+// recoverSigner verifies an Authorization header and returns the recovered
+// lowercased signer address, or an error. Shared by AuthMiddleware (write group)
+// and the read-side enumeration guards (RequireOwnerForList / RequireAuthenticated)
+// so identical signature + freshness rules apply everywhere.
+func recoverSigner(authStr string, drift int64) (string, error) {
+	au, err := sdk.DecodeAuth(authStr)
+	if err != nil {
+		return "", fmt.Errorf("decode auth: %w", err)
+	}
+
+	// Verify the signature first, recovering the timestamp BOUND INTO the
+	// signature: au.Time for the legacy Hash||be64(Time) bytes, or the "Issued
+	// At" embedded in the SIWE message. Freshness is then checked against that
+	// bound timestamp, so a tampered envelope can't widen the window.
+	var signedAt int64
+	if len(au.Msg) > 0 {
+		// EIP-4361 / SIWE human-readable message (new clients)
+		if signedAt, err = sdk.VerifySIWE(au); err != nil {
+			return "", fmt.Errorf("verify auth: %w", err)
+		}
+	} else {
+		// legacy: signature over Hash(label) || be64(Time)
+		signedAt = au.Time
+		if err := sdk.VerifyAuth(au); err != nil {
+			return "", fmt.Errorf("verify auth: %w", err)
+		}
+	}
+
+	now := time.Now().Unix()
+	delta := now - signedAt
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > drift {
+		return "", fmt.Errorf("auth timestamp out of window (delta=%ds, max=%ds)", delta, drift)
+	}
+	return strings.ToLower(au.Addr.Hex()), nil
+}
+
 func AuthMiddleware() gin.HandlerFunc {
 	drift := env.Int64("HUB_AUTH_DRIFT_SEC", defaultAuthDriftSec)
 
@@ -103,48 +142,64 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		au, err := sdk.DecodeAuth(authStr)
+		addr, err := recoverSigner(authStr, drift)
 		if err != nil {
-			abortWithAuthError(c, fmt.Errorf("decode auth: %w", err))
+			abortWithAuthError(c, err)
 			return
 		}
 
-		// Verify the signature first, recovering the timestamp BOUND INTO the
-		// signature: au.Time for the legacy Hash||be64(Time) bytes, or the
-		// "Issued At" embedded in the SIWE message. Freshness is then checked
-		// against that bound timestamp, so a tampered envelope can't widen the
-		// window.
-		var signedAt int64
-		if len(au.Msg) > 0 {
-			// EIP-4361 / SIWE human-readable message (new clients)
-			signedAt, err = sdk.VerifySIWE(au)
-			if err != nil {
-				abortWithAuthError(c, fmt.Errorf("verify auth: %w", err))
-				return
-			}
-		} else {
-			// legacy: signature over Hash(label) || be64(Time)
-			signedAt = au.Time
-			if err := sdk.VerifyAuth(au); err != nil {
-				abortWithAuthError(c, fmt.Errorf("verify auth: %w", err))
-				return
-			}
-		}
-
-		// freshness: |now - signedAt| <= drift
-		now := time.Now().Unix()
-		delta := now - signedAt
-		if delta < 0 {
-			delta = -delta
-		}
-		if delta > drift {
-			abortWithAuthError(c, fmt.Errorf("auth timestamp out of window (delta=%ds, max=%ds)", delta, drift))
-			return
-		}
-
-		c.Set(ctxAuthAddrKey, strings.ToLower(au.Addr.Hex()))
+		c.Set(ctxAuthAddrKey, addr)
 		c.Next()
 	}
+}
+
+// RequireOwnerForList guards owner-scoped enumeration (list buckets/needles/
+// volumes/objects). Unlike ResolveOwnerForList (used by public point-reads) it
+// REQUIRES a valid signed request and scopes the result to the signer: an
+// anonymous caller can no longer enumerate any owner's namespace, and a signer
+// can only list their own. This is the "hybrid" read model — enumeration is
+// gated while exact-key point reads and aggregate stats stay public. It reads
+// the Authorization header directly (independent of group middleware), so the
+// public read group and its point-read handlers are untouched.
+func RequireOwnerForList(c *gin.Context, owner string) (string, bool) {
+	authStr := c.GetHeader("Authorization")
+	if authStr == "" {
+		abortWithAuthError(c, fmt.Errorf("listing requires a signed request (namespace enumeration is not public)"))
+		return "", false
+	}
+	signer, err := recoverSigner(authStr, env.Int64("HUB_AUTH_DRIFT_SEC", defaultAuthDriftSec))
+	if err != nil {
+		abortWithAuthError(c, err)
+		return "", false
+	}
+	if owner == "" {
+		return signer, true
+	}
+	if !common.IsHexAddress(owner) {
+		abortWithBadRequest(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
+		return "", false
+	}
+	if !strings.EqualFold(owner, signer) {
+		abortWithAuthError(c, fmt.Errorf("owner %s does not match signer %s", owner, signer))
+		return "", false
+	}
+	return CanonOwner(owner), true
+}
+
+// RequireAuthenticated guards global (not owner-scoped) enumeration such as the
+// account registry: any valid signed request passes, anonymous is rejected — so
+// the full owner list can't be dumped anonymously.
+func RequireAuthenticated(c *gin.Context) bool {
+	authStr := c.GetHeader("Authorization")
+	if authStr == "" {
+		abortWithAuthError(c, fmt.Errorf("this listing requires a signed request"))
+		return false
+	}
+	if _, err := recoverSigner(authStr, env.Int64("HUB_AUTH_DRIFT_SEC", defaultAuthDriftSec)); err != nil {
+		abortWithAuthError(c, err)
+		return false
+	}
+	return true
 }
 
 func abortWithAuthError(c *gin.Context, err error) {
