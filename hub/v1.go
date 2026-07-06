@@ -105,12 +105,15 @@ func maxBodyV1() gin.HandlerFunc {
 func (s *Server) registV1() {
 	pub := s.Router.Group("/v1")
 	pub.Use(RateLimit())
+	pub.GET("/info", s.v1Info)
 	pub.GET("/buckets", s.v1ListBuckets)
 	pub.GET("/buckets/:bucket", s.v1GetBucket)
 	pub.GET("/buckets/:bucket/objects", s.v1ListObjects)
 	pub.GET("/buckets/:bucket/objects/:key", s.v1GetObject)
 	pub.GET("/buckets/:bucket/objects/:key/content", s.v1GetObjectContent)
 	pub.GET("/buckets/:bucket/objects/:key/proof", s.v1GetObjectProof)
+	pub.GET("/conversations", s.v1ListConversations)
+	pub.GET("/conversations/:id", s.v1GetConversation)
 	pub.GET("/stats", s.v1Stats)
 	pub.GET("/overview", s.v1Overview)
 	pub.GET("/owners/:owner", s.v1GetOwner)
@@ -126,12 +129,63 @@ func (s *Server) registV1() {
 		w.PUT("/buckets/:bucket", reject)
 		w.PUT("/buckets/:bucket/objects/:key", reject)
 		w.POST("/buckets/:bucket/objects", reject)
+		w.POST("/seal", reject)
 	} else {
 		w.PUT("/buckets/:bucket", s.v1PutBucket)
 		w.DELETE("/buckets/:bucket", s.v1DeleteBucket)
 		w.PUT("/buckets/:bucket/objects/:key", s.v1PutObject)
 		w.POST("/buckets/:bucket/objects", s.v1PostObjects)
+		// seal: commit one already-encrypted blob as a DA piece on-chain (register
+		// modes hub / hub_attributed / client). An operation, not a resource verb —
+		// the same /v1-operations carve-out as the nodes' upload/download. Reuses the
+		// existing seal handler (form + DA_SEAL_ENDPOINT_SPEC contract preserved).
+		w.POST("/seal", s.seal)
 	}
+}
+
+// ---- Info ------------------------------------------------------------------
+
+// GET /v1/info — hub node identity.
+func (s *Server) v1Info(c *gin.Context) {
+	c.JSON(http.StatusOK, types.EdgeReceipt{EdgeMeta: types.EdgeMeta{Type: s.typ, Name: s.local}})
+}
+
+// ---- Conversations ---------------------------------------------------------
+// A conversation is a memory-domain view grouping an owner's objects. Read-only;
+// enumeration requires owner==signer (RequireOwnerForList), point-get resolves the
+// owner (ResolveOwnerForList) — same authz as objects.
+
+// GET /v1/conversations?owner=&bucket=&offset=&limit= — list an owner's conversations.
+func (s *Server) v1ListConversations(c *gin.Context) {
+	owner, ok := RequireOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	res, err := s.listConversationDisplay(owner, c.Query("bucket"), offset, v1Limit(c))
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"conversations": res})
+}
+
+// GET /v1/conversations/{id}?owner=&bucket= — one conversation's detail.
+func (s *Server) v1GetConversation(c *gin.Context) {
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
+	res, err := s.getConversationDisplay(owner, c.Query("bucket"), c.Param("id"))
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	if len(res) == 0 {
+		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", fmt.Errorf("no such conversation: %s", c.Param("id"))))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"conversation": c.Param("id"), "messages": res})
 }
 
 // ---- bucket lookup helper (direct gdb; kind normalized) --------------------
