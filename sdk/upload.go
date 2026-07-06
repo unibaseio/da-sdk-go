@@ -189,7 +189,7 @@ func UploadData(baseUrl string, auth types.Auth, policy types.Policy, filePath s
 		return res, err
 	}
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return res, fmt.Errorf("response: %s, msg: %s", resp.Status, resByte)
 	}
 

@@ -412,7 +412,9 @@ func doRequest(ctx context.Context, baseUrl, method, ctype string, au types.Auth
 	}
 	bar.Finish()
 
-	if resp.StatusCode != 200 {
+	// Accept any 2xx — the clean /v1 writes use proper REST codes (POST /v1/files
+	// and /v1/edges return 201 Created), not just 200.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("response: %s, msg: %s", resp.Status, res)
 	}
 
@@ -463,7 +465,7 @@ func Get(ctx context.Context, baseUrl string) ([]byte, error) {
 	}
 	bar.Finish()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("response: %s, msg: %s", resp.Status, res)
 	}
 
