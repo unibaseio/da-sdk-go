@@ -13,7 +13,7 @@ import (
 
 func WSConnect(baseURL string, au types.Auth) (*websocket.Conn, error) {
 	url := strings.TrimPrefix(baseURL, "http")
-	url = "ws" + url + "/v1/ws"
+	url = "ws" + url + "/api/ws"
 
 	aub, err := json.Marshal(au)
 	if err != nil {
