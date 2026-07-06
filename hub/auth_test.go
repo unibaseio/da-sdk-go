@@ -348,3 +348,90 @@ func TestRateLimit_PerIPKicks(t *testing.T) {
 		t.Fatalf("expected at least one 429 from a single IP doing 10 rapid requests (burst=3)")
 	}
 }
+
+// ----------------------------------------------------------------------------
+// HUB_PUBLIC_LIST toggle (enumeration gate)
+// ----------------------------------------------------------------------------
+
+// newEnumTestRouter mounts a fake list endpoint behind RequireOwnerForList and
+// a registry endpoint behind RequireAuthenticated — the two enumeration guards.
+func newEnumTestRouter() *gin.Engine {
+	r := gin.New()
+	g := r.Group("/api")
+	g.GET("/listNeedle", func(c *gin.Context) {
+		owner, ok := RequireOwnerForList(c, c.Query("owner"))
+		if !ok {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "owner": owner})
+	})
+	g.GET("/listAccount", func(c *gin.Context) {
+		if !RequireAuthenticated(c) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	return r
+}
+
+func TestPublicListToggle_DefaultIsPublic(t *testing.T) {
+	// HUB_PUBLIC_LIST unset → default true → old public semantics: anonymous
+	// unscoped list-all and anonymous cross-owner listing both succeed (this is
+	// what the explorer's global browse feed depends on).
+	r := newEnumTestRouter()
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/listNeedle", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"owner":""`) {
+		t.Fatalf("anon list-all under default: want 200 owner=\"\", got %d body=%s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/listNeedle?owner="+otherAddr, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("anon cross-owner list under default: want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/listAccount", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("anon listAccount under default: want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestPublicListToggle_GatedRejectsAnonymous(t *testing.T) {
+	t.Setenv("HUB_PUBLIC_LIST", "0")
+	r := newEnumTestRouter()
+
+	// anonymous enumeration → 401
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/listNeedle", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("anon list gated: want 401, got %d body=%s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/listAccount", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("anon listAccount gated: want 401, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// signed request scoped to the signer → 200 (and cross-owner → 401)
+	signer, pk := testKey(t)
+	auth := authHeader(signer, pk)
+
+	w = httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/listNeedle?owner="+signer, nil)
+	req.Header.Set("Authorization", auth)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("signed own-owner list gated: want 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/api/listNeedle?owner="+otherAddr, nil)
+	req.Header.Set("Authorization", auth)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("signed cross-owner list gated: want 401, got %d body=%s", w.Code, w.Body.String())
+	}
+}

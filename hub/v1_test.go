@@ -120,6 +120,7 @@ func TestV1Buckets(t *testing.T) {
 }
 
 func TestV1Objects(t *testing.T) {
+	t.Setenv("HUB_PUBLIC_LIST", "0") // exercise the gated (hybrid read authz) mode
 	s := newV1TestServer(t)
 	signer, spk := testKey(t)
 	owner := strings.ToLower(signer)

@@ -153,6 +153,17 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+// publicListEnabled reports whether namespace enumeration is served publicly
+// (HUB_PUBLIC_LIST, default true). The default preserves the original public
+// read model — deployments with a public explorer feed (which browses all
+// owners' entries anonymously, e.g. the /memory browse page proxying
+// /api_hub/listNeedle) rely on it. Set HUB_PUBLIC_LIST=0 to gate enumeration
+// behind signed owner-scoped requests (the "hybrid" read model below):
+// stricter metadata privacy, but no anonymous or cross-owner listing at all.
+func publicListEnabled() bool {
+	return env.Bool("HUB_PUBLIC_LIST", true)
+}
+
 // RequireOwnerForList guards owner-scoped enumeration (list buckets/needles/
 // volumes/objects). Unlike ResolveOwnerForList (used by public point-reads) it
 // REQUIRES a valid signed request and scopes the result to the signer: an
@@ -161,7 +172,14 @@ func AuthMiddleware() gin.HandlerFunc {
 // gated while exact-key point reads and aggregate stats stay public. It reads
 // the Authorization header directly (independent of group middleware), so the
 // public read group and its point-read handlers are untouched.
+//
+// With HUB_PUBLIC_LIST unset or true (the default), the gate is bypassed and
+// enumeration keeps the public ResolveOwnerForList semantics (anonymous OK,
+// empty owner = unscoped list-all, a signed caller is still owner-matched).
 func RequireOwnerForList(c *gin.Context, owner string) (string, bool) {
+	if publicListEnabled() {
+		return ResolveOwnerForList(c, owner)
+	}
 	authStr := c.GetHeader("Authorization")
 	if authStr == "" {
 		abortWithAuthError(c, fmt.Errorf("listing requires a signed request (namespace enumeration is not public)"))
@@ -188,8 +206,12 @@ func RequireOwnerForList(c *gin.Context, owner string) (string, bool) {
 
 // RequireAuthenticated guards global (not owner-scoped) enumeration such as the
 // account registry: any valid signed request passes, anonymous is rejected — so
-// the full owner list can't be dumped anonymously.
+// the full owner list can't be dumped anonymously. Bypassed (always allowed)
+// when HUB_PUBLIC_LIST is unset or true, matching RequireOwnerForList.
 func RequireAuthenticated(c *gin.Context) bool {
+	if publicListEnabled() {
+		return true
+	}
 	authStr := c.GetHeader("Authorization")
 	if authStr == "" {
 		abortWithAuthError(c, fmt.Errorf("this listing requires a signed request"))
