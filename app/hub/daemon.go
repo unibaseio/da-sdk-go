@@ -85,9 +85,12 @@ var runCmd = &cli.Command{
 			cfg.API.Expose = he
 		}
 
-		_, err = sdk.Info(cfg.Remote.URL)
-		if err != nil {
-			return err
+		// Reachability probe only — the gateway is needed for DA sealing and
+		// discovery, not for serving (local logfs + index DB). A down or
+		// mid-upgrade gateway must not keep the hub offline; registration
+		// retries in the background (hub.Server.registerLoop).
+		if _, err := sdk.Info(cfg.Remote.URL); err != nil {
+			log.Printf("WARN: gateway %s not reachable at boot (%v) — starting anyway; background registration will retry", cfg.Remote.URL, err)
 		}
 		rp.ReplaceConfig(cfg)
 

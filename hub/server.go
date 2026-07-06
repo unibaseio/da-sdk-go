@@ -139,10 +139,12 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		logger.Warn("HUB_READONLY set: running as a read-only replica (no writes, no chain submit, no schema DDL)")
 	}
 
-	err = s.register()
-	if err != nil {
-		return nil, err
-	}
+	// Gateway registration is for gateway-side discovery only — serving
+	// (upload/download) runs on local logfs + the index DB and does not need the
+	// gateway. Don't let an unreachable or half-upgraded gateway (e.g. one that
+	// 404s /v1/registerEdge mid-rollout) keep the hub from booting: register in
+	// the background and retry until it succeeds.
+	go s.registerLoop()
 
 	s.load()
 
@@ -338,13 +340,35 @@ func login(url string, auth types.Auth) {
 	}
 }
 
+// registerLoop retries gateway registration with backoff until it succeeds (or
+// the hub shuts down). A fresh auth is signed per attempt so retries never trip
+// the gateway's signature-freshness window; the hourly login keepalive starts
+// only after a successful registration.
+func (s *Server) registerLoop() {
+	delay := 30 * time.Second
+	for {
+		err := s.register()
+		if err == nil {
+			logger.Info("registered on gateway: ", s.rp.Config().Remote.URL)
+			return
+		}
+		logger.Warnf("gateway register failed (retry in %s): %v", delay, err)
+		select {
+		case <-s.shutdownChan:
+			return
+		case <-time.After(delay):
+		}
+		if delay < 10*time.Minute {
+			delay *= 2
+		}
+	}
+}
+
 func (s *Server) register() error {
 	auth, err := s.rp.Key().BuildAuth([]byte("register"))
 	if err != nil {
 		return err
 	}
-
-	go login(s.rp.Config().Remote.URL, auth)
 
 	mm := types.EdgeMeta{
 		Type:      s.typ,
@@ -360,6 +384,9 @@ func (s *Server) register() error {
 		logger.Debug("register hub fail:", err)
 		return err
 	}
+
+	// keepalive only makes sense once we're registered.
+	go login(s.rp.Config().Remote.URL, auth)
 	return nil
 }
 
