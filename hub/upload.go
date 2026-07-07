@@ -9,8 +9,8 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -476,6 +476,50 @@ func (s *Server) getLFS(addr string) *logfs.LogFS {
 	return s.lfs[addr]
 }
 
+var alreadyHasPieceRe = regexp.MustCompile(`already has piece: ([0-9a-fA-F]+)`)
+
+// parseAlreadyHasPiece pulls the piece name out of a stream "already has piece: <hex>"
+// error (returns "" for anything else, incl. "already has replica").
+func parseAlreadyHasPiece(msg string) string {
+	m := alreadyHasPieceRe.FindStringSubmatch(msg)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// recoverStagedPiece registers an already-staged piece on-chain (if not yet) and
+// records its volume, so a vol whose earlier AddPiece failed still commits instead
+// of being stuck "staged" forever. Mirrors the path-1 (GetFileReceipt) recovery,
+// but keyed by the piece name from the "already has piece" error. Returns true when
+// the vol is committed (or already on-chain) so the caller advances the offset.
+func (s *Server) recoverStagedPiece(cm *contract.ContractManage, au types.Auth, key string, i uint64, pn string) bool {
+	er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
+	if err != nil {
+		return false
+	}
+	for _, st := range er.Edges {
+		pr, err := sdk.GetPieceReceipt(st.ExposeURL, au, pn)
+		if err != nil || pr.Name == "" {
+			continue
+		}
+		if pr.Serial == 0 {
+			txn, err := cm.AddPiece(pr.PieceCore)
+			if err != nil {
+				logger.Warnf("recover staged piece %s: AddPiece failed: %v", pn, err)
+				return false
+			}
+			s.addVolume(key, i, pr.Name, txn)
+			logger.Infof("recovered staged piece %s -> on-chain (tx %s)", pn, txn)
+		} else {
+			s.addVolume(key, i, pr.Name, "")
+			logger.Infof("recovered staged piece %s (already on-chain, serial %d)", pn, pr.Serial)
+		}
+		return true
+	}
+	return false
+}
+
 // drainInstance uploads + commits one owner's (log instance idx) pending
 // volumes in order, advancing that owner's offset as each volume lands. Encode
 // (CPU) and AddPiece (chain) of different owners overlap because drainInstance
@@ -572,10 +616,21 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		// upload to stream and submit to gateway
 		res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fp, fname)
 		if err != nil {
-			if strings.Contains(err.Error(), "already has piece") {
-				logger.Warnf("piece of file %s found on server, skip", fp)
-				continue
+			// The piece is already staged on a stream from a prior attempt whose
+			// on-chain AddPiece never completed (e.g. the hub was briefly out of
+			// gas). Recover: register that staged piece on-chain if it isn't yet,
+			// record the volume, and advance. The old code just skipped (piece) or
+			// broke (replica) → the vol stayed staged-but-uncommitted forever, and
+			// every re-upload re-hit "already has".
+			if pn := parseAlreadyHasPiece(err.Error()); pn != "" {
+				if s.recoverStagedPiece(cm, au, key, i, pn) {
+					buf := make([]byte, 8)
+					binary.BigEndian.PutUint64(buf, i+1)
+					s.rp.MetaStore().Put(dsKey, buf)
+					continue
+				}
 			}
+			logger.Warnf("drain %s vol %d: %v", key, i, err)
 			break
 		}
 		pcs, err := sdk.CheckFileFull(res, streamer, fp)
