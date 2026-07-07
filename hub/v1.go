@@ -20,12 +20,36 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 )
+
+// v1WantTotal reports whether the caller asked for a grand total row count
+// (?withTotal=1). Opt-in because COUNT(*) can be expensive on large needle
+// tables — normal cursor/offset paging stays cheap; only clients that render a
+// numbered pager (e.g. the block explorer) pay for it.
+func v1WantTotal(c *gin.Context) bool {
+	v := c.Query("withTotal")
+	return v == "1" || v == "true"
+}
+
+// v1Offset reads an optional ?offset= (numbered pagination). Returns (n, true)
+// when present and valid; the caller then uses OFFSET instead of cursor.
+func v1Offset(c *gin.Context) (int, bool, error) {
+	off := c.Query("offset")
+	if off == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.Atoi(off)
+	if err != nil || n < 0 {
+		return 0, false, fmt.Errorf("invalid offset")
+	}
+	return n, true, nil
+}
 
 // v1KindProfileLarge maps a bucket kind (+ object size) to the storage profile:
 // passthrough-large (own volume, prompt upload) vs coalesce-small (batch into a
@@ -259,16 +283,37 @@ func (s *Server) v1ListBuckets(c *gin.Context) {
 	limit := v1Limit(c)
 	kind := c.Query("kind")
 
-	q := s.gdb.Model(&types.Bucket{})
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	filter := func(q *gorm.DB) *gorm.DB {
+		if owner != "" {
+			q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+		}
+		if kind == "memory" {
+			q = q.Where("kind = ? OR kind = '' OR kind IS NULL", kind)
+		} else if kind != "" {
+			q = q.Where("kind = ?", kind)
+		}
+		return q
 	}
-	if kind == "memory" {
-		q = q.Where("kind = ? OR kind = '' OR kind IS NULL", kind)
-	} else if kind != "" {
-		q = q.Where("kind = ?", kind)
+
+	resp := gin.H{}
+	if v1WantTotal(c) {
+		var total int64
+		if err := filter(s.gdb.Model(&types.Bucket{})).Count(&total).Error; err != nil {
+			c.JSON(599, lerror.ToAPIError("hub", err))
+			return
+		}
+		resp["total"] = total
 	}
-	if cur := c.Query("cursor"); cur != "" {
+
+	q := filter(s.gdb.Model(&types.Bucket{}))
+	off, useOffset, err := v1Offset(c)
+	if err != nil {
+		abortWithBadRequest(c, err)
+		return
+	}
+	if useOffset {
+		q = q.Offset(off)
+	} else if cur := c.Query("cursor"); cur != "" {
 		id, err := strconv.ParseUint(cur, 10, 64)
 		if err != nil {
 			abortWithBadRequest(c, fmt.Errorf("invalid cursor"))
@@ -282,10 +327,12 @@ func (s *Server) v1ListBuckets(c *gin.Context) {
 		return
 	}
 	var next string
-	if len(buckets) == limit {
+	if !useOffset && len(buckets) == limit {
 		next = strconv.FormatUint(uint64(buckets[len(buckets)-1].ID), 10)
 	}
-	c.JSON(http.StatusOK, gin.H{"buckets": buckets, "nextCursor": next})
+	resp["buckets"] = buckets
+	resp["nextCursor"] = next
+	c.JSON(http.StatusOK, resp)
 }
 
 // GET /v1/buckets/{bucket}
@@ -402,12 +449,35 @@ func (s *Server) v1ListObjects(c *gin.Context) {
 	limit := v1Limit(c)
 
 	// cursor pagination on the needles table by id (avoids offset walk on 34M rows):
-	// WHERE bucket=? [AND LOWER(owner)=?] [AND id < cursor] ORDER BY id DESC LIMIT n
-	q := s.gdb.Model(&types.Needle{}).Where("bucket = ?", bucket)
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	// WHERE bucket=? [AND LOWER(owner)=?] [AND id < cursor] ORDER BY id DESC LIMIT n.
+	// Offset + total are opt-in (numbered pager) — see v1Offset/v1WantTotal.
+	filter := func(q *gorm.DB) *gorm.DB {
+		q = q.Where("bucket = ?", bucket)
+		if owner != "" {
+			q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+		}
+		return q
 	}
-	if cur := c.Query("cursor"); cur != "" {
+
+	resp := gin.H{}
+	if v1WantTotal(c) {
+		var total int64
+		if err := filter(s.gdb.Model(&types.Needle{})).Count(&total).Error; err != nil {
+			c.JSON(599, lerror.ToAPIError("hub", err))
+			return
+		}
+		resp["total"] = total
+	}
+
+	q := filter(s.gdb.Model(&types.Needle{}))
+	off, useOffset, err := v1Offset(c)
+	if err != nil {
+		abortWithBadRequest(c, err)
+		return
+	}
+	if useOffset {
+		q = q.Offset(off)
+	} else if cur := c.Query("cursor"); cur != "" {
 		id, err := strconv.ParseUint(cur, 10, 64)
 		if err != nil {
 			abortWithBadRequest(c, fmt.Errorf("invalid cursor"))
@@ -432,10 +502,12 @@ func (s *Server) v1ListObjects(c *gin.Context) {
 		objs = append(objs, receiptFromNeedle(bucket, nd))
 	}
 	var next string
-	if len(needles) == limit {
+	if !useOffset && len(needles) == limit {
 		next = strconv.FormatUint(uint64(needles[len(needles)-1].ID), 10)
 	}
-	c.JSON(http.StatusOK, gin.H{"objects": objs, "nextCursor": next})
+	resp["objects"] = objs
+	resp["nextCursor"] = next
+	c.JSON(http.StatusOK, resp)
 }
 
 // GET /v1/objects?owner=&cursor=&limit= — cross-bucket needle list. Global
@@ -450,11 +522,32 @@ func (s *Server) v1ListAllObjects(c *gin.Context) {
 	}
 	limit := v1Limit(c)
 
-	q := s.gdb.Model(&types.Needle{})
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	filter := func(q *gorm.DB) *gorm.DB {
+		if owner != "" {
+			q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+		}
+		return q
 	}
-	if cur := c.Query("cursor"); cur != "" {
+
+	resp := gin.H{}
+	if v1WantTotal(c) {
+		var total int64
+		if err := filter(s.gdb.Model(&types.Needle{})).Count(&total).Error; err != nil {
+			c.JSON(599, lerror.ToAPIError("hub", err))
+			return
+		}
+		resp["total"] = total
+	}
+
+	q := filter(s.gdb.Model(&types.Needle{}))
+	off, useOffset, err := v1Offset(c)
+	if err != nil {
+		abortWithBadRequest(c, err)
+		return
+	}
+	if useOffset {
+		q = q.Offset(off)
+	} else if cur := c.Query("cursor"); cur != "" {
 		id, err := strconv.ParseUint(cur, 10, 64)
 		if err != nil {
 			abortWithBadRequest(c, fmt.Errorf("invalid cursor"))
@@ -485,10 +578,12 @@ func (s *Server) v1ListAllObjects(c *gin.Context) {
 		objs = append(objs, receiptFromNeedle(needles[i].Bucket, nd))
 	}
 	var next string
-	if len(needles) == limit {
+	if !useOffset && len(needles) == limit {
 		next = strconv.FormatUint(uint64(needles[len(needles)-1].ID), 10)
 	}
-	c.JSON(http.StatusOK, gin.H{"objects": objs, "nextCursor": next})
+	resp["objects"] = objs
+	resp["nextCursor"] = next
+	c.JSON(http.StatusOK, resp)
 }
 
 // GET /v1/buckets/{bucket}/objects/{key}
