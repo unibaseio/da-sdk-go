@@ -112,6 +112,7 @@ func (s *Server) registV1() {
 	pub.GET("/buckets/:bucket/objects/:key", s.v1GetObject)
 	pub.GET("/buckets/:bucket/objects/:key/content", s.v1GetObjectContent)
 	pub.GET("/buckets/:bucket/objects/:key/proof", s.v1GetObjectProof)
+	pub.GET("/pieces/:name/content", s.v1GetPieceContent)
 	pub.GET("/conversations", s.v1ListConversations)
 	pub.GET("/conversations/:id", s.v1GetConversation)
 	pub.GET("/stats", s.v1Stats)
@@ -471,6 +472,25 @@ func (s *Server) v1GetObjectContent(c *gin.Context) {
 		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", err))
 		return
 	}
+	c.Data(http.StatusOK, "application/octet-stream", []byte(w.String()))
+}
+
+// GET /v1/pieces/{name}/content — download a committed DA piece by its
+// content-id (da_cid). Unlike object content (logfs by key), this resolves the
+// piece off the DA network (GetPieceReceipt → DownloadPiece) via the shared
+// download() helper — the cold-tier read path (seal'd segments) needs this.
+func (s *Server) v1GetPieceContent(c *gin.Context) {
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
+	var w strings.Builder
+	size, err := s.download(c.Request.Context(), c.Param("name"), owner, &w)
+	if err != nil {
+		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", err))
+		return
+	}
+	_ = size
 	c.Data(http.StatusOK, "application/octet-stream", []byte(w.String()))
 }
 
