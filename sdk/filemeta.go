@@ -26,7 +26,7 @@ func UploadFileMeta(baseUrl string, auth types.Auth, fcws types.FileReceipt) err
 func GetReplicaReceipt(baseUrl string, auth types.Auth, name string) (types.ReplicaReceipt, error) {
 	var res types.ReplicaReceipt
 
-	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/replicas/"+name))
+	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/replicas/"+url.PathEscape(name)))
 	if err != nil {
 		return res, err
 	}
@@ -62,7 +62,7 @@ func ListReplicaByEdge(baseUrl string, addr string, start, count int) (types.Lis
 func GetPieceOfEdge(baseUrl string, name string) (types.PieceReceipt, error) {
 	var res types.PieceReceipt
 
-	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/pieces/"+name))
+	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/pieces/"+url.PathEscape(name)))
 	if err != nil {
 		return res, err
 	}
@@ -99,7 +99,7 @@ func ListReplica(baseUrl string, auth types.Auth, filter string) (types.ListRepl
 func GetPieceReceipt(baseUrl string, auth types.Auth, name string) (types.PieceReceipt, error) {
 	var res types.PieceReceipt
 
-	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/pieces/"+name))
+	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/pieces/"+url.PathEscape(name)))
 	if err != nil {
 		return res, err
 	}
@@ -136,7 +136,7 @@ func ListPiece(baseUrl string, auth types.Auth, filter string) (types.ListPieceR
 func GetFileReceipt(baseUrl string, auth types.Auth, name string) (types.FileReceipt, error) {
 	var res types.FileReceipt
 
-	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/files/"+name))
+	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/files/"+url.PathEscape(name)))
 	if err != nil {
 		return res, err
 	}

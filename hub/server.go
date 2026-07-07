@@ -107,6 +107,10 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	logger.Infof("hub %s starting...", localAddr)
 
 	router := gin.Default()
+	// Allow %2F-encoded slashes in /v1 path params (object keys / resource names
+	// can contain "/"). Match on the raw path, decode the param value back.
+	router.UseRawPath = true
+	router.UnescapePathValues = true
 
 	auth, err := rp.Key().BuildAuth([]byte("hub"))
 	if err != nil {

@@ -32,7 +32,7 @@ func RegisterEdge(baseUrl string, auth types.Auth, em types.EdgeMeta) error {
 func GetEdge(baseUrl string, auth types.Auth, eaddr common.Address) (types.EdgeReceipt, error) {
 	res := types.EdgeReceipt{}
 
-	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/edges/"+eaddr.String()))
+	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/edges/"+url.PathEscape(eaddr.String())))
 	if err != nil {
 		return res, err
 	}
