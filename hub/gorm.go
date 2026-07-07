@@ -530,9 +530,14 @@ func (s *Server) addNeedle(owner, bucket, name string, findex uint64, start, len
 		return err
 	}
 
-	if strings.HasSuffix(name, "_0") {
-		connName := strings.TrimSuffix(name, "_0")
-		// check if conversation already exists
+	// Ensure the conversation row for this needle's group. The group id is the name
+	// up to the LAST "_" — matching getConversation's `name like <conv>_%` query. This
+	// works for any "_<index>" scheme (e.g. proto ids zero-pad the seq to 20 digits →
+	// "..._00000000000000000000", and sync session ids are "..._<id>"), not just a
+	// literal "_0" suffix (the old check missed every padded/suffixed name → grouping
+	// stayed empty). Idempotent upsert; runs per needle so any entry heals the group.
+	if idx := strings.LastIndex(name, "_"); idx > 0 {
+		connName := name[:idx]
 		var conversation types.Conversation
 		// read-before-write: force the writer so we don't create a duplicate
 		// conversation row off a lagging replica.
