@@ -155,14 +155,19 @@ func (s *Server) v1Info(c *gin.Context) {
 // enumeration requires owner==signer (RequireOwnerForList), point-get resolves the
 // owner (ResolveOwnerForList) — same authz as objects.
 
-// GET /v1/conversations?owner=&bucket=&offset=&limit= — list an owner's conversations.
+// GET /v1/conversations?owner=&bucket=&offset=&limit= — list an owner's conversation
+// ids (the raw prefixes, same as the legacy /api/conversation without id).
 func (s *Server) v1ListConversations(c *gin.Context) {
 	owner, ok := RequireOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}
 	offset, _ := strconv.Atoi(c.Query("offset"))
-	res, err := s.listConversationDisplay(owner, c.Query("bucket"), offset, v1Limit(c))
+	length, _ := strconv.Atoi(c.Query("length"))
+	if length == 0 {
+		length = 1024
+	}
+	res, err := s.listConversation(owner, c.Query("bucket"), offset, length)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
@@ -170,19 +175,21 @@ func (s *Server) v1ListConversations(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"conversations": res})
 }
 
-// GET /v1/conversations/{id}?owner=&bucket= — one conversation's detail.
+// GET /v1/conversations/{id}?owner=&bucket= — the raw records under {id} in write
+// order (same as legacy /api/conversation with id; each record = a stored payload).
 func (s *Server) v1GetConversation(c *gin.Context) {
 	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}
-	res, err := s.getConversationDisplay(owner, c.Query("bucket"), c.Param("id"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	length, _ := strconv.Atoi(c.Query("length"))
+	if length == 0 {
+		length = 1024
+	}
+	res, err := s.getConversation(c.Request.Context(), c.Param("id"), owner, c.Query("bucket"), offset, length)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
-	if len(res) == 0 {
-		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", fmt.Errorf("no such conversation: %s", c.Param("id"))))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"conversation": c.Param("id"), "messages": res})
