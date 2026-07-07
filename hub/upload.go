@@ -476,16 +476,41 @@ func (s *Server) getLFS(addr string) *logfs.LogFS {
 	return s.lfs[addr]
 }
 
-var alreadyHasPieceRe = regexp.MustCompile(`already has piece: ([0-9a-fA-F]+)`)
+var (
+	alreadyHasPieceRe   = regexp.MustCompile(`already has piece: ([0-9a-fA-F]+)`)
+	alreadyHasReplicaRe = regexp.MustCompile(`already has replica: ([0-9a-fA-F]+)`)
+)
 
 // parseAlreadyHasPiece pulls the piece name out of a stream "already has piece: <hex>"
-// error (returns "" for anything else, incl. "already has replica").
+// error (returns "" for anything else).
 func parseAlreadyHasPiece(msg string) string {
-	m := alreadyHasPieceRe.FindStringSubmatch(msg)
-	if m == nil {
+	if m := alreadyHasPieceRe.FindStringSubmatch(msg); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// parseAlreadyHasReplica pulls the replica name out of "already has replica: <hex>".
+func parseAlreadyHasReplica(msg string) string {
+	if m := alreadyHasReplicaRe.FindStringSubmatch(msg); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// pieceOfReplica resolves a staged replica name to the piece it belongs to, by
+// asking a stream for the replica receipt (which carries .Piece). "" if unknown.
+func (s *Server) pieceOfReplica(au types.Auth, rn string) string {
+	er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
+	if err != nil {
 		return ""
 	}
-	return m[1]
+	for _, st := range er.Edges {
+		if rr, err := sdk.GetReplicaReceipt(st.ExposeURL, au, rn); err == nil && rr.Piece != "" {
+			return rr.Piece
+		}
+	}
+	return ""
 }
 
 // recoverStagedPiece registers an already-staged piece on-chain (if not yet) and
@@ -617,18 +642,23 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fp, fname)
 		if err != nil {
 			// The piece is already staged on a stream from a prior attempt whose
-			// on-chain AddPiece never completed (e.g. the hub was briefly out of
-			// gas). Recover: register that staged piece on-chain if it isn't yet,
-			// record the volume, and advance. The old code just skipped (piece) or
-			// broke (replica) → the vol stayed staged-but-uncommitted forever, and
-			// every re-upload re-hit "already has".
-			if pn := parseAlreadyHasPiece(err.Error()); pn != "" {
-				if s.recoverStagedPiece(cm, au, key, i, pn) {
-					buf := make([]byte, 8)
-					binary.BigEndian.PutUint64(buf, i+1)
-					s.rp.MetaStore().Put(dsKey, buf)
-					continue
+			// on-chain AddPiece never completed (hub briefly out of gas, or a
+			// concurrent drain pass double-uploaded this slow-encoding vol). Recover:
+			// register that staged piece on-chain if it isn't yet, record the volume,
+			// and advance. The old code just skipped (piece) or broke (replica) → the
+			// vol stayed staged-but-uncommitted forever. "already has replica" carries
+			// a replica name, so resolve it to its piece first.
+			pn := parseAlreadyHasPiece(err.Error())
+			if pn == "" {
+				if rn := parseAlreadyHasReplica(err.Error()); rn != "" {
+					pn = s.pieceOfReplica(au, rn)
 				}
+			}
+			if pn != "" && s.recoverStagedPiece(cm, au, key, i, pn) {
+				buf := make([]byte, 8)
+				binary.BigEndian.PutUint64(buf, i+1)
+				s.rp.MetaStore().Put(dsKey, buf)
+				continue
 			}
 			logger.Warnf("drain %s vol %d: %v", key, i, err)
 			break
