@@ -56,6 +56,7 @@ func v1KindValid(kind string) bool {
 // v1Receipt is the verifiable object receipt (spec §4).
 type v1Receipt struct {
 	Bucket       string     `json:"bucket"`
+	Owner        string     `json:"owner,omitempty"` // set on cross-bucket listings (GET /v1/objects)
 	Key          string     `json:"key"`
 	Size         uint64     `json:"size"`
 	Sha256       string     `json:"sha256,omitempty"`     // content sha256 (best-effort, from logfs meta)
@@ -76,7 +77,7 @@ type v1Chain struct {
 // chain (Volume row exists with a piece), else staged (in logfs, awaiting the
 // drainInstance AddPiece).
 func receiptFromNeedle(bucket string, n types.NeedleDisplay) v1Receipt {
-	r := v1Receipt{Bucket: bucket, Key: n.Name, Size: n.Size, Status: "staged", Availability: "pending"}
+	r := v1Receipt{Bucket: bucket, Owner: n.Owner, Key: n.Name, Size: n.Size, Status: "staged", Availability: "pending"}
 	if !n.CreatedAt.IsZero() {
 		t := n.CreatedAt
 		r.CreatedAt = &t
@@ -108,6 +109,7 @@ func (s *Server) registV1() {
 	pub.GET("/info", s.v1Info)
 	pub.GET("/buckets", s.v1ListBuckets)
 	pub.GET("/buckets/:bucket", s.v1GetBucket)
+	pub.GET("/objects", s.v1ListAllObjects)
 	pub.GET("/buckets/:bucket/objects", s.v1ListObjects)
 	pub.GET("/buckets/:bucket/objects/:key", s.v1GetObject)
 	pub.GET("/buckets/:bucket/objects/:key/content", s.v1GetObjectContent)
@@ -428,6 +430,59 @@ func (s *Server) v1ListObjects(c *gin.Context) {
 			nd.ChainType = v.ChainType
 		}
 		objs = append(objs, receiptFromNeedle(bucket, nd))
+	}
+	var next string
+	if len(needles) == limit {
+		next = strconv.FormatUint(uint64(needles[len(needles)-1].ID), 10)
+	}
+	c.JSON(http.StatusOK, gin.H{"objects": objs, "nextCursor": next})
+}
+
+// GET /v1/objects?owner=&cursor=&limit= — cross-bucket needle list. Global
+// enumeration (no bucket path param), so it requires an owner-signed request
+// like the other list endpoints: the owner scopes to their own needles, and a
+// reader identity (HUB_READER_ADDRS) may enumerate any/all owners. Backs the
+// explorer's top-level Memory page, which shows recent memory across all agents.
+func (s *Server) v1ListAllObjects(c *gin.Context) {
+	owner, ok := RequireOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
+	limit := v1Limit(c)
+
+	q := s.gdb.Model(&types.Needle{})
+	if owner != "" {
+		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	}
+	if cur := c.Query("cursor"); cur != "" {
+		id, err := strconv.ParseUint(cur, 10, 64)
+		if err != nil {
+			abortWithBadRequest(c, fmt.Errorf("invalid cursor"))
+			return
+		}
+		q = q.Where("id < ?", id)
+	}
+	var needles []types.Needle
+	if err := q.Order("id desc").Limit(limit).Find(&needles).Error; err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	vmap := s.volumesFor(needles)
+	objs := make([]v1Receipt, 0, len(needles))
+	for i := range needles {
+		nd := types.NeedleDisplay{
+			CreatedAt: needles[i].CreatedAt,
+			Name:      needles[i].Name,
+			Owner:     needles[i].Owner,
+			Bucket:    needles[i].Bucket,
+			Size:      needles[i].Size,
+		}
+		if v, ok := vmap[volKey(needles[i].Owner, needles[i].File)]; ok {
+			nd.Piece = v.Piece
+			nd.TxHash = v.TxHash
+			nd.ChainType = v.ChainType
+		}
+		objs = append(objs, receiptFromNeedle(needles[i].Bucket, nd))
 	}
 	var next string
 	if len(needles) == limit {
