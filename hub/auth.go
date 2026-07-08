@@ -190,6 +190,12 @@ func RequireOwnerForList(c *gin.Context, owner string) (string, bool) {
 		abortWithAuthError(c, err)
 		return "", false
 	}
+	// A privileged read-only "reader" identity (e.g. the block explorer) may
+	// enumerate ANY owner — metadata only; stored content stays client-encrypted.
+	// Writes are unaffected (RequireOwnerMatch still demands owner==signer).
+	if isReader(signer) {
+		return readerScope(c, owner)
+	}
 	if owner == "" {
 		return signer, true
 	}
@@ -199,6 +205,35 @@ func RequireOwnerForList(c *gin.Context, owner string) (string, bool) {
 	}
 	if !strings.EqualFold(owner, signer) {
 		abortWithAuthError(c, fmt.Errorf("owner %s does not match signer %s", owner, signer))
+		return "", false
+	}
+	return CanonOwner(owner), true
+}
+
+// isReader reports whether addr is in the HUB_READER_ADDRS allowlist — a set of
+// addresses permitted to enumerate any owner for reads only. Empty list (default)
+// means no readers, so behaviour is identical to a plain owner==signer hub.
+func isReader(addr string) bool {
+	list := env.Str("HUB_READER_ADDRS", "")
+	if list == "" || addr == "" {
+		return false
+	}
+	for _, a := range strings.Split(list, ",") {
+		if strings.EqualFold(strings.TrimSpace(a), addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// readerScope resolves the requested owner for a reader: empty = list-all, else
+// the requested owner canonicalised (any owner, not just the signer's own).
+func readerScope(c *gin.Context, owner string) (string, bool) {
+	if owner == "" {
+		return "", true
+	}
+	if !common.IsHexAddress(owner) {
+		abortWithBadRequest(c, fmt.Errorf("owner must be a 0x-prefixed Ethereum address"))
 		return "", false
 	}
 	return CanonOwner(owner), true
@@ -343,6 +378,11 @@ func ResolveOwnerForList(c *gin.Context, owner string) (string, bool) {
 			return "", false
 		}
 		return CanonOwner(owner), true
+	}
+
+	// Reader identity: enumerate any owner (read-only), see RequireOwnerForList.
+	if isReader(signer) {
+		return readerScope(c, owner)
 	}
 
 	if owner == "" {

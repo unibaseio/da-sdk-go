@@ -20,12 +20,36 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 )
+
+// v1WantTotal reports whether the caller asked for a grand total row count
+// (?withTotal=1). Opt-in because COUNT(*) can be expensive on large needle
+// tables — normal cursor/offset paging stays cheap; only clients that render a
+// numbered pager (e.g. the block explorer) pay for it.
+func v1WantTotal(c *gin.Context) bool {
+	v := c.Query("withTotal")
+	return v == "1" || v == "true"
+}
+
+// v1Offset reads an optional ?offset= (numbered pagination). Returns (n, true)
+// when present and valid; the caller then uses OFFSET instead of cursor.
+func v1Offset(c *gin.Context) (int, bool, error) {
+	off := c.Query("offset")
+	if off == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.Atoi(off)
+	if err != nil || n < 0 {
+		return 0, false, fmt.Errorf("invalid offset")
+	}
+	return n, true, nil
+}
 
 // v1KindProfileLarge maps a bucket kind (+ object size) to the storage profile:
 // passthrough-large (own volume, prompt upload) vs coalesce-small (batch into a
@@ -56,6 +80,7 @@ func v1KindValid(kind string) bool {
 // v1Receipt is the verifiable object receipt (spec §4).
 type v1Receipt struct {
 	Bucket       string     `json:"bucket"`
+	Owner        string     `json:"owner,omitempty"` // set on cross-bucket listings (GET /v1/objects)
 	Key          string     `json:"key"`
 	Size         uint64     `json:"size"`
 	Sha256       string     `json:"sha256,omitempty"`     // content sha256 (best-effort, from logfs meta)
@@ -76,7 +101,7 @@ type v1Chain struct {
 // chain (Volume row exists with a piece), else staged (in logfs, awaiting the
 // drainInstance AddPiece).
 func receiptFromNeedle(bucket string, n types.NeedleDisplay) v1Receipt {
-	r := v1Receipt{Bucket: bucket, Key: n.Name, Size: n.Size, Status: "staged", Availability: "pending"}
+	r := v1Receipt{Bucket: bucket, Owner: n.Owner, Key: n.Name, Size: n.Size, Status: "staged", Availability: "pending"}
 	if !n.CreatedAt.IsZero() {
 		t := n.CreatedAt
 		r.CreatedAt = &t
@@ -105,12 +130,17 @@ func maxBodyV1() gin.HandlerFunc {
 func (s *Server) registV1() {
 	pub := s.Router.Group("/v1")
 	pub.Use(RateLimit())
+	pub.GET("/info", s.v1Info)
 	pub.GET("/buckets", s.v1ListBuckets)
 	pub.GET("/buckets/:bucket", s.v1GetBucket)
+	pub.GET("/objects", s.v1ListAllObjects)
 	pub.GET("/buckets/:bucket/objects", s.v1ListObjects)
 	pub.GET("/buckets/:bucket/objects/:key", s.v1GetObject)
 	pub.GET("/buckets/:bucket/objects/:key/content", s.v1GetObjectContent)
 	pub.GET("/buckets/:bucket/objects/:key/proof", s.v1GetObjectProof)
+	pub.GET("/pieces/:name/content", s.v1GetPieceContent)
+	pub.GET("/conversations", s.v1ListConversations)
+	pub.GET("/conversations/:id", s.v1GetConversation)
 	pub.GET("/stats", s.v1Stats)
 	pub.GET("/overview", s.v1Overview)
 	pub.GET("/owners/:owner", s.v1GetOwner)
@@ -126,12 +156,70 @@ func (s *Server) registV1() {
 		w.PUT("/buckets/:bucket", reject)
 		w.PUT("/buckets/:bucket/objects/:key", reject)
 		w.POST("/buckets/:bucket/objects", reject)
+		w.POST("/seal", reject)
 	} else {
 		w.PUT("/buckets/:bucket", s.v1PutBucket)
 		w.DELETE("/buckets/:bucket", s.v1DeleteBucket)
 		w.PUT("/buckets/:bucket/objects/:key", s.v1PutObject)
 		w.POST("/buckets/:bucket/objects", s.v1PostObjects)
+		// seal: commit one already-encrypted blob as a DA piece on-chain (register
+		// modes hub / hub_attributed / client). An operation, not a resource verb —
+		// the same /v1-operations carve-out as the nodes' upload/download. Reuses the
+		// existing seal handler (form + DA_SEAL_ENDPOINT_SPEC contract preserved).
+		w.POST("/seal", s.seal)
 	}
+}
+
+// ---- Info ------------------------------------------------------------------
+
+// GET /v1/info — hub node identity.
+func (s *Server) v1Info(c *gin.Context) {
+	c.JSON(http.StatusOK, types.EdgeReceipt{EdgeMeta: types.EdgeMeta{Type: s.typ, Name: s.local}})
+}
+
+// ---- Conversations ---------------------------------------------------------
+// A conversation is a memory-domain view grouping an owner's objects. Read-only;
+// enumeration requires owner==signer (RequireOwnerForList), point-get resolves the
+// owner (ResolveOwnerForList) — same authz as objects.
+
+// GET /v1/conversations?owner=&bucket=&offset=&limit= — list an owner's conversation
+// ids (the raw prefixes, same as the legacy /api/conversation without id).
+func (s *Server) v1ListConversations(c *gin.Context) {
+	owner, ok := RequireOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	length, _ := strconv.Atoi(c.Query("length"))
+	if length == 0 {
+		length = 1024
+	}
+	res, err := s.listConversation(owner, c.Query("bucket"), offset, length)
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"conversations": res})
+}
+
+// GET /v1/conversations/{id}?owner=&bucket= — the raw records under {id} in write
+// order (same as legacy /api/conversation with id; each record = a stored payload).
+func (s *Server) v1GetConversation(c *gin.Context) {
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	length, _ := strconv.Atoi(c.Query("length"))
+	if length == 0 {
+		length = 1024
+	}
+	res, err := s.getConversation(c.Request.Context(), c.Param("id"), owner, c.Query("bucket"), offset, length)
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"conversation": c.Param("id"), "messages": res})
 }
 
 // ---- bucket lookup helper (direct gdb; kind normalized) --------------------
@@ -195,16 +283,37 @@ func (s *Server) v1ListBuckets(c *gin.Context) {
 	limit := v1Limit(c)
 	kind := c.Query("kind")
 
-	q := s.gdb.Model(&types.Bucket{})
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	filter := func(q *gorm.DB) *gorm.DB {
+		if owner != "" {
+			q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+		}
+		if kind == "memory" {
+			q = q.Where("kind = ? OR kind = '' OR kind IS NULL", kind)
+		} else if kind != "" {
+			q = q.Where("kind = ?", kind)
+		}
+		return q
 	}
-	if kind == "memory" {
-		q = q.Where("kind = ? OR kind = '' OR kind IS NULL", kind)
-	} else if kind != "" {
-		q = q.Where("kind = ?", kind)
+
+	resp := gin.H{}
+	if v1WantTotal(c) {
+		var total int64
+		if err := filter(s.gdb.Model(&types.Bucket{})).Count(&total).Error; err != nil {
+			c.JSON(599, lerror.ToAPIError("hub", err))
+			return
+		}
+		resp["total"] = total
 	}
-	if cur := c.Query("cursor"); cur != "" {
+
+	q := filter(s.gdb.Model(&types.Bucket{}))
+	off, useOffset, err := v1Offset(c)
+	if err != nil {
+		abortWithBadRequest(c, err)
+		return
+	}
+	if useOffset {
+		q = q.Offset(off)
+	} else if cur := c.Query("cursor"); cur != "" {
 		id, err := strconv.ParseUint(cur, 10, 64)
 		if err != nil {
 			abortWithBadRequest(c, fmt.Errorf("invalid cursor"))
@@ -218,10 +327,12 @@ func (s *Server) v1ListBuckets(c *gin.Context) {
 		return
 	}
 	var next string
-	if len(buckets) == limit {
+	if !useOffset && len(buckets) == limit {
 		next = strconv.FormatUint(uint64(buckets[len(buckets)-1].ID), 10)
 	}
-	c.JSON(http.StatusOK, gin.H{"buckets": buckets, "nextCursor": next})
+	resp["buckets"] = buckets
+	resp["nextCursor"] = next
+	c.JSON(http.StatusOK, resp)
 }
 
 // GET /v1/buckets/{bucket}
@@ -338,12 +449,35 @@ func (s *Server) v1ListObjects(c *gin.Context) {
 	limit := v1Limit(c)
 
 	// cursor pagination on the needles table by id (avoids offset walk on 34M rows):
-	// WHERE bucket=? [AND LOWER(owner)=?] [AND id < cursor] ORDER BY id DESC LIMIT n
-	q := s.gdb.Model(&types.Needle{}).Where("bucket = ?", bucket)
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+	// WHERE bucket=? [AND LOWER(owner)=?] [AND id < cursor] ORDER BY id DESC LIMIT n.
+	// Offset + total are opt-in (numbered pager) — see v1Offset/v1WantTotal.
+	filter := func(q *gorm.DB) *gorm.DB {
+		q = q.Where("bucket = ?", bucket)
+		if owner != "" {
+			q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+		}
+		return q
 	}
-	if cur := c.Query("cursor"); cur != "" {
+
+	resp := gin.H{}
+	if v1WantTotal(c) {
+		var total int64
+		if err := filter(s.gdb.Model(&types.Needle{})).Count(&total).Error; err != nil {
+			c.JSON(599, lerror.ToAPIError("hub", err))
+			return
+		}
+		resp["total"] = total
+	}
+
+	q := filter(s.gdb.Model(&types.Needle{}))
+	off, useOffset, err := v1Offset(c)
+	if err != nil {
+		abortWithBadRequest(c, err)
+		return
+	}
+	if useOffset {
+		q = q.Offset(off)
+	} else if cur := c.Query("cursor"); cur != "" {
 		id, err := strconv.ParseUint(cur, 10, 64)
 		if err != nil {
 			abortWithBadRequest(c, fmt.Errorf("invalid cursor"))
@@ -368,10 +502,88 @@ func (s *Server) v1ListObjects(c *gin.Context) {
 		objs = append(objs, receiptFromNeedle(bucket, nd))
 	}
 	var next string
-	if len(needles) == limit {
+	if !useOffset && len(needles) == limit {
 		next = strconv.FormatUint(uint64(needles[len(needles)-1].ID), 10)
 	}
-	c.JSON(http.StatusOK, gin.H{"objects": objs, "nextCursor": next})
+	resp["objects"] = objs
+	resp["nextCursor"] = next
+	c.JSON(http.StatusOK, resp)
+}
+
+// GET /v1/objects?owner=&cursor=&limit= — cross-bucket needle list. Global
+// enumeration (no bucket path param), so it requires an owner-signed request
+// like the other list endpoints: the owner scopes to their own needles, and a
+// reader identity (HUB_READER_ADDRS) may enumerate any/all owners. Backs the
+// explorer's top-level Memory page, which shows recent memory across all agents.
+func (s *Server) v1ListAllObjects(c *gin.Context) {
+	owner, ok := RequireOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
+	limit := v1Limit(c)
+
+	filter := func(q *gorm.DB) *gorm.DB {
+		if owner != "" {
+			q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
+		}
+		return q
+	}
+
+	resp := gin.H{}
+	if v1WantTotal(c) {
+		var total int64
+		if err := filter(s.gdb.Model(&types.Needle{})).Count(&total).Error; err != nil {
+			c.JSON(599, lerror.ToAPIError("hub", err))
+			return
+		}
+		resp["total"] = total
+	}
+
+	q := filter(s.gdb.Model(&types.Needle{}))
+	off, useOffset, err := v1Offset(c)
+	if err != nil {
+		abortWithBadRequest(c, err)
+		return
+	}
+	if useOffset {
+		q = q.Offset(off)
+	} else if cur := c.Query("cursor"); cur != "" {
+		id, err := strconv.ParseUint(cur, 10, 64)
+		if err != nil {
+			abortWithBadRequest(c, fmt.Errorf("invalid cursor"))
+			return
+		}
+		q = q.Where("id < ?", id)
+	}
+	var needles []types.Needle
+	if err := q.Order("id desc").Limit(limit).Find(&needles).Error; err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	vmap := s.volumesFor(needles)
+	objs := make([]v1Receipt, 0, len(needles))
+	for i := range needles {
+		nd := types.NeedleDisplay{
+			CreatedAt: needles[i].CreatedAt,
+			Name:      needles[i].Name,
+			Owner:     needles[i].Owner,
+			Bucket:    needles[i].Bucket,
+			Size:      needles[i].Size,
+		}
+		if v, ok := vmap[volKey(needles[i].Owner, needles[i].File)]; ok {
+			nd.Piece = v.Piece
+			nd.TxHash = v.TxHash
+			nd.ChainType = v.ChainType
+		}
+		objs = append(objs, receiptFromNeedle(needles[i].Bucket, nd))
+	}
+	var next string
+	if !useOffset && len(needles) == limit {
+		next = strconv.FormatUint(uint64(needles[len(needles)-1].ID), 10)
+	}
+	resp["objects"] = objs
+	resp["nextCursor"] = next
+	c.JSON(http.StatusOK, resp)
 }
 
 // GET /v1/buckets/{bucket}/objects/{key}
@@ -410,6 +622,25 @@ func (s *Server) v1GetObjectContent(c *gin.Context) {
 		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", err))
 		return
 	}
+	c.Data(http.StatusOK, "application/octet-stream", []byte(w.String()))
+}
+
+// GET /v1/pieces/{name}/content — download a committed DA piece by its
+// content-id (da_cid). Unlike object content (logfs by key), this resolves the
+// piece off the DA network (GetPieceReceipt → DownloadPiece) via the shared
+// download() helper — the cold-tier read path (seal'd segments) needs this.
+func (s *Server) v1GetPieceContent(c *gin.Context) {
+	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
+	if !ok {
+		return
+	}
+	var w strings.Builder
+	size, err := s.download(c.Request.Context(), c.Param("name"), owner, &w)
+	if err != nil {
+		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", err))
+		return
+	}
+	_ = size
 	c.Data(http.StatusOK, "application/octet-stream", []byte(w.String()))
 }
 

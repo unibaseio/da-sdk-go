@@ -132,7 +132,7 @@ func DownloadReplicaOrigin(baseUrl string, auth types.Auth, name string) ([]byte
 	logger.Debug("download replica: ", name, " at:", baseUrl)
 	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Minute)
 	defer cancle()
-	resByte, err := doRequest(ctx, baseUrl, "/api/download", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequest(ctx, baseUrl, "/v1/download", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func DownloadReplicaFromStream(baseUrl string, auth types.Auth, name string, add
 		logger.Debug("download replica: ", name, " via stream: ", er.Name, " at: ", er.ExposeURL)
 		ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Minute)
 		defer cancle()
-		resByte, err := doRequest(ctx, er.ExposeURL, "/api/download", "", auth, strings.NewReader(form.Encode()))
+		resByte, err := doRequest(ctx, er.ExposeURL, "/v1/download", "", auth, strings.NewReader(form.Encode()))
 		if err != nil {
 			continue
 		}

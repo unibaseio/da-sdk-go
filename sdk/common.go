@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -411,7 +412,9 @@ func doRequest(ctx context.Context, baseUrl, method, ctype string, au types.Auth
 	}
 	bar.Finish()
 
-	if resp.StatusCode != 200 {
+	// Accept any 2xx — the clean /v1 writes use proper REST codes (POST /v1/files
+	// and /v1/edges return 201 Created), not just 200.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("response: %s, msg: %s", resp.Status, res)
 	}
 
@@ -462,11 +465,48 @@ func Get(ctx context.Context, baseUrl string) ([]byte, error) {
 	}
 	bar.Finish()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("response: %s, msg: %s", resp.Status, res)
 	}
 
 	return res, nil
+}
+
+// unwrapItems decodes a clean /v1 list envelope {"items":[...],...} into out.
+// The /v1 list endpoints (gateway + nodes) all return this uniform envelope
+// instead of the legacy per-type keys (Pieces/Edges/Files/…); SDK list helpers
+// keep their existing return structs by unwrapping items into the inner slice,
+// so callers (el.Edges, lr.Pieces, …) are unchanged.
+func unwrapItems(resByte []byte, out any) error {
+	var env struct {
+		Items json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(resByte, &env); err != nil {
+		return err
+	}
+	if len(env.Items) == 0 {
+		return nil
+	}
+	return json.Unmarshal(env.Items, out)
+}
+
+// v1URL joins baseUrl + path and appends ?chain= when a chain type is set, so
+// the public GET reads select the chain the same way the legacy ?chaintype did.
+func v1URL(baseUrl, path string) string {
+	u := baseUrl + path
+	if chaintype != "" {
+		u += "?chain=" + url.QueryEscape(chaintype)
+	}
+	return u
+}
+
+// andSep returns the query separator to append another param to u: "&" when u
+// already carries a query string, "?" otherwise.
+func andSep(u string) string {
+	if strings.Contains(u, "?") {
+		return "&"
+	}
+	return "?"
 }
 
 func Disorder(array []types.EdgeReceipt) {

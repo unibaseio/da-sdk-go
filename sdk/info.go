@@ -14,7 +14,7 @@ import (
 
 func Info(baseUrl string) (types.EdgeReceipt, error) {
 	res := types.EdgeReceipt{}
-	resp, err := http.Get(baseUrl + "/api/info")
+	resp, err := http.Get(baseUrl + "/v1/info")
 	if err != nil {
 		return res, err
 	}
@@ -39,9 +39,9 @@ func Info(baseUrl string) (types.EdgeReceipt, error) {
 
 func Login(baseUrl string, auth types.Auth) error {
 	form := url.Values{}
-	form.Set("chaintype", chaintype)
+	form.Set("chain", chaintype)
 
-	_, err := doRequest(context.TODO(), baseUrl, "/api/login", "", auth, strings.NewReader(form.Encode()))
+	_, err := doRequest(context.TODO(), baseUrl, "/v1/login", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}

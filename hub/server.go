@@ -107,6 +107,10 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	logger.Infof("hub %s starting...", localAddr)
 
 	router := gin.Default()
+	// Allow %2F-encoded slashes in /v1 path params (object keys / resource names
+	// can contain "/"). Match on the raw path, decode the param value back.
+	router.UseRawPath = true
+	router.UnescapePathValues = true
 
 	auth, err := rp.Key().BuildAuth([]byte("hub"))
 	if err != nil {
@@ -203,41 +207,11 @@ func (s *Server) registRoute() {
 
 	s.Router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
-	// Public, read-only /api group: body-size cap + per-IP rate limit, but NO
-	// Authorization required — these endpoints are browsable like a block
-	// explorer. Stored content is client-encrypted, so listing/downloading
-	// exposes only ciphertext plus metadata. The per-IP limit (generous by
-	// default) throttles a single abusive host without blocking the shared
-	// explorer reverse-proxy IP; the download negative cache is the primary
-	// flood absorber.
-	pub := s.Router.Group("/api")
-	pub.Use(MaxBodySize())
-	pub.Use(RateLimit())
-
-	s.addInfo(pub)
-	s.addDownload(pub)
-	s.addList(pub)
-	s.addConversation(pub)
-	s.addStat(pub)
-
-	// Mutating /api group: body-size cap → auth → rate limit. AuthMiddleware
-	// requires a valid signed Authorization header, and each handler further
-	// enforces owner == signer (RequireOwnerMatch).
-	authed := s.Router.Group("/api")
-	authed.Use(MaxBodySize())
-	authed.Use(AuthMiddleware())
-	authed.Use(RateLimit())
-
-	if s.readonly {
-		// reader replicas must not write locally — reject writes (ALB routes writes to the primary).
-		s.addUploadReadonly(authed)
-	} else {
-		s.addUpload(authed)
-		s.addSeal(authed) // seal is a write path (Upload + AddPiece)
-	}
-
-	// /v1 — resource-oriented wallet-native façade over the same Server (see v1.go).
-	// Old /api/* above is untouched.
+	// Single clean, resource-oriented /v1 surface (no legacy /api) — same as the
+	// gateway + nodes. Public reads + signed writes; content is client-encrypted,
+	// so browsable reads expose only ciphertext + metadata. Object CRUD is S3-shaped
+	// (buckets/objects); info/conversations are resources; seal is a /v1 operation.
+	// See GATEWAY_API_V1_SPEC.md (Hub §) + v1.go.
 	s.registV1()
 }
 

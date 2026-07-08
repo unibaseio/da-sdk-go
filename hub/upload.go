@@ -2,23 +2,18 @@ package hub
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
 	"github.com/unibaseio/da-sdk-go/lib/env"
@@ -481,6 +476,75 @@ func (s *Server) getLFS(addr string) *logfs.LogFS {
 	return s.lfs[addr]
 }
 
+var (
+	alreadyHasPieceRe   = regexp.MustCompile(`already has piece: ([0-9a-fA-F]+)`)
+	alreadyHasReplicaRe = regexp.MustCompile(`already has replica: ([0-9a-fA-F]+)`)
+)
+
+// parseAlreadyHasPiece pulls the piece name out of a stream "already has piece: <hex>"
+// error (returns "" for anything else).
+func parseAlreadyHasPiece(msg string) string {
+	if m := alreadyHasPieceRe.FindStringSubmatch(msg); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// parseAlreadyHasReplica pulls the replica name out of "already has replica: <hex>".
+func parseAlreadyHasReplica(msg string) string {
+	if m := alreadyHasReplicaRe.FindStringSubmatch(msg); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// pieceOfReplica resolves a staged replica name to the piece it belongs to, by
+// asking a stream for the replica receipt (which carries .Piece). "" if unknown.
+func (s *Server) pieceOfReplica(au types.Auth, rn string) string {
+	er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
+	if err != nil {
+		return ""
+	}
+	for _, st := range er.Edges {
+		if rr, err := sdk.GetReplicaReceipt(st.ExposeURL, au, rn); err == nil && rr.Piece != "" {
+			return rr.Piece
+		}
+	}
+	return ""
+}
+
+// recoverStagedPiece registers an already-staged piece on-chain (if not yet) and
+// records its volume, so a vol whose earlier AddPiece failed still commits instead
+// of being stuck "staged" forever. Mirrors the path-1 (GetFileReceipt) recovery,
+// but keyed by the piece name from the "already has piece" error. Returns true when
+// the vol is committed (or already on-chain) so the caller advances the offset.
+func (s *Server) recoverStagedPiece(cm *contract.ContractManage, au types.Auth, key string, i uint64, pn string) bool {
+	er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
+	if err != nil {
+		return false
+	}
+	for _, st := range er.Edges {
+		pr, err := sdk.GetPieceReceipt(st.ExposeURL, au, pn)
+		if err != nil || pr.Name == "" {
+			continue
+		}
+		if pr.Serial == 0 {
+			txn, err := cm.AddPiece(pr.PieceCore)
+			if err != nil {
+				logger.Warnf("recover staged piece %s: AddPiece failed: %v", pn, err)
+				return false
+			}
+			s.addVolume(key, i, pr.Name, txn)
+			logger.Infof("recovered staged piece %s -> on-chain (tx %s)", pn, txn)
+		} else {
+			s.addVolume(key, i, pr.Name, "")
+			logger.Infof("recovered staged piece %s (already on-chain, serial %d)", pn, pr.Serial)
+		}
+		return true
+	}
+	return false
+}
+
 // drainInstance uploads + commits one owner's (log instance idx) pending
 // volumes in order, advancing that owner's offset as each volume lands. Encode
 // (CPU) and AddPiece (chain) of different owners overlap because drainInstance
@@ -577,22 +641,26 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		// upload to stream and submit to gateway
 		res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fp, fname)
 		if err != nil {
-			if strings.Contains(err.Error(), "already has piece") {
-				// The volume's data was staged on this stream by an earlier
-				// attempt whose UploadFileMeta/AddPiece never landed (e.g. a
-				// gateway restart mid-flight). sdk.Upload bails before the
-				// meta step, so without recovery this volume wedges the drain
-				// forever: GetFileReceipt misses -> re-upload -> dup -> skip,
-				// with the persisted offset never advancing.
-				if s.recoverStagedVolume(cm, au, policy, key, i, fp, fname, streamer, err) {
-					buf := make([]byte, 8)
-					binary.BigEndian.PutUint64(buf, i+1)
-					s.rp.MetaStore().Put(dsKey, buf)
-				} else {
-					logger.Warnf("piece of file %s staged but not recoverable yet, skip", fp)
+			// The piece is already staged on a stream from a prior attempt whose
+			// on-chain AddPiece never completed (hub briefly out of gas, or a
+			// concurrent drain pass double-uploaded this slow-encoding vol). Recover:
+			// register that staged piece on-chain if it isn't yet, record the volume,
+			// and advance. The old code just skipped (piece) or broke (replica) → the
+			// vol stayed staged-but-uncommitted forever. "already has replica" carries
+			// a replica name, so resolve it to its piece first.
+			pn := parseAlreadyHasPiece(err.Error())
+			if pn == "" {
+				if rn := parseAlreadyHasReplica(err.Error()); rn != "" {
+					pn = s.pieceOfReplica(au, rn)
 				}
+			}
+			if pn != "" && s.recoverStagedPiece(cm, au, key, i, pn) {
+				buf := make([]byte, 8)
+				binary.BigEndian.PutUint64(buf, i+1)
+				s.rp.MetaStore().Put(dsKey, buf)
 				continue
 			}
+			logger.Warnf("drain %s vol %d: %v", key, i, err)
 			break
 		}
 		pcs, err := sdk.CheckFileFull(res, streamer, fp)
@@ -618,80 +686,4 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		binary.BigEndian.PutUint64(buf, i+1)
 		s.rp.MetaStore().Put(dsKey, buf)
 	}
-}
-
-// pieceNameRe matches a piece commitment (bls12-377 G1, 48 bytes -> 96 hex
-// chars) inside the stream's "already has piece: <name>" error text.
-var pieceNameRe = regexp.MustCompile(`[0-9a-f]{96}`)
-
-// recoverStagedVolume completes a volume whose data is already staged on a
-// stream but whose gateway file-meta / on-chain AddPiece never landed. It
-// fetches the piece receipt from the stream that reported the duplicate,
-// registers the piece on chain if needed, and backfills UploadFileMeta so the
-// next drain pass (and downloads by volume name) resolve normally. Returns
-// true when the volume is fully recovered and the offset may advance.
-func (s *Server) recoverStagedVolume(cm *contract.ContractManage, au types.Auth, policy types.Policy, key string, i uint64, fp, fname string, streamer common.Address, uerr error) bool {
-	pieceName := pieceNameRe.FindString(uerr.Error())
-	if pieceName == "" {
-		return false
-	}
-
-	er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
-	if err != nil {
-		return false
-	}
-	exposeURL := ""
-	for _, st := range er.Edges {
-		if st.Name == streamer {
-			exposeURL = st.ExposeURL
-			break
-		}
-	}
-	if exposeURL == "" {
-		return false
-	}
-
-	pr, err := sdk.GetPieceReceipt(exposeURL, au, pieceName)
-	if err != nil {
-		return false
-	}
-
-	if pr.Serial == 0 {
-		txn, err := cm.AddPiece(pr.PieceCore)
-		if err != nil {
-			logger.Warnf("recover %s: AddPiece failed: %v", fname, err)
-			return false
-		}
-		s.addVolume(key, i, pr.Name, txn)
-	}
-
-	// Backfill the gateway file-meta so GetFileReceipt(fname) hits from now on.
-	f, err := os.Open(fp)
-	if err != nil {
-		return false
-	}
-	h := sha256.New()
-	sz, err := io.Copy(h, f)
-	f.Close()
-	if err != nil {
-		return false
-	}
-	fr := types.FileReceipt{
-		FileCore: types.FileCore{
-			Policy:   policy,
-			Name:     fname,
-			Hash:     hex.EncodeToString(h.Sum(nil)),
-			Size:     sz,
-			Owner:    s.local,
-			Creation: time.Now(),
-		},
-		ChainType: s.rp.Repo().Config().Chain.Type,
-		Pieces:    []string{pieceName},
-	}
-	if err := sdk.UploadFileMeta(sdk.ServerURL, au, fr); err != nil {
-		logger.Warnf("recover %s: UploadFileMeta failed: %v", fname, err)
-		return false
-	}
-	logger.Infof("recovered staged volume %s (piece %s)", fname, pieceName)
-	return true
 }
