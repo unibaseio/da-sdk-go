@@ -15,7 +15,7 @@ import (
 // withTotal option. The needles table is tens of millions of rows, so an exact
 // count costs seconds on Postgres; pagers tolerate a slightly stale total.
 //
-// TTL via HUB_TOTAL_CACHE_SEC (default 60; 0 disables caching). Lookups within
+// TTL via HUB_TOTAL_CACHE_SEC (default 3600 = 1h; 0 disables caching). Lookups within
 // the TTL are served from memory; the first lookup after expiry recomputes it,
 // deduplicated by singleflight so a burst of first-page loads runs ONE count.
 // On recompute error a stale value keeps being served rather than failing the
@@ -34,7 +34,7 @@ type totalEntry struct {
 func newTotalCache() *totalCache { return &totalCache{m: make(map[string]totalEntry)} }
 
 func totalCacheTTL() time.Duration {
-	return time.Duration(env.Int64("HUB_TOTAL_CACHE_SEC", 60)) * time.Second
+	return time.Duration(env.Int64("HUB_TOTAL_CACHE_SEC", 3600)) * time.Second
 }
 
 func (t *totalCache) get(key string, count func() (int64, error)) (int64, error) {
