@@ -297,8 +297,8 @@ func (s *Server) v1ListBuckets(c *gin.Context) {
 
 	resp := gin.H{}
 	if v1WantTotal(c) {
-		var total int64
-		if err := filter(s.gdb.Model(&types.Bucket{})).Count(&total).Error; err != nil {
+		total, err := s.cachedCount("buckets|"+strings.ToLower(owner)+"|"+kind, &types.Bucket{}, filter)
+		if err != nil {
 			c.JSON(599, lerror.ToAPIError("hub", err))
 			return
 		}
@@ -461,8 +461,8 @@ func (s *Server) v1ListObjects(c *gin.Context) {
 
 	resp := gin.H{}
 	if v1WantTotal(c) {
-		var total int64
-		if err := filter(s.gdb.Model(&types.Needle{})).Count(&total).Error; err != nil {
+		total, err := s.cachedCount("needles|"+strings.ToLower(owner)+"|"+bucket, &types.Needle{}, filter)
+		if err != nil {
 			c.JSON(599, lerror.ToAPIError("hub", err))
 			return
 		}
@@ -531,8 +531,8 @@ func (s *Server) v1ListAllObjects(c *gin.Context) {
 
 	resp := gin.H{}
 	if v1WantTotal(c) {
-		var total int64
-		if err := filter(s.gdb.Model(&types.Needle{})).Count(&total).Error; err != nil {
+		total, err := s.cachedCount("needles|"+strings.ToLower(owner)+"|", &types.Needle{}, filter)
+		if err != nil {
 			c.JSON(599, lerror.ToAPIError("hub", err))
 			return
 		}

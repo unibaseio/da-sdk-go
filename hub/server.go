@@ -81,6 +81,9 @@ type Server struct {
 	// cached per-owner memory stats, recomputed in the background
 	memStat *memStatCache
 
+	// cached grand totals for /v1 list withTotal (COUNT over 34M+ rows)
+	totals *totalCache
+
 	// readonly = a reader replica (HUB_READONLY): shares the index DB but does not
 	// own local writes — skips upload routes, chain submitter, writer loop, DDL.
 	readonly bool
@@ -131,6 +134,7 @@ func NewServer(rp repo.Repo) (*Server, error) {
 
 		missCache: newMissCache(),
 		memStat:   &memStatCache{},
+		totals:    newTotalCache(),
 
 		readonly: os.Getenv("HUB_READONLY") != "",
 
@@ -176,6 +180,9 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	if !s.readonly {
 		s.startMemStats(context.Background())
 	}
+
+	// keep the hot global totals warm (needles/buckets grand counts)
+	s.startTotalRefresh(context.Background())
 
 	s.registRoute()
 
