@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 )
 
 // fdCache is a bounded, reference-counted cache of read-only volume fds so
@@ -24,10 +25,21 @@ type fdCache struct {
 	m       map[uint64]*fdEntry
 	max     int
 	basedir string
+
+	hits   atomic.Int64 // acquire served from a cached fd
+	misses atomic.Int64 // acquire had to open() (incl. disabled cache)
 }
 
 func newFdCache(basedir string, max int) *fdCache {
 	return &fdCache{m: make(map[uint64]*fdEntry), max: max, basedir: basedir}
+}
+
+// Stats reports fd-cache effectiveness (reused fds vs opens).
+func (c *fdCache) Stats() (hits, misses int64) {
+	if c == nil {
+		return 0, 0
+	}
+	return c.hits.Load(), c.misses.Load()
 }
 
 func (c *fdCache) path(idx uint64) string {
@@ -38,6 +50,9 @@ func (c *fdCache) path(idx uint64) string {
 // MUST be called (typically deferred); the fd must not be used after release.
 func (c *fdCache) acquire(idx uint64) (*os.File, func(), error) {
 	if c == nil || c.max <= 0 {
+		if c != nil {
+			c.misses.Add(1)
+		}
 		f, err := os.OpenFile(c.path(idx), os.O_RDONLY, os.ModePerm)
 		if err != nil {
 			return nil, nil, err
@@ -49,8 +64,10 @@ func (c *fdCache) acquire(idx uint64) (*os.File, func(), error) {
 	if e, ok := c.m[idx]; ok {
 		e.refs++
 		c.mu.Unlock()
+		c.hits.Add(1)
 		return e.f, func() { c.release(idx) }, nil
 	}
+	c.misses.Add(1)
 	// evict one unreferenced entry if at capacity (close outside the lock)
 	var toClose *os.File
 	if len(c.m) >= c.max {

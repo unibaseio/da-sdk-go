@@ -23,6 +23,7 @@ import (
 //     LOGINST registry; returns an error for unknown owners.
 func (s *Server) getFS(addr string, create bool) (*logfs.LogFS, error) {
 	if v, ok := s.lfs.Load(addr); ok {
+		s.fsHit.Add(1)
 		return v.(*logfs.LogFS), nil
 	}
 
@@ -30,6 +31,7 @@ func (s *Server) getFS(addr string, create bool) (*logfs.LogFS, error) {
 		// Re-check: another goroutine may have created it between the fast-path
 		// miss and acquiring the singleflight slot.
 		if v, ok := s.lfs.Load(addr); ok {
+			s.fsHit.Add(1)
 			return v, nil
 		}
 
@@ -45,6 +47,7 @@ func (s *Server) getFS(addr string, create bool) (*logfs.LogFS, error) {
 		if nerr != nil {
 			return nil, nerr
 		}
+		s.fsCreate.Add(1)
 
 		if create {
 			// account bookkeeping is idempotent; matches the old write path which

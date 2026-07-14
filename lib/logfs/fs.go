@@ -354,6 +354,12 @@ func (sf *LogFS) GetData(lm *LogMeta, opts ...int) ([]byte, error) {
 	return res, nil
 }
 
+// FdStats exposes this owner's read fd-cache effectiveness (reused fds vs opens)
+// so the hub can aggregate observability across all owners. Zero when disabled.
+func (sf *LogFS) FdStats() (hits, misses int64) {
+	return sf.fdc.Stats()
+}
+
 func (sf *LogFS) Has(key []byte) (bool, error) {
 	return false, nil
 }

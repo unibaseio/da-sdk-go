@@ -141,6 +141,7 @@ func (s *Server) registV1() {
 	pub.GET("/conversations", s.v1ListConversations)
 	pub.GET("/conversations/:id", s.v1GetConversation)
 	pub.GET("/stats", s.v1Stats)
+	pub.GET("/cachestats", s.v1CacheStats)
 	pub.GET("/overview", s.v1Overview)
 	pub.GET("/owners/:owner", s.v1GetOwner)
 

@@ -67,3 +67,26 @@ func TestFdCacheDisabled(t *testing.T) {
 	}
 	release() // closes the transient fd
 }
+
+// TestFdCacheStats: first acquire of a volume is a miss (open), subsequent
+// acquires of the same cached volume are hits (fd reuse).
+func TestFdCacheStats(t *testing.T) {
+	dir := t.TempDir()
+	touchVol(t, dir, 0)
+	c := newFdCache(dir, 4)
+
+	for i := 0; i < 5; i++ {
+		_, release, err := c.acquire(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+	}
+	hits, misses := c.Stats()
+	if misses != 1 {
+		t.Fatalf("want 1 miss (first open), got %d", misses)
+	}
+	if hits != 4 {
+		t.Fatalf("want 4 hits (reuse), got %d", hits)
+	}
+}

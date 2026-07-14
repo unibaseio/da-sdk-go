@@ -87,7 +87,19 @@ func (s *Server) download(ctx context.Context, name, owner string, w io.Writer) 
 	// requests for the same object trigger one fetch, shared to all. The result
 	// is buffered (as downloadByGET already does) and populated into the hot read
 	// cache; large objects are excluded by the cache's own size guard.
-	v, err, _ := s.dlSF.Do(missKey(owner, name), func() (interface{}, error) {
+	s.dlTotal.Add(1)
+	v, err, shared := s.dlSF.Do(missKey(owner, name), func() (interface{}, error) {
+		// Optionally cap concurrent distinct-key reconstructs (HUB_DOWNLOAD_CONCURRENCY);
+		// nil semaphore = unlimited. Only the flight leader acquires — sharers ride
+		// its result — so the bound counts real DA fetches, not waiters.
+		if s.dlSem != nil {
+			select {
+			case s.dlSem <- struct{}{}:
+				defer func() { <-s.dlSem }()
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		var buf bytes.Buffer
 		if derr := s.downloadRemote(ctx, name, owner, &buf); derr != nil {
 			return nil, derr
@@ -96,6 +108,9 @@ func (s *Server) download(ctx context.Context, name, owner string, w io.Writer) 
 		s.readCache.put(owner, name, b)
 		return b, nil
 	})
+	if shared {
+		s.dlShared.Add(1)
+	}
 	if err != nil {
 		return 0, err
 	}

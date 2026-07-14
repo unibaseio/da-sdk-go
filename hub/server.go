@@ -6,10 +6,12 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
 	"github.com/unibaseio/da-sdk-go/docs"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/piece"
@@ -67,6 +69,10 @@ type Server struct {
 	fscnt   uint32 // number of registered owners (LOGINST count)
 	fscntMu sync.Mutex
 
+	// getFS observability: lock-free map hits vs on-demand logfs.New creations.
+	fsHit    atomic.Int64
+	fsCreate atomic.Int64
+
 	local common.Address
 
 	auth types.Auth
@@ -85,6 +91,12 @@ type Server struct {
 	// dedupes concurrent DA-download fallbacks for the same (owner,name) so a
 	// cold-but-existing key is reconstructed once, not once per request.
 	dlSF singleflight.Group
+	// dlSem bounds concurrent DA reconstructs (HUB_DOWNLOAD_CONCURRENCY>0);
+	// nil = unlimited = historical behavior. dlTotal/dlShared count fallbacks
+	// and how many were served by an in-flight flight (singleflight coalescing).
+	dlSem    chan struct{}
+	dlTotal  atomic.Int64
+	dlShared atomic.Int64
 
 	// lazily-built chain client for the /api/seal path (hub-signed AddPiece)
 	cmMu sync.Mutex
@@ -149,6 +161,13 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		shutdownChan:   make(chan struct{}),
 		checkpointStop: make(chan struct{}),
 		uploadNotify:   make(chan struct{}, 1),
+	}
+
+	// Optional cap on concurrent DA reconstructs (expensive K-of-N fetches).
+	// Default 0 = unlimited = historical behavior; singleflight already collapses
+	// same-key floods, this bounds distinct-key fan-out under a read storm.
+	if n := env.Int("HUB_DOWNLOAD_CONCURRENCY", 0); n > 0 {
+		s.dlSem = make(chan struct{}, n)
 	}
 
 	if s.readonly {
