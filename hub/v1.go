@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -739,24 +738,10 @@ func (s *Server) objectMeta(addr, key string) (*logfs.LogMeta, error) {
 	if s.rp == nil {
 		return nil, fmt.Errorf("no repo")
 	}
-	s.Lock()
-	fs, ok := s.lfs[addr]
-	if !ok {
-		dsKey := types.NewKey(types.DsLogFS, LOGINST, addr)
-		if has, err := s.rp.MetaStore().Has(dsKey); err == nil && has {
-			nfs, err := logfs.New(s.rp.MetaStore(), filepath.Join(s.rp.Path(), LOGFS), s.local.String(), addr)
-			if err != nil {
-				s.Unlock()
-				return nil, err
-			}
-			s.lfs[addr] = nfs
-			fs = nfs
-		} else {
-			s.Unlock()
-			return nil, fmt.Errorf("no such owner: %s", addr)
-		}
+	fs, err := s.getFS(addr, false)
+	if err != nil {
+		return nil, err
 	}
-	s.Unlock()
 	return fs.GetMeta([]byte(key))
 }
 

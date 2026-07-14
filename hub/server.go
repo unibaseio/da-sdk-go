@@ -24,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
 
@@ -58,9 +59,13 @@ type Server struct {
 
 	ps types.IPieceStore
 
-	sync.RWMutex
-	fscnt uint32
-	lfs   map[string]*logfs.LogFS
+	// per-owner LogFS instances. Lookups are lock-free (sync.Map); creation is
+	// deduplicated per-owner by fsSF so logfs.New never runs under a global lock
+	// (a new owner no longer serializes unrelated owners). See fsmanager.go.
+	lfs     sync.Map // addr(string) -> *logfs.LogFS
+	fsSF    singleflight.Group
+	fscnt   uint32 // number of registered owners (LOGINST count)
+	fscntMu sync.Mutex
 
 	local common.Address
 
@@ -127,7 +132,6 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		auth:  auth,
 
 		bucketDisplay: make(map[string]types.BucketDisplay),
-		lfs:           make(map[string]*logfs.LogFS),
 
 		missCache: newMissCache(),
 		memStat:   &memStatCache{},
@@ -246,14 +250,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	// Close all LogFS instances
-	s.Lock()
-	for addr, lfs := range s.lfs {
+	s.lfs.Range(func(k, v any) bool {
+		addr := k.(string)
+		lfs := v.(*logfs.LogFS)
 		logger.Infof("closing LogFS for address: %s", addr)
 		if err := lfs.Close(); err != nil {
 			logger.Errorf("failed to close LogFS for %s: %v", addr, err)
 		}
-	}
-	s.Unlock()
+		return true
+	})
 
 	// Persist database data
 	if s.gdb != nil {
