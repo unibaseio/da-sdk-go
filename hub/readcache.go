@@ -3,6 +3,7 @@ package hub
 import (
 	"container/list"
 	"sync"
+	"sync/atomic"
 
 	"github.com/unibaseio/da-sdk-go/lib/env"
 )
@@ -27,6 +28,17 @@ type readCache struct {
 	curBytes int64
 	maxBytes int64
 	maxItem  int64
+
+	hits   atomic.Int64
+	misses atomic.Int64
+}
+
+// Stats reports cache effectiveness (hits, misses) for observability.
+func (c *readCache) Stats() (hits, misses int64) {
+	if c == nil {
+		return 0, 0
+	}
+	return c.hits.Load(), c.misses.Load()
 }
 
 const (
@@ -58,8 +70,10 @@ func (c *readCache) get(owner, name string) ([]byte, bool) {
 	defer c.mu.Unlock()
 	if el, ok := c.m[k]; ok {
 		c.ll.MoveToFront(el)
+		c.hits.Add(1)
 		return el.Value.(*rcEntry).val, true
 	}
+	c.misses.Add(1)
 	return nil, false
 }
 

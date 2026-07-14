@@ -24,6 +24,46 @@ func newTestFS(t *testing.T) *LogFS {
 	return fs
 }
 
+// TestGroupFsyncConcurrent: group-commit fsync loop must not race concurrent
+// writes/rolls, and all data must remain correct.
+func TestGroupFsyncConcurrent(t *testing.T) {
+	t.Setenv("LOGFS_FSYNC", "group")
+	t.Setenv("LOGFS_FSYNC_INTERVAL_MS", "3") // aggressive tick to overlap writes/rolls
+	old := MaxSize
+	MaxSize = 4096
+	defer func() { MaxSize = old }()
+
+	fs := newTestFS(t)
+	defer fs.Close()
+	if !fs.fsyncGroup {
+		t.Fatal("group fsync should be enabled")
+	}
+
+	const n = 300
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := []byte(fmt.Sprintf("fs-%05d", i))
+			if err := fs.Put(key, bytes.Repeat([]byte{byte(i)}, 200)); err != nil {
+				t.Errorf("put %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		got, err := fs.Get([]byte(fmt.Sprintf("fs-%05d", i)))
+		if err != nil {
+			t.Fatalf("get %d: %v", i, err)
+		}
+		if !bytes.Equal(got, bytes.Repeat([]byte{byte(i)}, 200)) {
+			t.Fatalf("mismatch %d", i)
+		}
+	}
+}
+
 // TestConcurrentPutSameOwner: many concurrent Put on one owner (the intra-owner
 // path that T2 unblocked) — every object must round-trip intact, proving offset
 // reservations don't overlap and writes-outside-the-lock are safe.

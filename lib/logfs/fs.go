@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alecthomas/units"
@@ -68,6 +69,15 @@ type LogFS struct {
 	// it before closing the fd. Swapped for a fresh one on each roll.
 	wg  *sync.WaitGroup
 	fdc *fdCache // read-only volume fd cache (GetData); nil-safe
+
+	// group-commit fsync (LOGFS_FSYNC=group). Default off keeps the historical
+	// no-fsync behavior (acked writes may be lost on power loss). When on, a
+	// background loop fsyncs the current volume on an interval, and forward()
+	// fsyncs before closing — bounding the loss window without an fsync per write.
+	fsyncGroup bool
+	dirty      atomic.Bool // writes since the last sync (group mode only)
+	stopSync   chan struct{}
+	stopOnce   sync.Once
 }
 
 // todo: each one has its own maxsize
@@ -112,8 +122,40 @@ func New(ds types.IKVStore, dir string, local, addr string) (*LogFS, error) {
 		sf.openedAt = time.Now()
 	}
 
+	if env.Str("LOGFS_FSYNC", "off") == "group" {
+		sf.fsyncGroup = true
+		sf.stopSync = make(chan struct{})
+		go sf.syncLoop(time.Duration(env.Int("LOGFS_FSYNC_INTERVAL_MS", 200))*time.Millisecond, sf.stopSync)
+		logger.Infof("logfs %s group-commit fsync enabled", addr)
+	}
+
 	logger.Infof("logfs started at: %s %d %d", dir, sf.curIndex, sf.curSize)
 	return sf, nil
+}
+
+// syncLoop group-commits the current volume: on each tick, if there have been
+// writes since the last sync, fsync the current volume fd once. Errors are
+// ignored (e.g. the fd was just rolled+closed by forward, which already synced).
+func (sf *LogFS) syncLoop(interval time.Duration, stop <-chan struct{}) {
+	if interval <= 0 {
+		interval = 200 * time.Millisecond
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			if !sf.dirty.Swap(false) {
+				continue
+			}
+			sf.RLock()
+			fi := sf.curFi
+			sf.RUnlock()
+			_ = fi.Sync()
+		}
+	}
 }
 
 func GetIndex(local, addr string) uint64 {
@@ -133,6 +175,10 @@ func (sf *LogFS) forward() error {
 	sf.wg.Wait()          // let in-flight writes on the current volume finish
 	sf.wg = &sync.WaitGroup{}
 
+	if sf.fsyncGroup {
+		_ = sf.curFi.Sync() // durably flush the completed volume before closing
+		sf.dirty.Store(false)
+	}
 	err := sf.curFi.Close()
 	if err != nil {
 		return err
@@ -250,7 +296,13 @@ func (sf *LogFS) Put(key, val []byte) error {
 		return err
 	}
 	// data-before-index: only now is the object safely indexed.
-	return sf.ds.Put(dskey, lmv)
+	if err := sf.ds.Put(dskey, lmv); err != nil {
+		return err
+	}
+	if sf.fsyncGroup {
+		sf.dirty.Store(true) // group-commit loop will fsync this volume
+	}
+	return nil
 }
 
 func (sf *LogFS) Get(key []byte, opts ...int) ([]byte, error) {
@@ -316,9 +368,15 @@ func (sf *LogFS) Size() types.DiskStats {
 }
 
 func (sf *LogFS) Close() error {
+	if sf.stopSync != nil {
+		sf.stopOnce.Do(func() { close(sf.stopSync) })
+	}
 	sf.Lock()
 	defer sf.Unlock()
 	sf.wg.Wait() // let in-flight writes finish before closing the fd
+	if sf.fsyncGroup {
+		_ = sf.curFi.Sync()
+	}
 	sf.fdc.closeAll()
 	return sf.curFi.Close()
 }
