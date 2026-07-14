@@ -48,6 +48,12 @@ func (lm *LogMeta) Deserialize(b []byte) error {
 }
 
 type LogFS struct {
+	// mu guards the offset-reservation critical section only (curSize/curIndex/
+	// curFi/full). The actual WriteAt + KV index Put happen OUTSIDE it, so writes
+	// to distinct reserved offsets on one owner proceed concurrently (POSIX
+	// pwrite is safe at distinct offsets). Crash-consistency: data is written
+	// before its index, so a crash leaves at worst orphan bytes (reclaimable
+	// space), never an index entry pointing at unwritten data.
 	sync.RWMutex
 	ds       types.IKVStore
 	addr     string
@@ -56,6 +62,10 @@ type LogFS struct {
 	curFi    *os.File
 	basedir  string
 	openedAt time.Time // when the current (open) volume got its first byte
+	full     bool      // current volume passed MaxSize; roll on next reserve
+	// wg tracks in-flight WriteAt calls on the CURRENT volume; forward() drains
+	// it before closing the fd. Swapped for a fresh one on each roll.
+	wg *sync.WaitGroup
 }
 
 // todo: each one has its own maxsize
@@ -72,6 +82,7 @@ func New(ds types.IKVStore, dir string, local, addr string) (*LogFS, error) {
 		basedir: dir,
 		ds:      ds,
 		addr:    addr,
+		wg:      &sync.WaitGroup{},
 	}
 
 	dsKey := types.NewKey(types.DsLogFS, addr)
@@ -111,7 +122,14 @@ func GetIndex(local, addr string) uint64 {
 	return uint64(st)
 }
 
+// forward rolls to the next volume. MUST be called with sf.Lock held. It first
+// drains in-flight WriteAt calls on the current volume (they hold no lock and
+// finish independently), then closes the fd and opens the next one. New
+// reservations are blocked meanwhile because they too need sf.Lock.
 func (sf *LogFS) forward() error {
+	sf.wg.Wait()          // let in-flight writes on the current volume finish
+	sf.wg = &sync.WaitGroup{}
+
 	err := sf.curFi.Close()
 	if err != nil {
 		return err
@@ -134,6 +152,7 @@ func (sf *LogFS) forward() error {
 	sf.curFi = fi
 	sf.curSize = 0
 	sf.openedAt = time.Time{} // reset; set on next first write
+	sf.full = false
 	logger.Infof("logfs %s forward to: %d", sf.addr, sf.curIndex)
 	return nil
 }
@@ -168,62 +187,67 @@ func (sf *LogFS) Put(key, val []byte) error {
 	}
 	dskey := types.NewKey(types.DsLogFS, sf.addr, key)
 
-	sf.Lock()
-	defer sf.Unlock()
-
-	has, err := sf.ds.Has(dskey)
-	if err == nil && has {
+	if has, herr := sf.ds.Has(dskey); herr == nil && has {
 		logger.Infof("%s overwrite key: %s", sf.addr, string(key))
 	}
 
+	// padded on-disk length (records are 31-byte aligned)
+	n := len(val)
+	padded := int64(n)
+	if n%31 != 0 {
+		padded += int64(31 - n%31)
+	}
+
+	// --- reserve an offset (short critical section) ---
+	sf.Lock()
+	// roll a full volume before reserving on it (deferred from the write that
+	// filled it, so forward's wg.Wait never races that same write).
+	if sf.full && sf.curSize > 0 {
+		if err := sf.forward(); err != nil {
+			sf.Unlock()
+			return err
+		}
+	}
 	if sf.curSize == 0 {
 		sf.openedAt = time.Now() // first byte of a fresh volume
 	}
+	start := sf.curSize
+	volIndex := sf.curIndex
+	fi := sf.curFi
+	wg := sf.wg
+	sf.curSize += padded
+	if int(sf.curSize) > MaxSize {
+		sf.full = true // roll on the next reserve
+	}
+	wg.Add(1)
+	sf.Unlock()
 
-	n, err := sf.curFi.WriteAt(val, sf.curSize)
-	if err != nil {
+	// --- write payload + padding + index OUTSIDE the lock ---
+	defer wg.Done()
+
+	if _, err := fi.WriteAt(val, start); err != nil {
 		return err
 	}
-
-	logger.Debugf("logfs write at: %s %d %d %d %d", sf.addr, sf.curIndex, sf.curSize, n, len(val))
-
-	if n%31 != 0 {
-		data := make([]byte, 31-n%31)
-		pn, err := sf.curFi.WriteAt(data, sf.curSize+int64(n))
-		if err != nil {
+	if pad := padded - int64(n); pad > 0 {
+		if _, err := fi.WriteAt(make([]byte, pad), start+int64(n)); err != nil {
 			return err
 		}
-		n += pn
-		logger.Debugf("logfs write padding: %d", pn)
 	}
+	logger.Debugf("logfs write at: %s %d %d %d", sf.addr, volIndex, start, n)
 
 	lm := LogMeta{
-		Index: sf.curIndex,
-		Start: uint64(sf.curSize),
-		Size:  uint64(len(val)),
+		Index: volIndex,
+		Start: uint64(start),
+		Size:  uint64(n),
 		Hash:  sum[:],
 		Name:  key,
 	}
-
-	sf.curSize += int64(n)
-
 	lmv, err := lm.Serialize()
 	if err != nil {
 		return err
 	}
-	err = sf.ds.Put(dskey, lmv)
-	if err != nil {
-		return err
-	}
-
-	if int(sf.curSize) > MaxSize {
-		err := sf.forward()
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+	// data-before-index: only now is the object safely indexed.
+	return sf.ds.Put(dskey, lmv)
 }
 
 func (sf *LogFS) Get(key []byte, opts ...int) ([]byte, error) {
@@ -292,5 +316,6 @@ func (sf *LogFS) Size() types.DiskStats {
 func (sf *LogFS) Close() error {
 	sf.Lock()
 	defer sf.Unlock()
+	sf.wg.Wait() // let in-flight writes finish before closing the fd
 	return sf.curFi.Close()
 }
