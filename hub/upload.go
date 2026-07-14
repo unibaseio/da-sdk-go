@@ -242,8 +242,10 @@ func (s *Server) logFSWriteEx(addr string, bucket string, key string, kind strin
 		}
 	}
 
-	// Drop any stale "missing" marker so this key is immediately downloadable.
+	// Drop any stale "missing" marker + cached value so this key reflects the
+	// new write immediately.
 	s.missCache.del(addr, key)
+	s.readCache.del(addr, key)
 
 	lm, err := fs.GetMeta([]byte(key))
 	if err != nil {
@@ -297,6 +299,15 @@ func (s *Server) logFSRead(addr string, key string, w io.Writer) (int64, error) 
 }
 
 func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, error) {
+	// read-through hot-object cache (small objects; immutable content)
+	if wbytes, ok := s.readCache.get(addr, key); ok {
+		n, err := w.Write(wbytes)
+		if err != nil {
+			return 0, err
+		}
+		return int64(n), nil
+	}
+
 	fs, err := s.getFS(addr, false)
 	if err != nil {
 		return 0, err
@@ -312,6 +323,7 @@ func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, erro
 		// todo: get from remote
 		return 0, err
 	}
+	s.readCache.put(addr, key, wbytes) // caches only if it fits the per-item cap
 	n, err := w.Write(wbytes)
 	if err != nil {
 		return 0, err

@@ -12,6 +12,7 @@ import (
 
 	"github.com/alecthomas/units"
 	"github.com/fxamacker/cbor/v2"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
@@ -65,7 +66,8 @@ type LogFS struct {
 	full     bool      // current volume passed MaxSize; roll on next reserve
 	// wg tracks in-flight WriteAt calls on the CURRENT volume; forward() drains
 	// it before closing the fd. Swapped for a fresh one on each roll.
-	wg *sync.WaitGroup
+	wg  *sync.WaitGroup
+	fdc *fdCache // read-only volume fd cache (GetData); nil-safe
 }
 
 // todo: each one has its own maxsize
@@ -83,6 +85,7 @@ func New(ds types.IKVStore, dir string, local, addr string) (*LogFS, error) {
 		ds:      ds,
 		addr:    addr,
 		wg:      &sync.WaitGroup{},
+		fdc:     newFdCache(dir, env.Int("LOGFS_FD_CACHE", 128)),
 	}
 
 	dsKey := types.NewKey(types.DsLogFS, addr)
@@ -275,13 +278,12 @@ func (sf *LogFS) GetMeta(key []byte) (*LogMeta, error) {
 }
 
 func (sf *LogFS) GetData(lm *LogMeta, opts ...int) ([]byte, error) {
-	logger.Infof("logfs read at: %s %d %d %d", sf.addr, lm.Index, lm.Start, lm.Size)
-	curlog := filepath.Join(sf.basedir, fmt.Sprintf("%d.vol", lm.Index))
-	fi, err := os.OpenFile(curlog, os.O_RDONLY, os.ModePerm)
+	logger.Debugf("logfs read at: %s %d %d %d", sf.addr, lm.Index, lm.Start, lm.Size)
+	fi, release, err := sf.fdc.acquire(lm.Index)
 	if err != nil {
 		return nil, err
 	}
-	defer fi.Close()
+	defer release()
 
 	res := make([]byte, lm.Size)
 	n, err := fi.ReadAt(res, int64(lm.Start))
@@ -317,5 +319,6 @@ func (sf *LogFS) Close() error {
 	sf.Lock()
 	defer sf.Unlock()
 	sf.wg.Wait() // let in-flight writes finish before closing the fd
+	sf.fdc.closeAll()
 	return sf.curFi.Close()
 }

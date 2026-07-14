@@ -79,6 +79,9 @@ type Server struct {
 	// negative cache of download keys confirmed missing (download-flood guard)
 	missCache *missCache
 
+	// read-through byte LRU of small hot objects (nil when HUB_READCACHE_MB=0)
+	readCache *readCache
+
 	// lazily-built chain client for the /api/seal path (hub-signed AddPiece)
 	cmMu sync.Mutex
 	cm   *contract.ContractManage
@@ -134,6 +137,7 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		bucketDisplay: make(map[string]types.BucketDisplay),
 
 		missCache: newMissCache(),
+		readCache: newReadCache(),
 		memStat:   &memStatCache{},
 
 		readonly: os.Getenv("HUB_READONLY") != "",
