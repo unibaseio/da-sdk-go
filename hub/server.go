@@ -82,6 +82,10 @@ type Server struct {
 	// read-through byte LRU of small hot objects (nil when HUB_READCACHE_MB=0)
 	readCache *readCache
 
+	// dedupes concurrent DA-download fallbacks for the same (owner,name) so a
+	// cold-but-existing key is reconstructed once, not once per request.
+	dlSF singleflight.Group
+
 	// lazily-built chain client for the /api/seal path (hub-signed AddPiece)
 	cmMu sync.Mutex
 	cm   *contract.ContractManage
