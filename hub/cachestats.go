@@ -74,6 +74,7 @@ func (s *Server) v1CacheStats(c *gin.Context) {
 			"miss": fdMiss,
 		},
 		"badger": badger,
+		"shard":  s.shardStats(),
 		"download": gin.H{
 			"total":             s.dlTotal.Load(),  // cold-key DA fallbacks
 			"shared":            s.dlShared.Load(), // coalesced by singleflight

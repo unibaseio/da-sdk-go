@@ -104,6 +104,9 @@ type Server struct {
 	// the default). Bound per-owner and passed to logfs.New via getFS/load.
 	volStore *s3vol.Store
 
+	// P4-Route: owner-sharded sticky write routing (nil = single-node, default).
+	shard *shardRouter
+
 	// lazily-built chain client for the /api/seal path (hub-signed AddPiece)
 	cmMu sync.Mutex
 	cm   *contract.ContractManage
@@ -194,6 +197,9 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		s.volStore = st
 		logger.Infof("HUB_BUFFER=s3: sealed volumes backed by S3 bucket")
 	}
+
+	// P4-Route: owner-sharded sticky write routing (nil unless HUB_SHARD_TOTAL>1).
+	s.shard = newShardRouter()
 
 	// P4: shared L2 read cache (Redis). Fail-open — an unreachable Redis degrades
 	// to L1-only, so a bad ping is a warning, not a startup failure.

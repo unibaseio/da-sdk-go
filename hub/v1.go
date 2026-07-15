@@ -148,6 +148,9 @@ func (s *Server) registV1() {
 	w := s.Router.Group("/v1")
 	w.Use(maxBodyV1())
 	w.Use(AuthMiddleware())
+	// P4-Route: after auth (owner = signer), forward a non-home owner's write to
+	// its shard. No-op unless HUB_SHARD_TOTAL>1. Reads are never sharded.
+	w.Use(s.shardWrite())
 	w.Use(RateLimit())
 	if s.readonly {
 		reject := func(c *gin.Context) {
