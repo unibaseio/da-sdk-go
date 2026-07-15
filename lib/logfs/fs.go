@@ -58,6 +58,13 @@ func WithVolumeBackend(vb VolumeBackend) Option {
 	return func(sf *LogFS) { sf.volBackend = vb }
 }
 
+// WithLocalTTL reclaims local disk: a sealed volume confirmed uploaded to the
+// backend is deleted locally once it ages past d (reads then fall back to the
+// backend). 0 = keep local forever (default). Only effective with a backend.
+func WithLocalTTL(d time.Duration) Option {
+	return func(sf *LogFS) { sf.localTTL = d }
+}
+
 type LogMeta struct {
 	Index uint64 // which volume
 	Start uint64
@@ -108,6 +115,15 @@ type LogFS struct {
 	// (default). ulwg tracks in-flight seal-uploads so Close drains them.
 	volBackend VolumeBackend
 	ulwg       sync.WaitGroup
+
+	// local-disk reclaim (P3-S3): when localTTL>0 and a backend is set, sealed
+	// volumes confirmed uploaded are deleted locally once older than localTTL.
+	// uploadedAt records upload completion time per volume idx (guarded by ulMu).
+	localTTL    time.Duration
+	uploadedAt  map[uint64]time.Time
+	ulMu        sync.Mutex
+	stopReclaim chan struct{}
+	reclaimOnce sync.Once
 }
 
 // todo: each one has its own maxsize
@@ -162,6 +178,13 @@ func New(ds types.IKVStore, dir string, local, addr string, opts ...Option) (*Lo
 		logger.Infof("logfs %s group-commit fsync enabled", addr)
 	}
 
+	if sf.volBackend != nil && sf.localTTL > 0 {
+		sf.uploadedAt = make(map[uint64]time.Time)
+		sf.stopReclaim = make(chan struct{})
+		go sf.reclaimLoop(sf.stopReclaim)
+		logger.Infof("logfs %s local-volume TTL reclaim enabled (%s)", addr, sf.localTTL)
+	}
+
 	logger.Infof("logfs started at: %s %d %d", dir, sf.curIndex, sf.curSize)
 	return sf, nil
 }
@@ -188,6 +211,70 @@ func (sf *LogFS) syncLoop(interval time.Duration, stop <-chan struct{}) {
 			sf.RUnlock()
 			_ = fi.Sync()
 		}
+	}
+}
+
+// markUploaded records that volume idx is durably in the backend (reclaim
+// candidate). No-op unless TTL reclaim is enabled.
+func (sf *LogFS) markUploaded(idx uint64) {
+	if sf.uploadedAt == nil {
+		return
+	}
+	sf.ulMu.Lock()
+	sf.uploadedAt[idx] = time.Now()
+	sf.ulMu.Unlock()
+}
+
+// reclaimLoop deletes local sealed volumes that are (a) confirmed uploaded and
+// (b) older than localTTL, freeing disk while reads fall back to the backend.
+// Never touches the current (open) volume. Skips a volume whose fd is still in
+// use (retried next tick).
+func (sf *LogFS) reclaimLoop(stop <-chan struct{}) {
+	interval := sf.localTTL / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			sf.reclaimPass()
+		}
+	}
+}
+
+// reclaimPass does one reclaim pass.
+func (sf *LogFS) reclaimPass() {
+	sf.RLock()
+	cur := sf.curIndex
+	sf.RUnlock()
+
+	now := time.Now()
+	var due []uint64
+	sf.ulMu.Lock()
+	for idx, at := range sf.uploadedAt {
+		if idx < cur && now.Sub(at) >= sf.localTTL {
+			due = append(due, idx)
+		}
+	}
+	sf.ulMu.Unlock()
+
+	for _, idx := range due {
+		if !sf.fdc.tryEvict(idx) {
+			continue // fd in use; try again next tick
+		}
+		p := filepath.Join(sf.basedir, fmt.Sprintf("%d.vol", idx))
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			logger.Warnf("logfs %s reclaim volume %d: %v", sf.addr, idx, err)
+			continue
+		}
+		sf.ulMu.Lock()
+		delete(sf.uploadedAt, idx)
+		sf.ulMu.Unlock()
+		logger.Debugf("logfs %s reclaimed local volume %d (served from backend)", sf.addr, idx)
 	}
 }
 
@@ -231,6 +318,7 @@ func (sf *LogFS) forward() error {
 				logger.Warnf("logfs %s volume %d upload failed (non-fatal, kept local): %v", sf.addr, sealedIdx, perr)
 			} else {
 				logger.Debugf("logfs %s volume %d uploaded to backend", sf.addr, sealedIdx)
+				sf.markUploaded(sealedIdx)
 			}
 		}()
 	}
@@ -451,6 +539,9 @@ func (sf *LogFS) Size() types.DiskStats {
 func (sf *LogFS) Close() error {
 	if sf.stopSync != nil {
 		sf.stopOnce.Do(func() { close(sf.stopSync) })
+	}
+	if sf.stopReclaim != nil {
+		sf.reclaimOnce.Do(func() { close(sf.stopReclaim) })
 	}
 	sf.Lock()
 	defer sf.Unlock()

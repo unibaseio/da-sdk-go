@@ -174,6 +174,49 @@ func TestVolumeBackendCurrentVolumeStaysLocal(t *testing.T) {
 	}
 }
 
+// TestVolumeBackendLocalTTLReclaim: with a backend + short TTL, a sealed+
+// uploaded volume's local file is reclaimed, yet the needle still reads back
+// (served from the backend). The current open volume is never reclaimed.
+func TestVolumeBackendLocalTTLReclaim(t *testing.T) {
+	vb := newFakeBackend()
+	dir := t.TempDir()
+	ds, err := kv.NewBadgerStore(filepath.Join(dir, "kv"), &kv.DefaultOptions)
+	if err != nil {
+		t.Fatalf("badger: %v", err)
+	}
+	fs, err := New(ds, filepath.Join(dir, "data"), "0xlocal", "0xowner",
+		WithVolumeBackend(vb), WithLocalTTL(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("logfs new: %v", err)
+	}
+	defer fs.Close()
+
+	val := bytes.Repeat([]byte{0x7e}, 111)
+	if err := fs.Put([]byte("kttl"), val); err != nil {
+		t.Fatal(err)
+	}
+	sealedIdx := fs.curIndex
+	if err := fs.Roll(); err != nil {
+		t.Fatal(err)
+	}
+	sealedPath := filepath.Join(fs.basedir, fmt.Sprintf("%d.vol", sealedIdx))
+
+	// wait for upload + reclaim to remove the local sealed volume
+	waitFor(t, func() bool {
+		_, statErr := os.Stat(sealedPath)
+		return os.IsNotExist(statErr)
+	})
+
+	// the needle still reads back via the backend fallback
+	got, err := fs.Get([]byte("kttl"))
+	if err != nil {
+		t.Fatalf("get after reclaim: %v", err)
+	}
+	if !bytes.Equal(got, val) {
+		t.Fatal("post-reclaim read mismatch")
+	}
+}
+
 // TestVolumeBackendNilDefault: no backend = historical behavior, reads local,
 // no panic on the fallback path.
 func TestVolumeBackendNilDefault(t *testing.T) {

@@ -113,6 +113,30 @@ func (c *fdCache) release(idx uint64) {
 	c.mu.Unlock()
 }
 
+// tryEvict closes and drops the cached fd for idx if it is unreferenced, so a
+// caller can then safely delete the underlying volume file. Returns true if the
+// idx is now absent from the cache (evicted, or never cached); false if the fd
+// is currently in use (retry later). Disabled cache (nil/max<=0) = always true.
+func (c *fdCache) tryEvict(idx uint64) bool {
+	if c == nil || c.max <= 0 {
+		return true
+	}
+	c.mu.Lock()
+	e, ok := c.m[idx]
+	if !ok {
+		c.mu.Unlock()
+		return true
+	}
+	if e.refs > 0 {
+		c.mu.Unlock()
+		return false
+	}
+	delete(c.m, idx)
+	c.mu.Unlock()
+	e.f.Close()
+	return true
+}
+
 func (c *fdCache) closeAll() {
 	if c == nil {
 		return

@@ -4,7 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"path/filepath"
+	"time"
 
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 )
@@ -103,7 +105,13 @@ func (s *Server) logFSOptions(addr string) []logfs.Option {
 	if s.volStore == nil {
 		return nil
 	}
-	return []logfs.Option{logfs.WithVolumeBackend(s.volStore.Bind(s.local.String(), addr))}
+	opts := []logfs.Option{logfs.WithVolumeBackend(s.volStore.Bind(s.local.String(), addr))}
+	// HUB_BUFFER_LOCAL_TTL (seconds): reclaim local disk for volumes confirmed
+	// uploaded to S3, older than the TTL. 0 (default) = keep local forever.
+	if ttl := env.Int("HUB_BUFFER_LOCAL_TTL", 0); ttl > 0 {
+		opts = append(opts, logfs.WithLocalTTL(time.Duration(ttl)*time.Second))
+	}
+	return opts
 }
 
 // fscntGet returns the current registered-owner count (for the drain fan-out).
