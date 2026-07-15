@@ -334,7 +334,7 @@ func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, erro
 
 func (s *Server) load() error {
 	fspath := filepath.Join(s.rp.Path(), LOGFS)
-	fs, err := logfs.New(s.rp.MetaStore(), fspath, s.local.String(), s.local.String())
+	fs, err := logfs.New(s.rp.MetaStore(), fspath, s.local.String(), s.local.String(), s.logFSOptions(s.local.String())...)
 	if err != nil {
 		return err
 	}

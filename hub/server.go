@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/unibaseio/da-sdk-go/docs"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
+	"github.com/unibaseio/da-sdk-go/lib/s3vol"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/piece"
 	"github.com/unibaseio/da-sdk-go/lib/repo"
@@ -98,6 +100,10 @@ type Server struct {
 	dlTotal  atomic.Int64
 	dlShared atomic.Int64
 
+	// P3-S: shared S3/MinIO backend for sealed volumes (nil = local-only buffer,
+	// the default). Bound per-owner and passed to logfs.New via getFS/load.
+	volStore *s3vol.Store
+
 	// lazily-built chain client for the /api/seal path (hub-signed AddPiece)
 	cmMu sync.Mutex
 	cm   *contract.ContractManage
@@ -168,6 +174,25 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	// same-key floods, this bounds distinct-key fan-out under a read storm.
 	if n := env.Int("HUB_DOWNLOAD_CONCURRENCY", 0); n > 0 {
 		s.dlSem = make(chan struct{}, n)
+	}
+
+	// P3-S: optional durable/shared sealed-volume backend (HUB_BUFFER=s3). Default
+	// "local" keeps volumes on local disk only (unchanged). When s3, each owner's
+	// LogFS uploads sealed volumes to S3/MinIO and reads fall back there when a
+	// local volume is gone — enabling crash recovery + cross-replica reads.
+	if strings.EqualFold(env.Str("HUB_BUFFER", "local"), "s3") {
+		st, verr := s3vol.NewFromEnv()
+		if verr != nil {
+			return nil, fmt.Errorf("HUB_BUFFER=s3: %w", verr)
+		}
+		pctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if perr := st.Ping(pctx); perr != nil {
+			cancel()
+			return nil, fmt.Errorf("HUB_BUFFER=s3 bucket unreachable: %w", perr)
+		}
+		cancel()
+		s.volStore = st
+		logger.Infof("HUB_BUFFER=s3: sealed volumes backed by S3 bucket")
 	}
 
 	if s.readonly {

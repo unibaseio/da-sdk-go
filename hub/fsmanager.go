@@ -43,7 +43,7 @@ func (s *Server) getFS(addr string, create bool) (*logfs.LogFS, error) {
 		}
 
 		fspath := filepath.Join(s.rp.Path(), LOGFS)
-		fs, nerr := logfs.New(s.rp.MetaStore(), fspath, s.local.String(), addr)
+		fs, nerr := logfs.New(s.rp.MetaStore(), fspath, s.local.String(), addr, s.logFSOptions(addr)...)
 		if nerr != nil {
 			return nil, nerr
 		}
@@ -93,6 +93,17 @@ func (s *Server) registerOwner(addr string) {
 	s.rp.MetaStore().Put(cntKey, buf)
 
 	logger.Infof("registered log inst: %s -> %d", addr, s.fscnt)
+}
+
+// logFSOptions returns the per-owner logfs construction options. When a durable
+// volume backend is configured (HUB_BUFFER=s3), it binds an owner-namespaced
+// backend so sealed volumes are uploaded and reads can fall back to it. Empty
+// (local-only) by default.
+func (s *Server) logFSOptions(addr string) []logfs.Option {
+	if s.volStore == nil {
+		return nil
+	}
+	return []logfs.Option{logfs.WithVolumeBackend(s.volStore.Bind(s.local.String(), addr))}
 }
 
 // fscntGet returns the current registered-owner count (for the drain fan-out).
