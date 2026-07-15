@@ -8,6 +8,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// kvStatSource is implemented by the Badger metastore (lib/kv) to expose
+// write-stall telemetry without coupling the hub to a concrete KV type.
+type kvStatSource interface {
+	KVStats() (puts, slowPuts, maxPutMs int64, l0Tables int)
+}
+
 // v1CacheStats surfaces the Phase-Q cache/FS effectiveness counters so an
 // operator can measure the single-node ceiling before deciding whether to
 // escalate to P3/P4 (S3/PG/Redis). Read-only, no auth, no sensitive data —
@@ -34,6 +40,22 @@ func (s *Server) v1CacheStats(c *gin.Context) {
 		return true
 	})
 
+	// Badger write-stall telemetry (P3-DB2): a high slow-put ratio or L0 table
+	// count is the signal to migrate high-churn state to Postgres (P3 escalation).
+	badger := gin.H{"available": false}
+	if s.rp != nil {
+		if src, ok := s.rp.MetaStore().(kvStatSource); ok {
+			puts, slow, maxMs, l0 := src.KVStats()
+			badger = gin.H{
+				"available":  true,
+				"puts":       puts,
+				"slow_puts":  slow, // Put latency over BADGER_SLOW_PUT_MS
+				"max_put_ms": maxMs,
+				"l0_tables":  l0, // Badger stalls writes when L0 grows too large
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"fs": gin.H{
 			"hit":           s.fsHit.Load(),    // lock-free sync.Map hit
@@ -51,6 +73,7 @@ func (s *Server) v1CacheStats(c *gin.Context) {
 			"hit":  fdHit,
 			"miss": fdMiss,
 		},
+		"badger": badger,
 		"download": gin.H{
 			"total":             s.dlTotal.Load(),  // cold-key DA fallbacks
 			"shared":            s.dlShared.Load(), // coalesced by singleflight

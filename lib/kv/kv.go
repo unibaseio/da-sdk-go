@@ -10,6 +10,7 @@ import (
 	"github.com/dgraph-io/badger/v2"
 	"go.uber.org/zap"
 
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
@@ -45,6 +46,14 @@ type BadgerStore struct {
 	gcInterval     time.Duration
 
 	syncWrites bool
+
+	// write-stall observability (P3-DB2). Badger stalls all writes when L0 has
+	// too many un-compacted tables under a burst; a slow Put is the direct
+	// symptom. These counters expose it without depending on Badger internals.
+	putCount     atomic.Int64
+	slowPut      atomic.Int64 // Put wall-time exceeded slowPutNanos
+	maxPutNanos  atomic.Int64
+	slowPutNanos int64 // threshold (BADGER_SLOW_PUT_MS, default 100ms)
 }
 
 // Options are the badger datastore options, reexported here for convenience.
@@ -127,6 +136,7 @@ func NewBadgerStore(path string, options *Options) (*BadgerStore, error) {
 		gcSleep:        gcSleep,
 		gcInterval:     gcInterval,
 		syncWrites:     opt.SyncWrites,
+		slowPutNanos:   int64(env.Int("BADGER_SLOW_PUT_MS", 100)) * int64(time.Millisecond),
 	}
 
 	// Start the GC process if requested.
@@ -235,15 +245,51 @@ func (d *BadgerStore) Put(key, value []byte) error {
 		return ErrClosed
 	}
 
+	start := time.Now()
 	err := d.db.Update(func(txn *badger.Txn) error {
 		err := txn.Set(key, value)
 		return err
 	})
+	// record write-stall telemetry regardless of error (a stalled write can also
+	// time out); Badger blocks writes when L0 compaction falls behind.
+	elapsed := time.Since(start).Nanoseconds()
+	d.putCount.Add(1)
+	if d.slowPutNanos > 0 && elapsed > d.slowPutNanos {
+		d.slowPut.Add(1)
+	}
+	for {
+		prev := d.maxPutNanos.Load()
+		if elapsed <= prev || d.maxPutNanos.CompareAndSwap(prev, elapsed) {
+			break
+		}
+	}
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// KVStats reports write-stall telemetry (P3-DB2): total Puts, how many exceeded
+// the slow threshold, the max Put latency seen, and the current L0 table count
+// (Badger stalls all writes when L0 has too many un-compacted tables). Cheap
+// enough for a low-QPS observability endpoint.
+func (d *BadgerStore) KVStats() (puts, slowPuts, maxPutMs int64, l0Tables int) {
+	puts = d.putCount.Load()
+	slowPuts = d.slowPut.Load()
+	maxPutMs = d.maxPutNanos.Load() / int64(time.Millisecond)
+
+	d.closeLk.RLock()
+	defer d.closeLk.RUnlock()
+	if d.closed || d.db == nil {
+		return
+	}
+	for _, ti := range d.db.Tables(false) {
+		if ti.Level == 0 {
+			l0Tables++
+		}
+	}
+	return
 }
 
 // key not found is not as error
