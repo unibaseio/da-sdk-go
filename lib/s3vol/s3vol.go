@@ -34,7 +34,9 @@ type Store struct {
 //
 //	HUB_S3_ENDPOINT    host[:port] (e.g. s3.ap-southeast-1.amazonaws.com, localhost:9000)
 //	HUB_S3_BUCKET      bucket name (must already exist)
-//	HUB_S3_ACCESS_KEY  / HUB_S3_SECRET_KEY  credentials
+//	HUB_S3_ACCESS_KEY  / HUB_S3_SECRET_KEY  static credentials; if ACCESS_KEY is
+//	                   empty, fall back to the EC2 instance IAM role (IMDS) —
+//	                   the preferred, keyless path on AWS.
 //	HUB_S3_REGION      default us-east-1
 //	HUB_S3_USE_SSL     "false" to disable TLS (local MinIO); default on
 func NewFromEnv() (*Store, error) {
@@ -48,8 +50,17 @@ func NewFromEnv() (*Store, error) {
 	region := env.Str("HUB_S3_REGION", "us-east-1")
 	useSSL := env.Str("HUB_S3_USE_SSL", "true") != "false"
 
+	// Static keys when provided (MinIO / non-AWS); otherwise the EC2 instance
+	// IAM role via IMDS — no long-lived secrets on the box.
+	var creds *credentials.Credentials
+	if ak != "" {
+		creds = credentials.NewStaticV4(ak, sk, "")
+	} else {
+		creds = credentials.NewIAM("")
+	}
+
 	cli, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(ak, sk, ""),
+		Creds:  creds,
 		Secure: useSSL,
 		Region: region,
 	})
