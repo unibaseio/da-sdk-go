@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -32,8 +33,13 @@ var _ l2cache = (*redisL2)(nil)
 // Every op is FAIL-OPEN: a Redis error/timeout is treated as a miss (get) or
 // silently ignored (set/del), so an unavailable Redis degrades to L1-only and
 // never blocks or errors a read/write. nil when HUB_REDIS_ADDR is unset.
+//
+// Uses a UniversalClient so ONE code path serves both ElastiCache node-based
+// (single endpoint, cluster-mode disabled) and ElastiCache Serverless (which
+// mandates TLS and is cluster-backed). Enable TLS with HUB_REDIS_TLS=1 (required
+// for Serverless / any encrypted-in-transit endpoint).
 type redisL2 struct {
-	rdb   *redis.Client
+	rdb   redis.UniversalClient
 	ttl   time.Duration
 	getTO time.Duration
 	setTO time.Duration
@@ -44,13 +50,22 @@ func newRedisL2() *redisL2 {
 	if addr == "" {
 		return nil
 	}
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     addr,
+	opts := &redis.UniversalOptions{
+		Addrs:    []string{addr},
 		Password: env.Str("HUB_REDIS_PASSWORD", ""),
-		DB:       env.Int("HUB_REDIS_DB", 0),
-	})
+		DB:       env.Int("HUB_REDIS_DB", 0), // ignored in cluster/serverless (DB 0)
+	}
+	// TLS is mandatory for ElastiCache Serverless and any encrypted endpoint.
+	// ElastiCache presents valid public certs, so default verification is fine;
+	// HUB_REDIS_TLS_INSECURE=1 is an escape hatch for self-signed test setups.
+	if v := env.Str("HUB_REDIS_TLS", ""); v == "1" || v == "true" || v == "on" {
+		opts.TLSConfig = &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: env.Str("HUB_REDIS_TLS_INSECURE", "") == "1",
+		}
+	}
 	return &redisL2{
-		rdb:   rdb,
+		rdb:   redis.NewUniversalClient(opts),
 		ttl:   time.Duration(env.Int("HUB_REDIS_TTL_SEC", 0)) * time.Second, // 0 = rely on maxmemory-policy
 		getTO: 200 * time.Millisecond,
 		setTO: 500 * time.Millisecond,
