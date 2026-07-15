@@ -17,11 +17,12 @@ import (
 //   - readcache: hot-object byte LRU (read-through)
 //   - fdcache:   read-only volume fd reuse, summed across all loaded owners
 //   - download:  DA-reconstruct fallbacks and how many were coalesced by
-//                singleflight (shared), plus the optional concurrency cap
+//     singleflight (shared), plus the optional concurrency cap
 //
 // GET /v1/cachestats
 func (s *Server) v1CacheStats(c *gin.Context) {
 	rcHit, rcMiss := s.readCache.Stats()
+	l2Hit, l2On := s.readCache.L2Stats()
 
 	var fdHit, fdMiss int64
 	var ownersLoaded int
@@ -40,9 +41,11 @@ func (s *Server) v1CacheStats(c *gin.Context) {
 			"owners_loaded": ownersLoaded,
 		},
 		"readcache": gin.H{
-			"enabled": s.readCache != nil,
-			"hit":     rcHit,
-			"miss":    rcMiss,
+			"enabled":    s.readCache != nil, // L1 in-proc LRU
+			"hit":        rcHit,              // L1 hit
+			"miss":       rcMiss,             // both tiers miss
+			"l2_enabled": l2On,               // shared Redis tier
+			"l2_hit":     l2Hit,              // L1 miss, L2 hit
 		},
 		"fdcache": gin.H{
 			"hit":  fdHit,

@@ -195,6 +195,18 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		logger.Infof("HUB_BUFFER=s3: sealed volumes backed by S3 bucket")
 	}
 
+	// P4: shared L2 read cache (Redis). Fail-open — an unreachable Redis degrades
+	// to L1-only, so a bad ping is a warning, not a startup failure.
+	if s.readCache != nil {
+		if _, on := s.readCache.L2Stats(); on {
+			if perr := s.readCache.l2.ping(); perr != nil {
+				logger.Warnf("HUB_REDIS_ADDR set but Redis unreachable (L2 fails open to L1-only): %v", perr)
+			} else {
+				logger.Infof("read cache L2 (Redis) enabled")
+			}
+		}
+	}
+
 	if s.readonly {
 		logger.Warn("HUB_READONLY set: running as a read-only replica (no writes, no chain submit, no schema DDL)")
 	}
@@ -311,6 +323,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 		return true
 	})
+
+	// Close the shared L2 read cache (Redis), if any.
+	if s.readCache != nil && s.readCache.l2 != nil {
+		s.readCache.l2.close()
+	}
 
 	// Persist database data
 	if s.gdb != nil {
