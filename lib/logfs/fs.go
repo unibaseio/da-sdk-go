@@ -33,6 +33,31 @@ func init() {
 	}
 }
 
+// VolumeBackend is the optional durable/shared store for SEALED volumes (P3-S).
+// The write path always stays local (pwrite to the current open volume); only a
+// completed volume is handed to PutVolume on seal, and RangeAt serves a needle
+// when the local volume file is gone (TTL-reclaimed, or this is a reader replica
+// that never wrote it). Content is a full 31MiB volume = one object; a needle is
+// a byte range — so 34M needles cost O(volumes) objects, not O(needles).
+// nil backend = historical local-only behavior (default).
+type VolumeBackend interface {
+	// PutVolume durably stores the sealed volume file at localPath under idx.
+	// Called once per volume on seal; must be idempotent (same idx = same bytes,
+	// volumes are append-only and never rewritten).
+	PutVolume(idx uint64, localPath string) error
+	// RangeAt returns n bytes at off from volume idx. Used only as a read
+	// fallback when the local volume file is absent.
+	RangeAt(idx uint64, off, n int64) ([]byte, error)
+}
+
+// Option configures a LogFS at construction (backward-compatible variadic).
+type Option func(*LogFS)
+
+// WithVolumeBackend attaches a durable/shared sealed-volume backend (P3-S).
+func WithVolumeBackend(vb VolumeBackend) Option {
+	return func(sf *LogFS) { sf.volBackend = vb }
+}
+
 type LogMeta struct {
 	Index uint64 // which volume
 	Start uint64
@@ -78,10 +103,15 @@ type LogFS struct {
 	dirty      atomic.Bool // writes since the last sync (group mode only)
 	stopSync   chan struct{}
 	stopOnce   sync.Once
+
+	// volBackend (P3-S): durable/shared store for SEALED volumes. nil = local-only
+	// (default). ulwg tracks in-flight seal-uploads so Close drains them.
+	volBackend VolumeBackend
+	ulwg       sync.WaitGroup
 }
 
 // todo: each one has its own maxsize
-func New(ds types.IKVStore, dir string, local, addr string) (*LogFS, error) {
+func New(ds types.IKVStore, dir string, local, addr string, opts ...Option) (*LogFS, error) {
 	//log.SetLogLevel("debug")
 	dir = filepath.Join(dir, addr)
 	logger.Infof("logfs start at: %s with maxsize: %d", dir, MaxSize)
@@ -96,6 +126,9 @@ func New(ds types.IKVStore, dir string, local, addr string) (*LogFS, error) {
 		addr:    addr,
 		wg:      &sync.WaitGroup{},
 		fdc:     newFdCache(dir, env.Int("LOGFS_FD_CACHE", 128)),
+	}
+	for _, o := range opts {
+		o(sf)
 	}
 
 	dsKey := types.NewKey(types.DsLogFS, addr)
@@ -183,6 +216,25 @@ func (sf *LogFS) forward() error {
 	if err != nil {
 		return err
 	}
+
+	// P3-S: the volume we just closed is now sealed (append-only, never rewritten).
+	// Hand it to the durable backend off the write lock. Failure is non-fatal — the
+	// local file is retained (unless TTL-reclaimed) and DA remains the source of
+	// truth — so an unreachable backend never blocks the write path.
+	if sf.volBackend != nil {
+		sealedIdx := sf.curIndex
+		sealedPath := filepath.Join(sf.basedir, fmt.Sprintf("%d.vol", sealedIdx))
+		sf.ulwg.Add(1)
+		go func() {
+			defer sf.ulwg.Done()
+			if perr := sf.volBackend.PutVolume(sealedIdx, sealedPath); perr != nil {
+				logger.Warnf("logfs %s volume %d upload failed (non-fatal, kept local): %v", sf.addr, sealedIdx, perr)
+			} else {
+				logger.Debugf("logfs %s volume %d uploaded to backend", sf.addr, sealedIdx)
+			}
+		}()
+	}
+
 	sf.curIndex++
 
 	dsKey := types.NewKey(types.DsLogFS, sf.addr)
@@ -333,6 +385,12 @@ func (sf *LogFS) GetData(lm *LogMeta, opts ...int) ([]byte, error) {
 	logger.Debugf("logfs read at: %s %d %d %d", sf.addr, lm.Index, lm.Start, lm.Size)
 	fi, release, err := sf.fdc.acquire(lm.Index)
 	if err != nil {
+		// Local volume absent (TTL-reclaimed, or a reader replica that never wrote
+		// it): fall back to the durable backend's range read. Only sealed volumes
+		// are ever uploaded, so the current open volume always resolves locally.
+		if sf.volBackend != nil && os.IsNotExist(err) {
+			return sf.readViaBackend(lm)
+		}
 		return nil, err
 	}
 	defer release()
@@ -351,6 +409,23 @@ func (sf *LogFS) GetData(lm *LogMeta, opts ...int) ([]byte, error) {
 		return nil, fmt.Errorf("unequal content")
 	}
 
+	return res, nil
+}
+
+// readViaBackend serves a needle by range-reading its volume from the durable
+// backend, verifying the content hash exactly as the local path does.
+func (sf *LogFS) readViaBackend(lm *LogMeta) ([]byte, error) {
+	res, err := sf.volBackend.RangeAt(lm.Index, int64(lm.Start), int64(lm.Size))
+	if err != nil {
+		return nil, err
+	}
+	if len(res) != int(lm.Size) {
+		return nil, fmt.Errorf("unequal size")
+	}
+	sum := sha256.Sum256(res)
+	if !bytes.Equal(sum[:], lm.Hash) {
+		return nil, fmt.Errorf("unequal content")
+	}
 	return res, nil
 }
 
@@ -379,7 +454,8 @@ func (sf *LogFS) Close() error {
 	}
 	sf.Lock()
 	defer sf.Unlock()
-	sf.wg.Wait() // let in-flight writes finish before closing the fd
+	sf.wg.Wait()   // let in-flight writes finish before closing the fd
+	sf.ulwg.Wait() // let in-flight seal-uploads finish (P3-S)
 	if sf.fsyncGroup {
 		_ = sf.curFi.Sync()
 	}
