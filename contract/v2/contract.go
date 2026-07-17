@@ -12,6 +12,7 @@ import (
 	"time"
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -528,7 +529,29 @@ func (c *ContractManage) rotateFilterRPC() {
 // FilterLogs runs eth_getLogs on the filter endpoint with failover: on a
 // transport error it rotates to the next endpoint (the caller's sync loop
 // retries on the next tick, which re-dials the new endpoint).
+// filterTimeout bounds a single FilterLogs/FilterBlockNumber RPC. A stalled RPC
+// returns no error — it just never returns — so without a deadline it wedges the
+// event-sync goroutine (the fraud-game heartbeat) forever. env
+// CHAIN_FILTER_TIMEOUT (seconds) overrides; default 60s (log queries span up to
+// 128 blocks, so a bit longer than read calls).
+func filterTimeout() time.Duration {
+	return time.Duration(env.Int(env.FilterTimeout, 60)) * time.Second
+}
+
+// ensureDeadline gives a caller ctx a deadline if it has none (e.g. the nodes'
+// k.ctx = context.Background()), so a stuck RPC fails fast into the caller's
+// existing sleep+retry path instead of blocking. Callers that pass their own
+// deadline keep it; the returned cancel is always safe to call.
+func ensureDeadline(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, d)
+}
+
 func (c *ContractManage) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	ctx, cancel := ensureDeadline(ctx, filterTimeout())
+	defer cancel()
 	cl, err := c.FilterClient(ctx)
 	if err != nil {
 		c.rotateFilterRPC()
@@ -544,6 +567,8 @@ func (c *ContractManage) FilterLogs(ctx context.Context, q ethereum.FilterQuery)
 // FilterBlockNumber reads the head block via the filter endpoint, with the same
 // failover as FilterLogs (event sync uses both against RPCForFilterLog).
 func (c *ContractManage) FilterBlockNumber(ctx context.Context) (uint64, error) {
+	ctx, cancel := ensureDeadline(ctx, filterTimeout())
+	defer cancel()
 	cl, err := c.FilterClient(ctx)
 	if err != nil {
 		c.rotateFilterRPC()
