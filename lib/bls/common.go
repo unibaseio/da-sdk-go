@@ -168,8 +168,23 @@ func NewEncodeWitness(n, k int) *EncodeWitness {
 	}
 }
 
+// EncodeWitness wire framing (V6 / FORMAT_VERSIONING_DESIGN.md §B1). This blob
+// is a Go-only transport/persistence container (FileFull.Proofs + stream KV) —
+// it is NOT hashed and NOT sent on-chain (the Fiat-Shamir transcript hashes the
+// G1 points via .Marshal(), independently of this format), so versioning it is
+// safe. A versioned blob starts with ewMagic; a legacy (pre-versioning) blob is
+// raw gnark uncompressed encoding whose first byte has bit7==0 and thus can
+// never equal ewMagic — so the two are unambiguous with no length heuristics.
+const (
+	ewMagic       byte   = 0xDA // bit7==1 ⇒ never collides with legacy raw G1 (bit7==0)
+	ewWireVersion uint16 = 1
+)
+
 func (ew *EncodeWitness) Serialize() []byte {
 	var w bytes.Buffer
+	w.WriteByte(ewMagic)
+	w.WriteByte(byte(ewWireVersion >> 8))
+	w.WriteByte(byte(ewWireVersion))
 	enc := bls.NewEncoder(&w, bls.RawEncoding())
 	toEncode := []interface{}{
 		&ew.Root,
@@ -189,6 +204,18 @@ func (ew *EncodeWitness) Serialize() []byte {
 }
 
 func (ew *EncodeWitness) Deserialize(buf []byte) error {
+	// Versioned frame iff first byte has bit7 set (legacy raw G1 never does).
+	if len(buf) > 0 && buf[0]&0x80 != 0 {
+		if len(buf) < 3 || buf[0] != ewMagic {
+			return fmt.Errorf("bad EncodeWitness frame: first byte %#x", buf[0])
+		}
+		v := uint16(buf[1])<<8 | uint16(buf[2])
+		if v > ewWireVersion {
+			return fmt.Errorf("unsupported EncodeWitness wire version %d (this node understands <= %d) — upgrade the node", v, ewWireVersion)
+		}
+		buf = buf[3:]
+	}
+	// legacy (unframed) or versioned payload: raw gnark decode
 	dec := bls.NewDecoder(bytes.NewReader(buf), bls.NoSubgroupChecks())
 	toDecode := []interface{}{
 		&ew.Root,
