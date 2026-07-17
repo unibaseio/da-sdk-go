@@ -110,20 +110,22 @@ var (
 	BaseSepoliaChainRPCForFilterLog = "https://base-sepolia-rpc.publicnode.com"
 	BaseSepoliaChainID              = int64(84532)
 	BaseSepoliaTokenAddr            = common.HexToAddress("0x27C8b63E5aCD5298035B984AC3ea3f39d522A700") // canonical UB (10B) — migrated 2026-07-01
-	BaseSepoliaSyncHeight           = 43554392                                                          // deploy block of the suite (redeploy on 0x27C8)
+	BaseSepoliaSyncHeight           = 44256000                                                          // V6-B2 redeploy 2026-07-17; conservative floor (~deploy block 44256839) — replace with exact deploy block from out JSON
 
-	BaseSepoliaEpochAddr   = common.HexToAddress("0xd1262b3Ba620AF5Da7968B4c4c3AB463dfFc5114")
-	BaseSepoliaNodeAddr    = common.HexToAddress("0xe4BC67209368c8DF6A95091c23EB44D4973A386f")
-	BaseSepoliaPieceAddr   = common.HexToAddress("0x27BeE9ac6831bdd9986a1D64C72eA29562AdCE2C")
-	BaseSepoliaRSProofAddr = common.HexToAddress("0x922204C0e4B51dF05E1280F60505D457fA58E910")
-	BaseSepoliaEProofAddr  = common.HexToAddress("0x49e78BB299a230bc8188a0013A7e769A62bf8791")
-	BaseSepoliaEVerifyAddr = common.HexToAddress("0xb96ad272a1Df8256A143eF88E91c26b7028CB95A")
+	BaseSepoliaEpochAddr   = common.HexToAddress("0xF04F3B7d2937b98738263658A3281f7B291Dc367")
+	BaseSepoliaNodeAddr    = common.HexToAddress("0xE8db6944284c408f3bD88Ccd8a677dE7849A66F3")
+	BaseSepoliaPieceAddr   = common.HexToAddress("0x5E94e71ABebD5673Cf0d3C50B83fD8d1ae14d7A8")
+	BaseSepoliaRSProofAddr = common.HexToAddress("0x6B1Dfa31d1C72DAD9A3522Ad4ab278Dc18dE8f2A")
+	BaseSepoliaEProofAddr  = common.HexToAddress("0x4355FfBf86705960a7750216a1A73aa1f9CF80fE")
+	BaseSepoliaEVerifyAddr = common.HexToAddress("0xe137c19A899ABD1e0DC8B235D52FF8bB8e0B7fD0")
 	BaseSepoliaStatAddr    = common.HexToAddress("") // Stat not deployed by deployall_v2 on base-sepolia
 
-	BaseSepoliaRSOneAddr = common.HexToAddress("0x58A746f74B2b57Dd37001F5f83997d918BF1A827")
-	BaseSepoliaKZGAddr   = common.HexToAddress("0x13BbDCcC638EB67d1BA9A2358B08b24569f662bf")
-	BaseSepoliaAddAddr   = common.HexToAddress("0x37A039cBBB07E6d1b7d04317953Ea3a5b6A917F4")
-	BaseSepoliaMulAddr   = common.HexToAddress("0xEc4f3188c2AACe9A17E4D6c50cEE80c464d4EAc3")
+	// V6-B2 redeploy 2026-07-17 — verifiers read from the new proxies; v1
+	// registration confirmed on-chain (rsoneOf(1)/kzgOf(1)/mulOf(1)/addOf(1)).
+	BaseSepoliaRSOneAddr = common.HexToAddress("0x59d10643bbc038eB5434deaE187B22218bEf0C34")
+	BaseSepoliaKZGAddr   = common.HexToAddress("0x0E9e57CF38Ee199Bf0a326667F3a9495c28D1792")
+	BaseSepoliaAddAddr   = common.HexToAddress("0x5A2878E67673f1B621070D0c2F5cB4589fb2E859")
+	BaseSepoliaMulAddr   = common.HexToAddress("0xba6be6a536a163e99A194517F212541a175E0ac6")
 )
 
 // base mainnet (deploy order #1; DA contracts + UB OFT bridge addr TBD)
