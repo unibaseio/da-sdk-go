@@ -17,9 +17,10 @@ import (
 // Managed environment variable names — the single source of truth. Values are
 // unchanged from the historical strings, so existing deployments keep working.
 const (
-	ChainType      = "CHAIN_TYPE"       // chain selection (build.CheckChain / ContractManage)
-	ChainRPC       = "CHAIN_RPC"        // generic RPC override (tx/call)
-	ChainRPCFilter = "CHAIN_RPC_FILTER" // generic FilterLogs RPC override
+	ChainType      = "CHAIN_TYPE"         // chain selection (build.CheckChain / ContractManage)
+	ChainRPC       = "CHAIN_RPC"          // generic RPC override (tx/call)
+	ChainRPCFilter = "CHAIN_RPC_FILTER"   // generic FilterLogs RPC override
+	CallTimeout    = "CHAIN_CALL_TIMEOUT" // per-call deadline for on-chain reads, seconds (default 30)
 	// per-chain overrides are CHAIN_RPC_<id> / CHAIN_RPC_FILTER_<id>; build them
 	// with ChainRPC+"_"+id etc.
 

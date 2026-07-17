@@ -430,7 +430,11 @@ func AnalyzeTransactionFailure(endPoint string, txHash common.Hash) error {
 		return err
 	}
 	defer client.Close()
-	tx, isPending, err := client.TransactionByHash(context.Background(), txHash)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, isPending, err := client.TransactionByHash(ctx, txHash)
 	if err != nil {
 		return fmt.Errorf("failed to get transaction by hash: %v", err)
 	}
@@ -440,7 +444,7 @@ func AnalyzeTransactionFailure(endPoint string, txHash common.Hash) error {
 	}
 
 	// 获取交易回执
-	receipt, err := client.TransactionReceipt(context.Background(), txHash)
+	receipt, err := client.TransactionReceipt(ctx, txHash)
 	if err != nil {
 		return fmt.Errorf("failed to get transaction receipt: %v", err)
 	}
@@ -455,7 +459,7 @@ func AnalyzeTransactionFailure(endPoint string, txHash common.Hash) error {
 		Data:     tx.Data(),
 	}
 
-	_, err = client.CallContract(context.Background(), callMsg, receipt.BlockNumber)
+	_, err = client.CallContract(ctx, callMsg, receipt.BlockNumber)
 	return err
 }
 
