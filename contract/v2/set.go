@@ -17,6 +17,12 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// CurrentProofVersion is the proof-format version this client generates (V6-B2).
+// It is passed to the on-chain prove functions, which dispatch to the verifier
+// registered for that version — so a future circuit upgrade bumps this + registers
+// a new verifier, while proofs from old clients keep verifying against version 1.
+const CurrentProofVersion uint8 = 1
+
 // waitForAllowance polls until the RPC observes owner's token allowance for
 // spender to be at least min. Guards against RPC read-after-write lag on
 // load-balanced endpoints (e.g. Alchemy on base-sepolia): an Approve tx can be
@@ -492,7 +498,7 @@ func (c *ContractManage) ProveRS(_pn, _rn string, _pri uint8, _pf []byte) error 
 		return err
 	}
 
-	tx, err := rsp.Prove(au, pname, rname, _pri, _pf)
+	tx, err := rsp.Prove(au, pname, rname, _pri, CurrentProofVersion, _pf)
 	if err != nil {
 		return err
 	}
@@ -668,7 +674,7 @@ func (c *ContractManage) ProveKZG(_ep uint64, _wroot []byte, _pf []byte) error {
 	var _wt [32]byte
 	copy(_wt[:], _wroot)
 
-	tx, err := pi.ProveKZG(au, _ep, _wt, _pf)
+	tx, err := pi.ProveKZG(au, _ep, _wt, CurrentProofVersion, _pf)
 	if err != nil {
 		return err
 	}
@@ -795,7 +801,7 @@ func (c *ContractManage) ProveSum(_ep uint64, coms []bls.G1, _pf []byte) error {
 	if err != nil {
 		return err
 	}
-	tx, err = pi.ProveCom(au, _ep, _coms, _pf)
+	tx, err = pi.ProveCom(au, _ep, _coms, CurrentProofVersion, _pf)
 	if err != nil {
 		return err
 	}
@@ -852,7 +858,7 @@ func (c *ContractManage) ProveOne(_ep uint64, _com bls.G1, _pf []byte) error {
 
 	_commit := com.G1InSolidity(_com)
 	com.Logger.Debug("prove eproof one: ", au.From, _ep)
-	tx, err := pi.ProveOne(au, _ep, _commit, _pf)
+	tx, err := pi.ProveOne(au, _ep, _commit, CurrentProofVersion, _pf)
 	if err != nil {
 		return err
 	}
