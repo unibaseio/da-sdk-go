@@ -29,6 +29,24 @@ func RegisterEdge(baseUrl string, auth types.Auth, em types.EdgeMeta) error {
 	return nil
 }
 
+// EnsureEdge registers the edge exactly once at startup. If this address is already
+// registered with the same ExposeURL it is a no-op (returns already=true); otherwise
+// it registers via em. It does NOT retry: a returned error is meant to abort node
+// startup so operators immediately see the node failed to register, rather than the
+// node silently retrying forever or running invisible in the registry. Re-checking
+// ExposeURL (not just existence) also self-corrects a stale/blank entry left by an
+// earlier partial registration.
+func EnsureEdge(baseUrl string, auth types.Auth, em types.EdgeMeta) (already bool, err error) {
+	cur, gerr := GetEdge(baseUrl, auth, auth.Addr)
+	if gerr == nil && cur.ExposeURL != "" && cur.ExposeURL == em.ExposeURL {
+		return true, nil
+	}
+	if rerr := RegisterEdge(baseUrl, auth, em); rerr != nil {
+		return false, rerr
+	}
+	return false, nil
+}
+
 func GetEdge(baseUrl string, auth types.Auth, eaddr common.Address) (types.EdgeReceipt, error) {
 	res := types.EdgeReceipt{}
 
