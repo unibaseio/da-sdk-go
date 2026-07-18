@@ -110,7 +110,7 @@ var (
 	BaseSepoliaChainRPCForFilterLog = "https://base-sepolia-rpc.publicnode.com"
 	BaseSepoliaChainID              = int64(84532)
 	BaseSepoliaTokenAddr            = common.HexToAddress("0x27C8b63E5aCD5298035B984AC3ea3f39d522A700") // canonical UB (10B) — migrated 2026-07-01
-	BaseSepoliaSyncHeight           = 44293000                                                          // V6-B2 + binding-fix redeploy 2026-07-18; conservative floor (deploy ~block 44293152) — replace with exact deploy block from out JSON
+	BaseSepoliaSyncHeight           = 44293100                                                          // V6-B2 + binding-fix redeploy 2026-07-18 (exact deploy block, from out JSON)
 
 	BaseSepoliaEpochAddr   = common.HexToAddress("0xA4469A4373918A4188fbE50376BD444c0dF5F707")
 	BaseSepoliaNodeAddr    = common.HexToAddress("0x18f75C608A638de57Bf641a2F4A96Afdac41EBB1")
