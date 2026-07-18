@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -142,12 +141,16 @@ func (s *Server) registV1() {
 	pub.GET("/conversations", s.v1ListConversations)
 	pub.GET("/conversations/:id", s.v1GetConversation)
 	pub.GET("/stats", s.v1Stats)
+	pub.GET("/cachestats", s.v1CacheStats)
 	pub.GET("/overview", s.v1Overview)
 	pub.GET("/owners/:owner", s.v1GetOwner)
 
 	w := s.Router.Group("/v1")
 	w.Use(maxBodyV1())
 	w.Use(AuthMiddleware())
+	// P4-Route: after auth (owner = signer), forward a non-home owner's write to
+	// its shard. No-op unless HUB_SHARD_TOTAL>1. Reads are never sharded.
+	w.Use(s.shardWrite())
 	w.Use(RateLimit())
 	if s.readonly {
 		reject := func(c *gin.Context) {
@@ -739,24 +742,10 @@ func (s *Server) objectMeta(addr, key string) (*logfs.LogMeta, error) {
 	if s.rp == nil {
 		return nil, fmt.Errorf("no repo")
 	}
-	s.Lock()
-	fs, ok := s.lfs[addr]
-	if !ok {
-		dsKey := types.NewKey(types.DsLogFS, LOGINST, addr)
-		if has, err := s.rp.MetaStore().Has(dsKey); err == nil && has {
-			nfs, err := logfs.New(s.rp.MetaStore(), filepath.Join(s.rp.Path(), LOGFS), s.local.String(), addr)
-			if err != nil {
-				s.Unlock()
-				return nil, err
-			}
-			s.lfs[addr] = nfs
-			fs = nfs
-		} else {
-			s.Unlock()
-			return nil, fmt.Errorf("no such owner: %s", addr)
-		}
+	fs, err := s.getFS(addr, false)
+	if err != nil {
+		return nil, err
 	}
-	s.Unlock()
 	return fs.GetMeta([]byte(key))
 }
 

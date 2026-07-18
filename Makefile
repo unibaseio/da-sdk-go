@@ -41,3 +41,15 @@ build: hub
 clean:
 	rm -f $(BINS)
 .PHONY: clean
+
+# Invariant / regression tests. `test` = fast tier (no SRS), race-checked, safe on
+# every push: transcript byte-identity (gotcha #1), Policy allow-list, CheckWitness
+# structural gates, EncodeWitness (de)serialization. `test-slow` additionally runs
+# the G1-homomorphism check over a generated KZG key.
+test:
+	go test -short -race ./lib/... ./sdk/...
+.PHONY: test
+
+test-slow:
+	go test -race ./lib/... ./sdk/...
+.PHONY: test-slow

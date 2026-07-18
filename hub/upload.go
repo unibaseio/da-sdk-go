@@ -213,36 +213,10 @@ func (s *Server) logFSWriteEx(addr string, bucket string, key string, kind strin
 		return types.MemeMeta{}, err
 	}
 
-	s.Lock()
-	fs, ok := s.lfs[addr]
-	if !ok {
-		fspath := filepath.Join(s.rp.Path(), LOGFS)
-		fs, err = logfs.New(s.rp.MetaStore(), fspath, s.local.String(), addr)
-		if err != nil {
-			s.Unlock()
-			return types.MemeMeta{}, err
-		}
-		s.lfs[addr] = fs
-		s.addAccount(addr)
-		logger.Infof("start new log inst: %s %d", addr, s.fscnt)
-
-		dsKey := types.NewKey(types.DsLogFS, LOGINST, addr)
-		has, err := s.rp.MetaStore().Has(dsKey)
-		if err != nil || !has {
-			buf := make([]byte, 4)
-			binary.BigEndian.PutUint32(buf, 0)
-			s.rp.MetaStore().Put(dsKey, buf)
-
-			dsKey = types.NewKey(types.DsLogFS, LOGINST, s.fscnt)
-			s.rp.MetaStore().Put(dsKey, []byte(addr))
-
-			dsKey = types.NewKey(types.DsLogFS, LOGINST)
-			s.fscnt++
-			binary.BigEndian.PutUint32(buf, s.fscnt)
-			s.rp.MetaStore().Put(dsKey, buf)
-		}
+	fs, err := s.getFS(addr, true)
+	if err != nil {
+		return types.MemeMeta{}, err
 	}
-	s.Unlock()
 	rbytes, err := io.ReadAll(r)
 	if err != nil {
 		return types.MemeMeta{}, err
@@ -268,8 +242,10 @@ func (s *Server) logFSWriteEx(addr string, bucket string, key string, kind strin
 		}
 	}
 
-	// Drop any stale "missing" marker so this key is immediately downloadable.
+	// Drop any stale "missing" marker + cached value so this key reflects the
+	// new write immediately.
 	s.missCache.del(addr, key)
+	s.readCache.del(addr, key)
 
 	lm, err := fs.GetMeta([]byte(key))
 	if err != nil {
@@ -323,26 +299,19 @@ func (s *Server) logFSRead(addr string, key string, w io.Writer) (int64, error) 
 }
 
 func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, error) {
-	s.Lock()
-	fs, ok := s.lfs[addr]
-	if !ok {
-		dsKey := types.NewKey(types.DsLogFS, LOGINST, addr)
-		has, err := s.rp.MetaStore().Has(dsKey)
-		if err == nil && has {
-			fspath := filepath.Join(s.rp.Path(), LOGFS)
-			fs, err = logfs.New(s.rp.MetaStore(), fspath, s.local.String(), addr)
-			if err != nil {
-				s.Unlock()
-				return 0, err
-			}
-			s.lfs[addr] = fs
-			logger.Infof("start exist log inst: %s %d", addr, s.fscnt)
-		} else {
-			s.Unlock()
-			return 0, fmt.Errorf("no such owner: %s", addr)
+	// read-through hot-object cache (small objects; immutable content)
+	if wbytes, ok := s.readCache.get(addr, key); ok {
+		n, err := w.Write(wbytes)
+		if err != nil {
+			return 0, err
 		}
+		return int64(n), nil
 	}
-	s.Unlock()
+
+	fs, err := s.getFS(addr, false)
+	if err != nil {
+		return 0, err
+	}
 
 	lm, err := fs.GetMeta([]byte(key))
 	if err != nil {
@@ -354,6 +323,7 @@ func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, erro
 		// todo: get from remote
 		return 0, err
 	}
+	s.readCache.put(addr, key, wbytes) // caches only if it fits the per-item cap
 	n, err := w.Write(wbytes)
 	if err != nil {
 		return 0, err
@@ -364,11 +334,11 @@ func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, erro
 
 func (s *Server) load() error {
 	fspath := filepath.Join(s.rp.Path(), LOGFS)
-	fs, err := logfs.New(s.rp.MetaStore(), fspath, s.local.String(), s.local.String())
+	fs, err := logfs.New(s.rp.MetaStore(), fspath, s.local.String(), s.local.String(), s.logFSOptions(s.local.String())...)
 	if err != nil {
 		return err
 	}
-	s.lfs[s.local.String()] = fs
+	s.lfs.Store(s.local.String(), fs)
 
 	dsKey := types.NewKey(types.DsLogFS, LOGINST)
 	val, err := s.rp.MetaStore().Get(dsKey)
@@ -442,9 +412,7 @@ func (s *Server) uploadTo() {
 // single owner, drainInstance keeps volumes ordered — the per-owner offset
 // advances sequentially. Worker count: HUB_UPLOAD_WORKERS (default NumCPU).
 func (s *Server) drainAll(cm *contract.ContractManage, au types.Auth, policy types.Policy) {
-	s.RLock()
-	n := s.fscnt
-	s.RUnlock()
+	n := s.fscntGet()
 
 	workers := env.Int("HUB_UPLOAD_WORKERS", runtime.NumCPU())
 	if workers < 1 {
@@ -471,9 +439,10 @@ func (s *Server) drainAll(cm *contract.ContractManage, au types.Auth, policy typ
 
 // getLFS returns the in-memory log instance for an owner (nil if not loaded).
 func (s *Server) getLFS(addr string) *logfs.LogFS {
-	s.RLock()
-	defer s.RUnlock()
-	return s.lfs[addr]
+	if v, ok := s.lfs.Load(addr); ok {
+		return v.(*logfs.LogFS)
+	}
+	return nil
 }
 
 var (

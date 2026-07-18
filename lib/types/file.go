@@ -11,6 +11,30 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
+// CurrentWireVersion tags the CBOR wire/persistence format of the core records
+// below (V6 / FORMAT_VERSIONING_DESIGN.md). fxamacker encodes by field name, so
+// this field is additive-safe: legacy blobs have no Version key → decode as 0,
+// treated as v1. Bump ONLY on a breaking change to a record's meaning, and give
+// readers a matching decode path. Version==0 means "pre-versioning (v1)".
+const CurrentWireVersion uint16 = 1
+
+// stampVersion sets the current wire version on a fresh (0) record before
+// marshaling; an already-set version is preserved.
+func stampVersion(v *uint16) {
+	if *v == 0 {
+		*v = CurrentWireVersion
+	}
+}
+
+// checkVersion fails closed on a record written by a newer node than we
+// understand — never silently misparse a future layout as the current one.
+func checkVersion(v uint16) error {
+	if v > CurrentWireVersion {
+		return fmt.Errorf("unsupported wire version %d (this node understands <= %d) — upgrade the node", v, CurrentWireVersion)
+	}
+	return nil
+}
+
 type Policy struct {
 	N uint8
 	K uint8
@@ -36,6 +60,7 @@ func (p Policy) Check() error {
 }
 
 type FileCore struct {
+	Version  uint16
 	Policy   Policy
 	Name     string
 	Hash     string
@@ -45,11 +70,15 @@ type FileCore struct {
 }
 
 func (frc *FileCore) Serialize() ([]byte, error) {
+	stampVersion(&frc.Version)
 	return cbor.Marshal(frc)
 }
 
 func (frc *FileCore) Deserialize(b []byte) error {
-	return cbor.Unmarshal(b, frc)
+	if err := cbor.Unmarshal(b, frc); err != nil {
+		return err
+	}
+	return checkVersion(frc.Version)
 }
 
 type FileReceipt struct {
@@ -59,11 +88,15 @@ type FileReceipt struct {
 }
 
 func (fr *FileReceipt) Serialize() ([]byte, error) {
+	stampVersion(&fr.Version)
 	return cbor.Marshal(fr)
 }
 
 func (fr *FileReceipt) Deserialize(b []byte) error {
-	return cbor.Unmarshal(b, fr)
+	if err := cbor.Unmarshal(b, fr); err != nil {
+		return err
+	}
+	return checkVersion(fr.Version)
 }
 
 type FileFull struct {
@@ -73,14 +106,19 @@ type FileFull struct {
 }
 
 func (ff *FileFull) Serialize() ([]byte, error) {
+	stampVersion(&ff.Version)
 	return cbor.Marshal(ff)
 }
 
 func (ff *FileFull) Deserialize(b []byte) error {
-	return cbor.Unmarshal(b, ff)
+	if err := cbor.Unmarshal(b, ff); err != nil {
+		return err
+	}
+	return checkVersion(ff.Version)
 }
 
 type PieceCore struct {
+	Version  uint16
 	Policy   Policy
 	Name     string
 	Serial   uint64
@@ -94,11 +132,15 @@ type PieceCore struct {
 }
 
 func (pc *PieceCore) Serialize() ([]byte, error) {
+	stampVersion(&pc.Version)
 	return cbor.Marshal(pc)
 }
 
 func (pc *PieceCore) Deserialize(b []byte) error {
-	return cbor.Unmarshal(b, pc)
+	if err := cbor.Unmarshal(b, pc); err != nil {
+		return err
+	}
+	return checkVersion(pc.Version)
 }
 
 type PieceReceipt struct {
@@ -110,11 +152,15 @@ type PieceReceipt struct {
 }
 
 func (cr *PieceReceipt) Serialize() ([]byte, error) {
+	stampVersion(&cr.Version)
 	return cbor.Marshal(cr)
 }
 
 func (cr *PieceReceipt) Deserialize(b []byte) error {
-	return cbor.Unmarshal(b, cr)
+	if err := cbor.Unmarshal(b, cr); err != nil {
+		return err
+	}
+	return checkVersion(cr.Version)
 }
 
 type PieceWitness struct {
@@ -123,6 +169,7 @@ type PieceWitness struct {
 }
 
 type ReplicaCore struct {
+	Version  uint16
 	Fake     bool
 	Name     string // encoded
 	Serial   uint64
@@ -135,11 +182,15 @@ type ReplicaCore struct {
 }
 
 func (rc *ReplicaCore) Serialize() ([]byte, error) {
+	stampVersion(&rc.Version)
 	return cbor.Marshal(rc)
 }
 
 func (rc *ReplicaCore) Deserialize(b []byte) error {
-	return cbor.Unmarshal(b, rc)
+	if err := cbor.Unmarshal(b, rc); err != nil {
+		return err
+	}
+	return checkVersion(rc.Version)
 }
 
 type ReplicaReceipt struct {
@@ -149,24 +200,33 @@ type ReplicaReceipt struct {
 }
 
 func (rr *ReplicaReceipt) Serialize() ([]byte, error) {
+	stampVersion(&rr.Version)
 	return cbor.Marshal(rr)
 }
 
 func (rr *ReplicaReceipt) Deserialize(b []byte) error {
-	return cbor.Unmarshal(b, rr)
+	if err := cbor.Unmarshal(b, rr); err != nil {
+		return err
+	}
+	return checkVersion(rr.Version)
 }
 
 type ReplicaWitness struct {
-	Index uint64
-	Proof []byte
+	Version uint16
+	Index   uint64
+	Proof   []byte
 }
 
 func (rw *ReplicaWitness) Serialize() ([]byte, error) {
+	stampVersion(&rw.Version)
 	return cbor.Marshal(rw)
 }
 
 func (rw *ReplicaWitness) Deserialize(b []byte) error {
-	return cbor.Unmarshal(b, rw)
+	if err := cbor.Unmarshal(b, rw); err != nil {
+		return err
+	}
+	return checkVersion(rw.Version)
 }
 
 type IFile interface {

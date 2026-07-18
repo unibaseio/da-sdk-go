@@ -7,24 +7,23 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alecthomas/units"
 	"github.com/unibaseio/da-sdk-go/lib/kv"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
-	"github.com/alecthomas/units"
-	"github.com/mitchellh/go-homedir"
 )
 
 func TestBB(t *testing.T) {
-	dd := "10 MB"
-	de := strings.TrimSpace(dd)
-	bb, err := units.ParseBase2Bytes(de)
+	bb, err := units.ParseBase2Bytes(strings.TrimSpace("10MB"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Fatal(int(bb))
+	if int(bb) <= 0 {
+		t.Fatalf("unexpected size: %d", int(bb))
+	}
 }
 
 func TestFs(t *testing.T) {
-	basedir, _ := homedir.Expand("~/test/logfs")
+	basedir := t.TempDir()
 	mdir := filepath.Join(basedir, "kv")
 	ds, err := kv.NewBadgerStore(mdir, &kv.DefaultOptions)
 	if err != nil {

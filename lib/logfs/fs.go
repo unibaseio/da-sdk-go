@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alecthomas/units"
 	"github.com/fxamacker/cbor/v2"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
@@ -31,6 +33,38 @@ func init() {
 	}
 }
 
+// VolumeBackend is the optional durable/shared store for SEALED volumes (P3-S).
+// The write path always stays local (pwrite to the current open volume); only a
+// completed volume is handed to PutVolume on seal, and RangeAt serves a needle
+// when the local volume file is gone (TTL-reclaimed, or this is a reader replica
+// that never wrote it). Content is a full 31MiB volume = one object; a needle is
+// a byte range — so 34M needles cost O(volumes) objects, not O(needles).
+// nil backend = historical local-only behavior (default).
+type VolumeBackend interface {
+	// PutVolume durably stores the sealed volume file at localPath under idx.
+	// Called once per volume on seal; must be idempotent (same idx = same bytes,
+	// volumes are append-only and never rewritten).
+	PutVolume(idx uint64, localPath string) error
+	// RangeAt returns n bytes at off from volume idx. Used only as a read
+	// fallback when the local volume file is absent.
+	RangeAt(idx uint64, off, n int64) ([]byte, error)
+}
+
+// Option configures a LogFS at construction (backward-compatible variadic).
+type Option func(*LogFS)
+
+// WithVolumeBackend attaches a durable/shared sealed-volume backend (P3-S).
+func WithVolumeBackend(vb VolumeBackend) Option {
+	return func(sf *LogFS) { sf.volBackend = vb }
+}
+
+// WithLocalTTL reclaims local disk: a sealed volume confirmed uploaded to the
+// backend is deleted locally once it ages past d (reads then fall back to the
+// backend). 0 = keep local forever (default). Only effective with a backend.
+func WithLocalTTL(d time.Duration) Option {
+	return func(sf *LogFS) { sf.localTTL = d }
+}
+
 type LogMeta struct {
 	Index uint64 // which volume
 	Start uint64
@@ -48,6 +82,12 @@ func (lm *LogMeta) Deserialize(b []byte) error {
 }
 
 type LogFS struct {
+	// mu guards the offset-reservation critical section only (curSize/curIndex/
+	// curFi/full). The actual WriteAt + KV index Put happen OUTSIDE it, so writes
+	// to distinct reserved offsets on one owner proceed concurrently (POSIX
+	// pwrite is safe at distinct offsets). Crash-consistency: data is written
+	// before its index, so a crash leaves at worst orphan bytes (reclaimable
+	// space), never an index entry pointing at unwritten data.
 	sync.RWMutex
 	ds       types.IKVStore
 	addr     string
@@ -56,10 +96,38 @@ type LogFS struct {
 	curFi    *os.File
 	basedir  string
 	openedAt time.Time // when the current (open) volume got its first byte
+	full     bool      // current volume passed MaxSize; roll on next reserve
+	// wg tracks in-flight WriteAt calls on the CURRENT volume; forward() drains
+	// it before closing the fd. Swapped for a fresh one on each roll.
+	wg  *sync.WaitGroup
+	fdc *fdCache // read-only volume fd cache (GetData); nil-safe
+
+	// group-commit fsync (LOGFS_FSYNC=group). Default off keeps the historical
+	// no-fsync behavior (acked writes may be lost on power loss). When on, a
+	// background loop fsyncs the current volume on an interval, and forward()
+	// fsyncs before closing — bounding the loss window without an fsync per write.
+	fsyncGroup bool
+	dirty      atomic.Bool // writes since the last sync (group mode only)
+	stopSync   chan struct{}
+	stopOnce   sync.Once
+
+	// volBackend (P3-S): durable/shared store for SEALED volumes. nil = local-only
+	// (default). ulwg tracks in-flight seal-uploads so Close drains them.
+	volBackend VolumeBackend
+	ulwg       sync.WaitGroup
+
+	// local-disk reclaim (P3-S3): when localTTL>0 and a backend is set, sealed
+	// volumes confirmed uploaded are deleted locally once older than localTTL.
+	// uploadedAt records upload completion time per volume idx (guarded by ulMu).
+	localTTL    time.Duration
+	uploadedAt  map[uint64]time.Time
+	ulMu        sync.Mutex
+	stopReclaim chan struct{}
+	reclaimOnce sync.Once
 }
 
 // todo: each one has its own maxsize
-func New(ds types.IKVStore, dir string, local, addr string) (*LogFS, error) {
+func New(ds types.IKVStore, dir string, local, addr string, opts ...Option) (*LogFS, error) {
 	//log.SetLogLevel("debug")
 	dir = filepath.Join(dir, addr)
 	logger.Infof("logfs start at: %s with maxsize: %d", dir, MaxSize)
@@ -72,6 +140,11 @@ func New(ds types.IKVStore, dir string, local, addr string) (*LogFS, error) {
 		basedir: dir,
 		ds:      ds,
 		addr:    addr,
+		wg:      &sync.WaitGroup{},
+		fdc:     newFdCache(dir, env.Int("LOGFS_FD_CACHE", 128)),
+	}
+	for _, o := range opts {
+		o(sf)
 	}
 
 	dsKey := types.NewKey(types.DsLogFS, addr)
@@ -98,8 +171,111 @@ func New(ds types.IKVStore, dir string, local, addr string) (*LogFS, error) {
 		sf.openedAt = time.Now()
 	}
 
+	if env.Str("LOGFS_FSYNC", "off") == "group" {
+		sf.fsyncGroup = true
+		sf.stopSync = make(chan struct{})
+		go sf.syncLoop(time.Duration(env.Int("LOGFS_FSYNC_INTERVAL_MS", 200))*time.Millisecond, sf.stopSync)
+		logger.Infof("logfs %s group-commit fsync enabled", addr)
+	}
+
+	if sf.volBackend != nil && sf.localTTL > 0 {
+		sf.uploadedAt = make(map[uint64]time.Time)
+		sf.stopReclaim = make(chan struct{})
+		go sf.reclaimLoop(sf.stopReclaim)
+		logger.Infof("logfs %s local-volume TTL reclaim enabled (%s)", addr, sf.localTTL)
+	}
+
 	logger.Infof("logfs started at: %s %d %d", dir, sf.curIndex, sf.curSize)
 	return sf, nil
+}
+
+// syncLoop group-commits the current volume: on each tick, if there have been
+// writes since the last sync, fsync the current volume fd once. Errors are
+// ignored (e.g. the fd was just rolled+closed by forward, which already synced).
+func (sf *LogFS) syncLoop(interval time.Duration, stop <-chan struct{}) {
+	if interval <= 0 {
+		interval = 200 * time.Millisecond
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			if !sf.dirty.Swap(false) {
+				continue
+			}
+			sf.RLock()
+			fi := sf.curFi
+			sf.RUnlock()
+			_ = fi.Sync()
+		}
+	}
+}
+
+// markUploaded records that volume idx is durably in the backend (reclaim
+// candidate). No-op unless TTL reclaim is enabled.
+func (sf *LogFS) markUploaded(idx uint64) {
+	if sf.uploadedAt == nil {
+		return
+	}
+	sf.ulMu.Lock()
+	sf.uploadedAt[idx] = time.Now()
+	sf.ulMu.Unlock()
+}
+
+// reclaimLoop deletes local sealed volumes that are (a) confirmed uploaded and
+// (b) older than localTTL, freeing disk while reads fall back to the backend.
+// Never touches the current (open) volume. Skips a volume whose fd is still in
+// use (retried next tick).
+func (sf *LogFS) reclaimLoop(stop <-chan struct{}) {
+	interval := sf.localTTL / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			sf.reclaimPass()
+		}
+	}
+}
+
+// reclaimPass does one reclaim pass.
+func (sf *LogFS) reclaimPass() {
+	sf.RLock()
+	cur := sf.curIndex
+	sf.RUnlock()
+
+	now := time.Now()
+	var due []uint64
+	sf.ulMu.Lock()
+	for idx, at := range sf.uploadedAt {
+		if idx < cur && now.Sub(at) >= sf.localTTL {
+			due = append(due, idx)
+		}
+	}
+	sf.ulMu.Unlock()
+
+	for _, idx := range due {
+		if !sf.fdc.tryEvict(idx) {
+			continue // fd in use; try again next tick
+		}
+		p := filepath.Join(sf.basedir, fmt.Sprintf("%d.vol", idx))
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			logger.Warnf("logfs %s reclaim volume %d: %v", sf.addr, idx, err)
+			continue
+		}
+		sf.ulMu.Lock()
+		delete(sf.uploadedAt, idx)
+		sf.ulMu.Unlock()
+		logger.Debugf("logfs %s reclaimed local volume %d (served from backend)", sf.addr, idx)
+	}
 }
 
 func GetIndex(local, addr string) uint64 {
@@ -111,11 +287,42 @@ func GetIndex(local, addr string) uint64 {
 	return uint64(st)
 }
 
+// forward rolls to the next volume. MUST be called with sf.Lock held. It first
+// drains in-flight WriteAt calls on the current volume (they hold no lock and
+// finish independently), then closes the fd and opens the next one. New
+// reservations are blocked meanwhile because they too need sf.Lock.
 func (sf *LogFS) forward() error {
+	sf.wg.Wait()          // let in-flight writes on the current volume finish
+	sf.wg = &sync.WaitGroup{}
+
+	if sf.fsyncGroup {
+		_ = sf.curFi.Sync() // durably flush the completed volume before closing
+		sf.dirty.Store(false)
+	}
 	err := sf.curFi.Close()
 	if err != nil {
 		return err
 	}
+
+	// P3-S: the volume we just closed is now sealed (append-only, never rewritten).
+	// Hand it to the durable backend off the write lock. Failure is non-fatal — the
+	// local file is retained (unless TTL-reclaimed) and DA remains the source of
+	// truth — so an unreachable backend never blocks the write path.
+	if sf.volBackend != nil {
+		sealedIdx := sf.curIndex
+		sealedPath := filepath.Join(sf.basedir, fmt.Sprintf("%d.vol", sealedIdx))
+		sf.ulwg.Add(1)
+		go func() {
+			defer sf.ulwg.Done()
+			if perr := sf.volBackend.PutVolume(sealedIdx, sealedPath); perr != nil {
+				logger.Warnf("logfs %s volume %d upload failed (non-fatal, kept local): %v", sf.addr, sealedIdx, perr)
+			} else {
+				logger.Debugf("logfs %s volume %d uploaded to backend", sf.addr, sealedIdx)
+				sf.markUploaded(sealedIdx)
+			}
+		}()
+	}
+
 	sf.curIndex++
 
 	dsKey := types.NewKey(types.DsLogFS, sf.addr)
@@ -134,6 +341,7 @@ func (sf *LogFS) forward() error {
 	sf.curFi = fi
 	sf.curSize = 0
 	sf.openedAt = time.Time{} // reset; set on next first write
+	sf.full = false
 	logger.Infof("logfs %s forward to: %d", sf.addr, sf.curIndex)
 	return nil
 }
@@ -168,61 +376,72 @@ func (sf *LogFS) Put(key, val []byte) error {
 	}
 	dskey := types.NewKey(types.DsLogFS, sf.addr, key)
 
-	sf.Lock()
-	defer sf.Unlock()
-
-	has, err := sf.ds.Has(dskey)
-	if err == nil && has {
+	if has, herr := sf.ds.Has(dskey); herr == nil && has {
 		logger.Infof("%s overwrite key: %s", sf.addr, string(key))
 	}
 
+	// padded on-disk length (records are 31-byte aligned)
+	n := len(val)
+	padded := int64(n)
+	if n%31 != 0 {
+		padded += int64(31 - n%31)
+	}
+
+	// --- reserve an offset (short critical section) ---
+	sf.Lock()
+	// roll a full volume before reserving on it (deferred from the write that
+	// filled it, so forward's wg.Wait never races that same write).
+	if sf.full && sf.curSize > 0 {
+		if err := sf.forward(); err != nil {
+			sf.Unlock()
+			return err
+		}
+	}
 	if sf.curSize == 0 {
 		sf.openedAt = time.Now() // first byte of a fresh volume
 	}
+	start := sf.curSize
+	volIndex := sf.curIndex
+	fi := sf.curFi
+	wg := sf.wg
+	sf.curSize += padded
+	if int(sf.curSize) > MaxSize {
+		sf.full = true // roll on the next reserve
+	}
+	wg.Add(1)
+	sf.Unlock()
 
-	n, err := sf.curFi.WriteAt(val, sf.curSize)
-	if err != nil {
+	// --- write payload + padding + index OUTSIDE the lock ---
+	defer wg.Done()
+
+	if _, err := fi.WriteAt(val, start); err != nil {
 		return err
 	}
-
-	logger.Debugf("logfs write at: %s %d %d %d %d", sf.addr, sf.curIndex, sf.curSize, n, len(val))
-
-	if n%31 != 0 {
-		data := make([]byte, 31-n%31)
-		pn, err := sf.curFi.WriteAt(data, sf.curSize+int64(n))
-		if err != nil {
+	if pad := padded - int64(n); pad > 0 {
+		if _, err := fi.WriteAt(make([]byte, pad), start+int64(n)); err != nil {
 			return err
 		}
-		n += pn
-		logger.Debugf("logfs write padding: %d", pn)
 	}
+	logger.Debugf("logfs write at: %s %d %d %d", sf.addr, volIndex, start, n)
 
 	lm := LogMeta{
-		Index: sf.curIndex,
-		Start: uint64(sf.curSize),
-		Size:  uint64(len(val)),
+		Index: volIndex,
+		Start: uint64(start),
+		Size:  uint64(n),
 		Hash:  sum[:],
 		Name:  key,
 	}
-
-	sf.curSize += int64(n)
-
 	lmv, err := lm.Serialize()
 	if err != nil {
 		return err
 	}
-	err = sf.ds.Put(dskey, lmv)
-	if err != nil {
+	// data-before-index: only now is the object safely indexed.
+	if err := sf.ds.Put(dskey, lmv); err != nil {
 		return err
 	}
-
-	if int(sf.curSize) > MaxSize {
-		err := sf.forward()
-		if err != nil {
-			return err
-		}
+	if sf.fsyncGroup {
+		sf.dirty.Store(true) // group-commit loop will fsync this volume
 	}
-
 	return nil
 }
 
@@ -251,13 +470,18 @@ func (sf *LogFS) GetMeta(key []byte) (*LogMeta, error) {
 }
 
 func (sf *LogFS) GetData(lm *LogMeta, opts ...int) ([]byte, error) {
-	logger.Infof("logfs read at: %s %d %d %d", sf.addr, lm.Index, lm.Start, lm.Size)
-	curlog := filepath.Join(sf.basedir, fmt.Sprintf("%d.vol", lm.Index))
-	fi, err := os.OpenFile(curlog, os.O_RDONLY, os.ModePerm)
+	logger.Debugf("logfs read at: %s %d %d %d", sf.addr, lm.Index, lm.Start, lm.Size)
+	fi, release, err := sf.fdc.acquire(lm.Index)
 	if err != nil {
+		// Local volume absent (TTL-reclaimed, or a reader replica that never wrote
+		// it): fall back to the durable backend's range read. Only sealed volumes
+		// are ever uploaded, so the current open volume always resolves locally.
+		if sf.volBackend != nil && os.IsNotExist(err) {
+			return sf.readViaBackend(lm)
+		}
 		return nil, err
 	}
-	defer fi.Close()
+	defer release()
 
 	res := make([]byte, lm.Size)
 	n, err := fi.ReadAt(res, int64(lm.Start))
@@ -276,6 +500,29 @@ func (sf *LogFS) GetData(lm *LogMeta, opts ...int) ([]byte, error) {
 	return res, nil
 }
 
+// readViaBackend serves a needle by range-reading its volume from the durable
+// backend, verifying the content hash exactly as the local path does.
+func (sf *LogFS) readViaBackend(lm *LogMeta) ([]byte, error) {
+	res, err := sf.volBackend.RangeAt(lm.Index, int64(lm.Start), int64(lm.Size))
+	if err != nil {
+		return nil, err
+	}
+	if len(res) != int(lm.Size) {
+		return nil, fmt.Errorf("unequal size")
+	}
+	sum := sha256.Sum256(res)
+	if !bytes.Equal(sum[:], lm.Hash) {
+		return nil, fmt.Errorf("unequal content")
+	}
+	return res, nil
+}
+
+// FdStats exposes this owner's read fd-cache effectiveness (reused fds vs opens)
+// so the hub can aggregate observability across all owners. Zero when disabled.
+func (sf *LogFS) FdStats() (hits, misses int64) {
+	return sf.fdc.Stats()
+}
+
 func (sf *LogFS) Has(key []byte) (bool, error) {
 	return false, nil
 }
@@ -290,7 +537,19 @@ func (sf *LogFS) Size() types.DiskStats {
 }
 
 func (sf *LogFS) Close() error {
+	if sf.stopSync != nil {
+		sf.stopOnce.Do(func() { close(sf.stopSync) })
+	}
+	if sf.stopReclaim != nil {
+		sf.reclaimOnce.Do(func() { close(sf.stopReclaim) })
+	}
 	sf.Lock()
 	defer sf.Unlock()
+	sf.wg.Wait()   // let in-flight writes finish before closing the fd
+	sf.ulwg.Wait() // let in-flight seal-uploads finish (P3-S)
+	if sf.fsyncGroup {
+		_ = sf.curFi.Sync()
+	}
+	sf.fdc.closeAll()
 	return sf.curFi.Close()
 }

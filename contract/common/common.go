@@ -110,20 +110,23 @@ var (
 	BaseSepoliaChainRPCForFilterLog = "https://base-sepolia-rpc.publicnode.com"
 	BaseSepoliaChainID              = int64(84532)
 	BaseSepoliaTokenAddr            = common.HexToAddress("0x27C8b63E5aCD5298035B984AC3ea3f39d522A700") // canonical UB (10B) — migrated 2026-07-01
-	BaseSepoliaSyncHeight           = 43554392                                                          // deploy block of the suite (redeploy on 0x27C8)
+	BaseSepoliaSyncHeight           = 44293100                                                          // V6-B2 + binding-fix redeploy 2026-07-18 (exact deploy block, from out JSON)
 
-	BaseSepoliaEpochAddr   = common.HexToAddress("0xd1262b3Ba620AF5Da7968B4c4c3AB463dfFc5114")
-	BaseSepoliaNodeAddr    = common.HexToAddress("0xe4BC67209368c8DF6A95091c23EB44D4973A386f")
-	BaseSepoliaPieceAddr   = common.HexToAddress("0x27BeE9ac6831bdd9986a1D64C72eA29562AdCE2C")
-	BaseSepoliaRSProofAddr = common.HexToAddress("0x922204C0e4B51dF05E1280F60505D457fA58E910")
-	BaseSepoliaEProofAddr  = common.HexToAddress("0x49e78BB299a230bc8188a0013A7e769A62bf8791")
-	BaseSepoliaEVerifyAddr = common.HexToAddress("0xb96ad272a1Df8256A143eF88E91c26b7028CB95A")
+	BaseSepoliaEpochAddr   = common.HexToAddress("0xA4469A4373918A4188fbE50376BD444c0dF5F707")
+	BaseSepoliaNodeAddr    = common.HexToAddress("0x18f75C608A638de57Bf641a2F4A96Afdac41EBB1")
+	BaseSepoliaPieceAddr   = common.HexToAddress("0x8EB4c94e2130B7d5198b4FE97b2a8913fE989e05")
+	BaseSepoliaRSProofAddr = common.HexToAddress("0x6b399635A68ee618bBd38ACf49567246901C90dF")
+	BaseSepoliaEProofAddr  = common.HexToAddress("0xE4d1537dB3408710776c568587D28Bde2179AfB4")
+	BaseSepoliaEVerifyAddr = common.HexToAddress("0xE303225DCB75DCcbdf971cB2E7600700640f27E1")
 	BaseSepoliaStatAddr    = common.HexToAddress("") // Stat not deployed by deployall_v2 on base-sepolia
 
-	BaseSepoliaRSOneAddr = common.HexToAddress("0x58A746f74B2b57Dd37001F5f83997d918BF1A827")
-	BaseSepoliaKZGAddr   = common.HexToAddress("0x13BbDCcC638EB67d1BA9A2358B08b24569f662bf")
-	BaseSepoliaAddAddr   = common.HexToAddress("0x37A039cBBB07E6d1b7d04317953Ea3a5b6A917F4")
-	BaseSepoliaMulAddr   = common.HexToAddress("0xEc4f3188c2AACe9A17E4D6c50cEE80c464d4EAc3")
+	// V6-B2 + binding-fix redeploy 2026-07-18 (fixed node/piece bindings w/
+	// emergencyPaused). Verifiers read from the new proxies; v1 registration +
+	// Node.emergencyPaused()==false confirmed on-chain (slash path works).
+	BaseSepoliaRSOneAddr = common.HexToAddress("0x0a2cF25A2EDDc64b5826B93FF1eA13840A2A36A0")
+	BaseSepoliaKZGAddr   = common.HexToAddress("0x76b4cfe92487DCaa454dD180f72F82837a63751b")
+	BaseSepoliaAddAddr   = common.HexToAddress("0xCa1Bd1A08d9e5Fd8240A016097b9Ddf1d2E6c02B")
+	BaseSepoliaMulAddr   = common.HexToAddress("0xB36A1E6a556844F13c962e5Bd00Bd9c4c03C7406")
 )
 
 // base mainnet (deploy order #1; DA contracts + UB OFT bridge addr TBD)
@@ -430,7 +433,11 @@ func AnalyzeTransactionFailure(endPoint string, txHash common.Hash) error {
 		return err
 	}
 	defer client.Close()
-	tx, isPending, err := client.TransactionByHash(context.Background(), txHash)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, isPending, err := client.TransactionByHash(ctx, txHash)
 	if err != nil {
 		return fmt.Errorf("failed to get transaction by hash: %v", err)
 	}
@@ -440,7 +447,7 @@ func AnalyzeTransactionFailure(endPoint string, txHash common.Hash) error {
 	}
 
 	// 获取交易回执
-	receipt, err := client.TransactionReceipt(context.Background(), txHash)
+	receipt, err := client.TransactionReceipt(ctx, txHash)
 	if err != nil {
 		return fmt.Errorf("failed to get transaction receipt: %v", err)
 	}
@@ -455,7 +462,7 @@ func AnalyzeTransactionFailure(endPoint string, txHash common.Hash) error {
 		Data:     tx.Data(),
 	}
 
-	_, err = client.CallContract(context.Background(), callMsg, receipt.BlockNumber)
+	_, err = client.CallContract(ctx, callMsg, receipt.BlockNumber)
 	return err
 }
 

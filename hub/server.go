@@ -2,15 +2,19 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
 	"github.com/unibaseio/da-sdk-go/docs"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
+	"github.com/unibaseio/da-sdk-go/lib/s3vol"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/piece"
 	"github.com/unibaseio/da-sdk-go/lib/repo"
@@ -24,6 +28,7 @@ import (
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
 
@@ -58,9 +63,17 @@ type Server struct {
 
 	ps types.IPieceStore
 
-	sync.RWMutex
-	fscnt uint32
-	lfs   map[string]*logfs.LogFS
+	// per-owner LogFS instances. Lookups are lock-free (sync.Map); creation is
+	// deduplicated per-owner by fsSF so logfs.New never runs under a global lock
+	// (a new owner no longer serializes unrelated owners). See fsmanager.go.
+	lfs     sync.Map // addr(string) -> *logfs.LogFS
+	fsSF    singleflight.Group
+	fscnt   uint32 // number of registered owners (LOGINST count)
+	fscntMu sync.Mutex
+
+	// getFS observability: lock-free map hits vs on-demand logfs.New creations.
+	fsHit    atomic.Int64
+	fsCreate atomic.Int64
 
 	local common.Address
 
@@ -73,6 +86,26 @@ type Server struct {
 
 	// negative cache of download keys confirmed missing (download-flood guard)
 	missCache *missCache
+
+	// read-through byte LRU of small hot objects (nil when HUB_READCACHE_MB=0)
+	readCache *readCache
+
+	// dedupes concurrent DA-download fallbacks for the same (owner,name) so a
+	// cold-but-existing key is reconstructed once, not once per request.
+	dlSF singleflight.Group
+	// dlSem bounds concurrent DA reconstructs (HUB_DOWNLOAD_CONCURRENCY>0);
+	// nil = unlimited = historical behavior. dlTotal/dlShared count fallbacks
+	// and how many were served by an in-flight flight (singleflight coalescing).
+	dlSem    chan struct{}
+	dlTotal  atomic.Int64
+	dlShared atomic.Int64
+
+	// P3-S: shared S3/MinIO backend for sealed volumes (nil = local-only buffer,
+	// the default). Bound per-owner and passed to logfs.New via getFS/load.
+	volStore *s3vol.Store
+
+	// P4-Route: owner-sharded sticky write routing (nil = single-node, default).
+	shard *shardRouter
 
 	// lazily-built chain client for the /api/seal path (hub-signed AddPiece)
 	cmMu sync.Mutex
@@ -130,9 +163,9 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		auth:  auth,
 
 		bucketDisplay: make(map[string]types.BucketDisplay),
-		lfs:           make(map[string]*logfs.LogFS),
 
 		missCache: newMissCache(),
+		readCache: newReadCache(),
 		memStat:   &memStatCache{},
 		totals:    newTotalCache(),
 
@@ -141,6 +174,47 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		shutdownChan:   make(chan struct{}),
 		checkpointStop: make(chan struct{}),
 		uploadNotify:   make(chan struct{}, 1),
+	}
+
+	// Optional cap on concurrent DA reconstructs (expensive K-of-N fetches).
+	// Default 0 = unlimited = historical behavior; singleflight already collapses
+	// same-key floods, this bounds distinct-key fan-out under a read storm.
+	if n := env.Int("HUB_DOWNLOAD_CONCURRENCY", 0); n > 0 {
+		s.dlSem = make(chan struct{}, n)
+	}
+
+	// P3-S: optional durable/shared sealed-volume backend (HUB_BUFFER=s3). Default
+	// "local" keeps volumes on local disk only (unchanged). When s3, each owner's
+	// LogFS uploads sealed volumes to S3/MinIO and reads fall back there when a
+	// local volume is gone — enabling crash recovery + cross-replica reads.
+	if strings.EqualFold(env.Str("HUB_BUFFER", "local"), "s3") {
+		st, verr := s3vol.NewFromEnv()
+		if verr != nil {
+			return nil, fmt.Errorf("HUB_BUFFER=s3: %w", verr)
+		}
+		pctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if perr := st.Ping(pctx); perr != nil {
+			cancel()
+			return nil, fmt.Errorf("HUB_BUFFER=s3 bucket unreachable: %w", perr)
+		}
+		cancel()
+		s.volStore = st
+		logger.Infof("HUB_BUFFER=s3: sealed volumes backed by S3 bucket")
+	}
+
+	// P4-Route: owner-sharded sticky write routing (nil unless HUB_SHARD_TOTAL>1).
+	s.shard = newShardRouter()
+
+	// P4: shared L2 read cache (Redis). Fail-open — an unreachable Redis degrades
+	// to L1-only, so a bad ping is a warning, not a startup failure.
+	if s.readCache != nil {
+		if _, on := s.readCache.L2Stats(); on {
+			if perr := s.readCache.l2.ping(); perr != nil {
+				logger.Warnf("HUB_REDIS_ADDR set but Redis unreachable (L2 fails open to L1-only): %v", perr)
+			} else {
+				logger.Infof("read cache L2 (Redis) enabled")
+			}
+		}
 	}
 
 	if s.readonly {
@@ -253,14 +327,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	// Close all LogFS instances
-	s.Lock()
-	for addr, lfs := range s.lfs {
+	s.lfs.Range(func(k, v any) bool {
+		addr := k.(string)
+		lfs := v.(*logfs.LogFS)
 		logger.Infof("closing LogFS for address: %s", addr)
 		if err := lfs.Close(); err != nil {
 			logger.Errorf("failed to close LogFS for %s: %v", addr, err)
 		}
+		return true
+	})
+
+	// Close the shared L2 read cache (Redis), if any.
+	if s.readCache != nil && s.readCache.l2 != nil {
+		s.readCache.l2.close()
 	}
-	s.Unlock()
 
 	// Persist database data
 	if s.gdb != nil {

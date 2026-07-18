@@ -13,6 +13,7 @@ import (
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/node"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/piece"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/rsproof"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -20,15 +21,22 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+// readCallTimeout is the per-call deadline for on-chain read (eth_call) RPCs.
+// Bounds a hung/rate-limited RPC so a caller goroutine fails fast instead of
+// blocking forever (V3). env CHAIN_CALL_TIMEOUT (seconds) overrides; default 30s.
+func readCallTimeout() time.Duration {
+	return time.Duration(env.Int(env.CallTimeout, 30)) * time.Second
+}
+
 func (c *ContractManage) getOrder(count, pcnt uint64) (uint8, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 
 	ri, err := c.NewEVerify(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return ri.GetOrder(&bind.CallOpts{From: com.Base}, count, pcnt)
+	return ri.GetOrder(&bind.CallOpts{From: com.Base, Context: ctx}, count, pcnt)
 }
 
 func GetOrder(count, pcnt uint64) (uint8, uint64) {
@@ -60,13 +68,13 @@ func GetOrder(count, pcnt uint64) (uint8, uint64) {
 }
 
 func (c *ContractManage) choose(addr common.Address, seed [32]byte, count, pcnt uint64, i uint64) (uint64, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	ri, err := c.NewEVerify(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return ri.Choose(&bind.CallOpts{From: com.Base}, addr, seed, count, pcnt, i)
+	return ri.Choose(&bind.CallOpts{From: com.Base, Context: ctx}, addr, seed, count, pcnt, i)
 }
 
 func Choose(addr common.Address, seed [32]byte, count, pcnt uint64, index uint64) uint64 {
@@ -85,7 +93,7 @@ func Choose(addr common.Address, seed [32]byte, count, pcnt uint64, index uint64
 }
 
 func (c *ContractManage) GetBlockNumber() (uint64, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	client, err := c.Client(ctx)
 	if err != nil {
@@ -95,7 +103,7 @@ func (c *ContractManage) GetBlockNumber() (uint64, error) {
 }
 
 func (c *ContractManage) GetEpochBlocks() (uint64, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 
 	ei, err := c.NewEpoch(ctx)
@@ -103,11 +111,11 @@ func (c *ContractManage) GetEpochBlocks() (uint64, error) {
 		return 0, err
 	}
 
-	return ei.Slots(&bind.CallOpts{From: com.Base})
+	return ei.Slots(&bind.CallOpts{From: com.Base, Context: ctx})
 }
 
 func (c *ContractManage) GetEpoch() (uint64, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 
 	ei, err := c.NewEpoch(ctx)
@@ -115,11 +123,11 @@ func (c *ContractManage) GetEpoch() (uint64, error) {
 		return 0, err
 	}
 
-	return ei.Current(&bind.CallOpts{From: com.Base})
+	return ei.Current(&bind.CallOpts{From: com.Base, Context: ctx})
 }
 
 func (c *ContractManage) GetEpochInfo(_epoch uint64) (*big.Int, [32]byte, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 
 	ei, err := c.NewEpoch(ctx)
@@ -127,11 +135,11 @@ func (c *ContractManage) GetEpochInfo(_epoch uint64) (*big.Int, [32]byte, error)
 		return nil, [32]byte{}, err
 	}
 
-	return ei.GetEpoch(&bind.CallOpts{From: com.Base}, _epoch)
+	return ei.GetEpoch(&bind.CallOpts{From: com.Base, Context: ctx}, _epoch)
 }
 
 func (c *ContractManage) CheckNode(addr common.Address, _typ uint8) error {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 
 	ni, err := c.NewNode(ctx)
@@ -139,7 +147,7 @@ func (c *ContractManage) CheckNode(addr common.Address, _typ uint8) error {
 		return err
 	}
 
-	_, _, err = ni.Check(&bind.CallOpts{From: addr}, addr, _typ)
+	_, _, err = ni.Check(&bind.CallOpts{From: addr, Context: ctx}, addr, _typ)
 	return err
 }
 
@@ -148,13 +156,13 @@ func (c *ContractManage) GetPieceSerial(_pn string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	gi, err := c.NewPiece(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return gi.GetPIndex(&bind.CallOpts{From: com.Base}, pnb)
+	return gi.GetPIndex(&bind.CallOpts{From: com.Base, Context: ctx}, pnb)
 }
 
 func (c *ContractManage) GetReplicaSerial(_pn string) (uint64, error) {
@@ -162,23 +170,23 @@ func (c *ContractManage) GetReplicaSerial(_pn string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	gi, err := c.NewPiece(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return gi.GetRIndex(&bind.CallOpts{From: com.Base}, pnb)
+	return gi.GetRIndex(&bind.CallOpts{From: com.Base, Context: ctx}, pnb)
 }
 
 func (c *ContractManage) GetPiece(_pi uint64) (piece.IPiecePieceInfo, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	fi, err := c.NewPiece(ctx)
 	if err != nil {
 		return piece.IPiecePieceInfo{}, err
 	}
-	pb, err := fi.GetPiece(&bind.CallOpts{From: com.Base}, _pi)
+	pb, err := fi.GetPiece(&bind.CallOpts{From: com.Base, Context: ctx}, _pi)
 	if err != nil {
 		return piece.IPiecePieceInfo{}, err
 	}
@@ -186,13 +194,13 @@ func (c *ContractManage) GetPiece(_pi uint64) (piece.IPiecePieceInfo, error) {
 }
 
 func (c *ContractManage) GetReplica(_ri uint64) (piece.IPieceReplicaInfo, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	fi, err := c.NewPiece(ctx)
 	if err != nil {
 		return piece.IPieceReplicaInfo{}, err
 	}
-	pb, err := fi.GetReplica(&bind.CallOpts{From: com.Base}, _ri)
+	pb, err := fi.GetReplica(&bind.CallOpts{From: com.Base, Context: ctx}, _ri)
 	if err != nil {
 		return piece.IPieceReplicaInfo{}, err
 	}
@@ -201,33 +209,33 @@ func (c *ContractManage) GetReplica(_ri uint64) (piece.IPieceReplicaInfo, error)
 }
 
 func (c *ContractManage) GetMinPledge(_typ uint8) (*big.Int, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	ni, err := c.NewNode(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return ni.MinStakeOf(&bind.CallOpts{From: com.Base}, _typ)
+	return ni.MinStakeOf(&bind.CallOpts{From: com.Base, Context: ctx}, _typ)
 }
 
 func (c *ContractManage) GetPledgeInfo(addr common.Address) (node.INodeNodeInfo, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	ni, err := c.NewNode(ctx)
 	if err != nil {
 		return node.INodeNodeInfo{}, err
 	}
-	return ni.NodeInfoOf(&bind.CallOpts{From: addr}, addr)
+	return ni.NodeInfoOf(&bind.CallOpts{From: addr, Context: ctx}, addr)
 }
 
 func (c *ContractManage) GetStore(addr common.Address) (piece.IPieceStoreInfo, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	fi, err := c.NewPiece(ctx)
 	if err != nil {
 		return piece.IPieceStoreInfo{}, err
 	}
-	fss, err := fi.GetStore(&bind.CallOpts{From: addr}, addr)
+	fss, err := fi.GetStore(&bind.CallOpts{From: addr, Context: ctx}, addr)
 	if err != nil {
 		return piece.IPieceStoreInfo{}, err
 	}
@@ -235,13 +243,13 @@ func (c *ContractManage) GetStore(addr common.Address) (piece.IPieceStoreInfo, e
 }
 
 func (c *ContractManage) GetStoreStat(addr common.Address, _epoch uint64) (piece.IPieceStoreStat, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	fi, err := c.NewPiece(ctx)
 	if err != nil {
 		return piece.IPieceStoreStat{}, err
 	}
-	fss, err := fi.GetSStat(&bind.CallOpts{From: addr}, addr, _epoch)
+	fss, err := fi.GetSStat(&bind.CallOpts{From: addr, Context: ctx}, addr, _epoch)
 	if err != nil {
 		return piece.IPieceStoreStat{}, err
 	}
@@ -249,35 +257,35 @@ func (c *ContractManage) GetStoreStat(addr common.Address, _epoch uint64) (piece
 }
 
 func (c *ContractManage) GetStoreReplica(_a common.Address, _ri uint64) (uint64, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	fi, err := c.NewPiece(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return fi.GetSRAt(&bind.CallOpts{From: com.Base}, _a, _ri)
+	return fi.GetSRAt(&bind.CallOpts{From: com.Base, Context: ctx}, _a, _ri)
 }
 
 func (c *ContractManage) GetRSChalInfo(_pi uint64, _pri uint8) (rsproof.IRSProofProofInfo, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	rsp, err := c.NewRSProof(ctx)
 	if err != nil {
 		return rsproof.IRSProofProofInfo{}, err
 	}
 
-	return rsp.GetProof(&bind.CallOpts{From: com.Base}, _pi, _pri)
+	return rsp.GetProof(&bind.CallOpts{From: com.Base, Context: ctx}, _pi, _pri)
 }
 
 func (c *ContractManage) GetRSMinTime() (uint64, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	rsp, err := c.NewRSProof(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	t, err := rsp.MinProveTime(&bind.CallOpts{From: com.Base})
+	t, err := rsp.MinProveTime(&bind.CallOpts{From: com.Base, Context: ctx})
 	if err != nil {
 		return 0, err
 	}
@@ -286,36 +294,36 @@ func (c *ContractManage) GetRSMinTime() (uint64, error) {
 }
 
 func (c *ContractManage) GetEpochChalInfo(_a common.Address, _ep uint64) (eproof.IEProofProofInfo, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	ep, err := c.NewEProof(ctx)
 	if err != nil {
 		return eproof.IEProofProofInfo{}, err
 	}
 
-	return ep.GetEProof(&bind.CallOpts{From: com.Base}, _a, _ep)
+	return ep.GetEProof(&bind.CallOpts{From: com.Base, Context: ctx}, _a, _ep)
 }
 
 func (c *ContractManage) GetEpochChalDetail(_a common.Address, _ep uint64) (everify.IEVerifyCInfo, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	ep, err := c.NewEVerify(ctx)
 	if err != nil {
 		return everify.IEVerifyCInfo{}, err
 	}
 
-	return ep.GetCInfo(&bind.CallOpts{From: com.Base}, _a, _ep)
+	return ep.GetCInfo(&bind.CallOpts{From: com.Base, Context: ctx}, _a, _ep)
 }
 
 func (c *ContractManage) GetEProofMinTime() (uint64, error) {
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 	rsp, err := c.NewEProof(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	t, err := rsp.MinProveTime(&bind.CallOpts{From: com.Base})
+	t, err := rsp.MinProveTime(&bind.CallOpts{From: com.Base, Context: ctx})
 	if err != nil {
 		return 0, err
 	}
@@ -325,7 +333,7 @@ func (c *ContractManage) GetEProofMinTime() (uint64, error) {
 
 func (c *ContractManage) GetRevenue(addr common.Address, typ string) (*big.Int, error) {
 	res := big.NewInt(0)
-	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Second)
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
 
 	switch typ {
@@ -334,7 +342,7 @@ func (c *ContractManage) GetRevenue(addr common.Address, typ string) (*big.Int, 
 		if err != nil {
 			return res, err
 		}
-		si, err := gi.GetStore(&bind.CallOpts{From: addr}, addr)
+		si, err := gi.GetStore(&bind.CallOpts{From: addr, Context: ctx}, addr)
 		if err != nil {
 			return res, err
 		}
@@ -346,7 +354,7 @@ func (c *ContractManage) GetRevenue(addr common.Address, typ string) (*big.Int, 
 		if err != nil {
 			return res, err
 		}
-		val, err := gi.GetRevenue(&bind.CallOpts{From: addr}, addr)
+		val, err := gi.GetRevenue(&bind.CallOpts{From: addr, Context: ctx}, addr)
 		if err != nil {
 			return res, err
 		}
