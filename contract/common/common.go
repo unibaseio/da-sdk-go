@@ -110,23 +110,25 @@ var (
 	BaseSepoliaChainRPCForFilterLog = "https://base-sepolia-rpc.publicnode.com"
 	BaseSepoliaChainID              = int64(84532)
 	BaseSepoliaTokenAddr            = common.HexToAddress("0x27C8b63E5aCD5298035B984AC3ea3f39d522A700") // canonical UB (10B) — migrated 2026-07-01
-	BaseSepoliaSyncHeight           = 44293100                                                          // V6-B2 + binding-fix redeploy 2026-07-18 (exact deploy block, from out JSON)
+	BaseSepoliaSyncHeight           = 44346389                                                          // audit-fix redeploy 2026-07-19 (epoch-1 start block of the new deploy)
 
-	BaseSepoliaEpochAddr   = common.HexToAddress("0xA4469A4373918A4188fbE50376BD444c0dF5F707")
-	BaseSepoliaNodeAddr    = common.HexToAddress("0x18f75C608A638de57Bf641a2F4A96Afdac41EBB1")
-	BaseSepoliaPieceAddr   = common.HexToAddress("0x8EB4c94e2130B7d5198b4FE97b2a8913fE989e05")
-	BaseSepoliaRSProofAddr = common.HexToAddress("0x6b399635A68ee618bBd38ACf49567246901C90dF")
-	BaseSepoliaEProofAddr  = common.HexToAddress("0xE4d1537dB3408710776c568587D28Bde2179AfB4")
-	BaseSepoliaEVerifyAddr = common.HexToAddress("0xE303225DCB75DCcbdf971cB2E7600700640f27E1")
+	// Audit-fix redeploy 2026-07-19 (C1/C2/C3 + H1–H5 + M-set; regenerated bindings).
+	// On-chain verified: Node.emergencyPaused()==false + emergencyLastPauseBlock() (H1),
+	// Epoch seed derived from prevrandao (C2), challengeWindow=7/minProveTime=1800
+	// (H4/H3 floors), v1 verifiers registered.
+	BaseSepoliaEpochAddr   = common.HexToAddress("0x339D8eb9aB1155e12E44A9E37eAb89e807eCf71f")
+	BaseSepoliaNodeAddr    = common.HexToAddress("0x6af246b9ef3F13F6C970BD635499C375167A92fb")
+	BaseSepoliaPieceAddr   = common.HexToAddress("0xB50052F57bd6aa48ddCa261D4Afb06197f56B5e6")
+	BaseSepoliaRSProofAddr = common.HexToAddress("0x17e03881901480a578356355E9643eDDf1034032")
+	BaseSepoliaEProofAddr  = common.HexToAddress("0x153ECd61faf4568DfB1867746F75675ABCB03E83")
+	BaseSepoliaEVerifyAddr = common.HexToAddress("0xb58b533c5BB4a7638F9063b3474eCd22208fa865")
 	BaseSepoliaStatAddr    = common.HexToAddress("") // Stat not deployed by deployall_v2 on base-sepolia
 
-	// V6-B2 + binding-fix redeploy 2026-07-18 (fixed node/piece bindings w/
-	// emergencyPaused). Verifiers read from the new proxies; v1 registration +
-	// Node.emergencyPaused()==false confirmed on-chain (slash path works).
-	BaseSepoliaRSOneAddr = common.HexToAddress("0x0a2cF25A2EDDc64b5826B93FF1eA13840A2A36A0")
-	BaseSepoliaKZGAddr   = common.HexToAddress("0x76b4cfe92487DCaa454dD180f72F82837a63751b")
-	BaseSepoliaAddAddr   = common.HexToAddress("0xCa1Bd1A08d9e5Fd8240A016097b9Ddf1d2E6c02B")
-	BaseSepoliaMulAddr   = common.HexToAddress("0xB36A1E6a556844F13c962e5Bd00Bd9c4c03C7406")
+	// verifiers registered at version 1 in the new RSProof/EVerify registries.
+	BaseSepoliaRSOneAddr = common.HexToAddress("0x279C3B21e3d2E393B073C34A0FA21FD3a947A3C3")
+	BaseSepoliaKZGAddr   = common.HexToAddress("0xE477F901fC1cb70a061c13e245fbe3e0ec4802B2")
+	BaseSepoliaAddAddr   = common.HexToAddress("0x1C4C99eE9fBA37a5Df23107E6188Bb6B5BF3B34F")
+	BaseSepoliaMulAddr   = common.HexToAddress("0xf40baB34DD97B67fD1BabADA33ab9412acB585a7")
 )
 
 // base mainnet (deploy order #1; DA contracts + UB OFT bridge addr TBD)
