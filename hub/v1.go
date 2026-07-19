@@ -622,10 +622,31 @@ func (s *Server) v1GetObjectContent(c *gin.Context) {
 	// logFSRead resolves owner candidates (lowercase + legacy checksum); empty
 	// owner falls back to a needle-name lookup.
 	if _, err := s.logFSRead(owner, key, &w); err != nil {
+		// P4 shard fallback: a STAGED object's bytes live only on its owner's
+		// home shard (index rows are shared, logfs blobs are not, and L2 fills
+		// on read, not write). If we're not the home shard, forward the read
+		// there instead of 404ing the read-after-write window. The owner comes
+		// from the query when given, else from the shared needle index.
+		if s.shardReadProxy(c, s.routeOwner(owner, key)) {
+			return
+		}
 		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", err))
 		return
 	}
 	c.Data(http.StatusOK, "application/octet-stream", []byte(w.String()))
+}
+
+// routeOwner resolves the owner used for shard read-routing: the caller-supplied
+// owner when present, else the owner recorded on the needle (shared PG index, so
+// any shard can resolve it even without the blob).
+func (s *Server) routeOwner(owner, key string) string {
+	if owner != "" {
+		return owner
+	}
+	if ns, err := s.getNeedleByName(key); err == nil && len(ns) > 0 {
+		return ns[0].Owner
+	}
+	return ""
 }
 
 // GET /v1/pieces/{name}/content — download a committed DA piece by its
