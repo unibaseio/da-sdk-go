@@ -141,3 +141,154 @@ func TestShardWriteProxiesNonHome(t *testing.T) {
 		t.Fatalf("local = %d, want 1", sr.local.Load())
 	}
 }
+
+// TestShardReadProxyNonHome: a content read that misses locally is forwarded to
+// the owner's home shard; home-owner reads (and forwarded requests) stay local.
+func TestShardReadProxyNonHome(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var peerHit bool
+	var peerSawFwd bool
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peerHit = true
+		peerSawFwd = r.Header.Get(shardFwdHeader) != ""
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("blob-from-home"))
+	}))
+	defer peer.Close()
+
+	sr := testShardRouter(t, 0, 2, "http://127.0.0.1:1,"+peer.URL)
+	if sr == nil {
+		t.Fatal("expected enabled router")
+	}
+	s := &Server{shard: sr}
+
+	// route mimicking the content handler's miss path: local always misses,
+	// then falls back to the shard read proxy.
+	r := gin.New()
+	r.GET("/v1/c/:k", func(c *gin.Context) {
+		owner := c.GetHeader("X-Test-Owner")
+		if s.shardReadProxy(c, owner) {
+			return
+		}
+		c.String(http.StatusNotFound, "local-404")
+	})
+	local := httptest.NewServer(r)
+	defer local.Close()
+
+	var homeOwner, awayOwner string
+	for _, o := range []string{"0x01", "0x02", "0x03", "0x04", "0x05", "0x06", "0x07", "0x08"} {
+		switch sr.shardOf(o) {
+		case 0:
+			if homeOwner == "" {
+				homeOwner = o
+			}
+		case 1:
+			if awayOwner == "" {
+				awayOwner = o
+			}
+		}
+	}
+	if homeOwner == "" || awayOwner == "" {
+		t.Fatal("could not find owners for both shards")
+	}
+
+	get := func(owner, fwd string) *http.Response {
+		req, _ := http.NewRequest(http.MethodGet, local.URL+"/v1/c/x", nil)
+		req.Header.Set("X-Test-Owner", owner)
+		if fwd != "" {
+			req.Header.Set(shardFwdHeader, fwd)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		return resp
+	}
+
+	// away owner → proxied to home shard, fwd header set on the hop
+	resp := get(awayOwner, "")
+	body := make([]byte, 32)
+	n, _ := resp.Body.Read(body)
+	resp.Body.Close()
+	if !peerHit || resp.StatusCode != http.StatusOK || string(body[:n]) != "blob-from-home" {
+		t.Fatalf("away read should proxy to home (hit=%v code=%d body=%q)", peerHit, resp.StatusCode, body[:n])
+	}
+	if !peerSawFwd {
+		t.Fatal("forwarded request must carry the fwd guard header")
+	}
+	if sr.readProxied.Load() != 1 {
+		t.Fatalf("readProxied = %d, want 1", sr.readProxied.Load())
+	}
+
+	// home owner → local 404 (nothing better than local)
+	peerHit = false
+	resp = get(homeOwner, "")
+	resp.Body.Close()
+	if peerHit || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("home read must stay local (hit=%v code=%d)", peerHit, resp.StatusCode)
+	}
+
+	// already-forwarded request → NEVER re-proxied, even for an away owner
+	peerHit = false
+	resp = get(awayOwner, "1")
+	resp.Body.Close()
+	if peerHit || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("forwarded read must answer locally (hit=%v code=%d)", peerHit, resp.StatusCode)
+	}
+	if sr.readProxied.Load() != 1 {
+		t.Fatalf("readProxied after guard = %d, want still 1", sr.readProxied.Load())
+	}
+}
+
+// TestShardWriteGuardNoLoop: an already-forwarded WRITE is served locally even
+// when this node believes another shard is home (topology-misconfig safety).
+func TestShardWriteGuardNoLoop(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var peerHit bool
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peerHit = true
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer peer.Close()
+
+	sr := testShardRouter(t, 0, 2, "http://127.0.0.1:1,"+peer.URL)
+	if sr == nil {
+		t.Fatal("expected enabled router")
+	}
+	s := &Server{shard: sr}
+
+	var localHit bool
+	r := gin.New()
+	r.POST("/v1/x",
+		func(c *gin.Context) { c.Set(ctxAuthAddrKey, c.GetHeader("X-Test-Owner")) },
+		s.shardWrite(),
+		func(c *gin.Context) { localHit = true; c.String(http.StatusOK, "from-local") },
+	)
+	local := httptest.NewServer(r)
+	defer local.Close()
+
+	var awayOwner string
+	for _, o := range []string{"0x01", "0x02", "0x03", "0x04", "0x05", "0x06", "0x07", "0x08"} {
+		if sr.shardOf(o) == 1 {
+			awayOwner = o
+			break
+		}
+	}
+	if awayOwner == "" {
+		t.Fatal("no away owner found")
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, local.URL+"/v1/x", nil)
+	req.Header.Set("X-Test-Owner", awayOwner)
+	req.Header.Set(shardFwdHeader, "1") // simulates the second hop
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	resp.Body.Close()
+	if peerHit || !localHit || resp.StatusCode != http.StatusOK {
+		t.Fatalf("forwarded write must be served locally (peer=%v local=%v code=%d)", peerHit, localHit, resp.StatusCode)
+	}
+}
