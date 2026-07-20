@@ -71,7 +71,7 @@ func (s *Server) downloadByPOST(c *gin.Context) {
 }
 
 func (s *Server) download(ctx context.Context, name, owner string, w io.Writer) (int64, error) {
-	size, err := s.logFSRead(owner, name, w)
+	size, _, err := s.logFSRead(owner, name, w)
 	if err == nil {
 		return size, nil
 	}

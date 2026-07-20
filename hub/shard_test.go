@@ -292,3 +292,81 @@ func TestShardWriteGuardNoLoop(t *testing.T) {
 		t.Fatalf("forwarded write must be served locally (peer=%v local=%v code=%d)", peerHit, localHit, resp.StatusCode)
 	}
 }
+
+// TestShardFwdSecretRejectsForged: with HUB_SHARD_FWD_SECRET set, a forged
+// X-Hub-Shard-Fwd (any value that isn't the secret) is NOT honored — the read is
+// still proxied to the home shard, so an external client can't suppress the
+// fallback. The correct secret is honored (answered locally, one hop max).
+func TestShardFwdSecretRejectsForged(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var peerHit bool
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peerHit = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("blob-from-home"))
+	}))
+	defer peer.Close()
+
+	const secret = "s3cr3t-shared-across-the-fleet"
+	t.Setenv("HUB_SHARD_FWD_SECRET", secret)
+	sr := testShardRouter(t, 0, 2, "http://127.0.0.1:1,"+peer.URL)
+	if sr == nil {
+		t.Fatal("expected enabled router")
+	}
+	if sr.fwdSecret != secret {
+		t.Fatalf("fwdSecret = %q, want %q", sr.fwdSecret, secret)
+	}
+	s := &Server{shard: sr}
+
+	r := gin.New()
+	r.GET("/v1/c/:k", func(c *gin.Context) {
+		if s.shardReadProxy(c, c.GetHeader("X-Test-Owner")) {
+			return
+		}
+		c.String(http.StatusNotFound, "local-404")
+	})
+	local := httptest.NewServer(r)
+	defer local.Close()
+
+	var awayOwner string
+	for _, o := range []string{"0x01", "0x02", "0x03", "0x04", "0x05", "0x06", "0x07", "0x08"} {
+		if sr.shardOf(o) == 1 {
+			awayOwner = o
+			break
+		}
+	}
+	if awayOwner == "" {
+		t.Fatal("no away owner found")
+	}
+
+	get := func(fwd string) *http.Response {
+		req, _ := http.NewRequest(http.MethodGet, local.URL+"/v1/c/x", nil)
+		req.Header.Set("X-Test-Owner", awayOwner)
+		if fwd != "" {
+			req.Header.Set(shardFwdHeader, fwd)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		return resp
+	}
+
+	// forged marker ("1" — the legacy sentinel): NOT the secret => ignored,
+	// read still proxied to the home shard.
+	peerHit = false
+	resp := get("1")
+	resp.Body.Close()
+	if !peerHit || resp.StatusCode != http.StatusOK {
+		t.Fatalf("forged fwd header must be ignored and the read still proxied (hit=%v code=%d)", peerHit, resp.StatusCode)
+	}
+
+	// correct secret: honored as already-forwarded => answered locally, no re-proxy.
+	peerHit = false
+	resp = get(secret)
+	resp.Body.Close()
+	if peerHit || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("correct secret must be treated as forwarded and answered locally (hit=%v code=%d)", peerHit, resp.StatusCode)
+	}
+}

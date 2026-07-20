@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"crypto/subtle"
 	"hash/crc32"
+	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
@@ -31,13 +33,21 @@ type shardRouter struct {
 	proxied     atomic.Int64 // writes forwarded to a peer
 	local       atomic.Int64 // writes served locally (home shard)
 	readProxied atomic.Int64 // reads forwarded to the owner's home shard
+
+	// fwdSecret is the shared value a peer stamps on shardFwdHeader when it
+	// forwards. When set (HUB_SHARD_FWD_SECRET), the receiver honors the
+	// forwarded-once marker ONLY if it matches — so an external client can't
+	// forge the header to misroute its own writes or suppress the read
+	// fallback. Empty = legacy behavior (any non-empty value counts).
+	fwdSecret string
 }
 
 // shardFwdHeader marks a request already forwarded once by a shard peer. The
 // receiving hub must answer locally and never re-proxy: home resolution is
 // deterministic, so a second hop only happens under topology misconfig (e.g.
 // two hubs disagreeing on TOTAL) — without this guard that would ping-pong
-// forever. One hop max, then serve or fail locally.
+// forever. One hop max, then serve or fail locally. The value is a shared
+// secret (fwdSecret) so the marker cannot be forged from outside the fleet.
 const shardFwdHeader = "X-Hub-Shard-Fwd"
 
 func newShardRouter() *shardRouter {
@@ -73,8 +83,37 @@ func newShardRouter() *shardRouter {
 			sr.proxies[i] = httputil.NewSingleHostReverseProxy(u)
 		}
 	}
+	sr.fwdSecret = strings.TrimSpace(env.Str("HUB_SHARD_FWD_SECRET", ""))
+	if sr.fwdSecret == "" {
+		logger.Warnf("HUB_SHARD_FWD_SECRET unset: the X-Hub-Shard-Fwd loop/fallback marker is forgeable by external clients (can misroute their own writes or suppress the read fallback). Set a shared secret across all shards.")
+	}
 	logger.Infof("owner sharding enabled: index=%d/%d peers=%v", index, total, parts)
 	return sr
+}
+
+// markForwarded stamps the forwarded-once marker on a request about to be
+// reverse-proxied to a peer (the shared secret when configured, else "1").
+func (sr *shardRouter) markForwarded(req *http.Request) {
+	v := sr.fwdSecret
+	if v == "" {
+		v = "1"
+	}
+	req.Header.Set(shardFwdHeader, v)
+}
+
+// isForwarded reports whether this request was already forwarded once by a peer.
+// With a secret configured the marker must match it (constant-time) — a forged
+// or absent header is treated as not-forwarded, so the request routes normally.
+// Without a secret, any non-empty value counts (legacy, forgeable).
+func (sr *shardRouter) isForwarded(c *gin.Context) bool {
+	got := c.GetHeader(shardFwdHeader)
+	if got == "" {
+		return false
+	}
+	if sr.fwdSecret == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(sr.fwdSecret)) == 1
 }
 
 // shardStats reports the sharding topology + write-routing counters for
@@ -119,7 +158,7 @@ func (s *Server) shardWrite() gin.HandlerFunc {
 		}
 		// Already forwarded once by a peer: answer locally, never re-proxy
 		// (see shardFwdHeader — breaks the ping-pong on topology misconfig).
-		if c.GetHeader(shardFwdHeader) != "" {
+		if sr.isForwarded(c) {
 			sr.local.Add(1)
 			c.Next()
 			return
@@ -132,7 +171,7 @@ func (s *Server) shardWrite() gin.HandlerFunc {
 		}
 		sr.proxied.Add(1)
 		logger.Debugf("shard: proxying %s write for owner %s to shard %d (%s)", c.Request.Method, owner, home, sr.peers[home])
-		c.Request.Header.Set(shardFwdHeader, "1")
+		sr.markForwarded(c.Request)
 		sr.proxies[home].ServeHTTP(c.Writer, c.Request)
 		c.Abort()
 	}
@@ -153,7 +192,7 @@ func (s *Server) shardReadProxy(c *gin.Context, owner string) bool {
 	if sr == nil || owner == "" {
 		return false
 	}
-	if c.GetHeader(shardFwdHeader) != "" {
+	if sr.isForwarded(c) {
 		return false // one hop max — answer (or 404) locally
 	}
 	home := sr.shardOf(owner)
@@ -162,7 +201,7 @@ func (s *Server) shardReadProxy(c *gin.Context, owner string) bool {
 	}
 	sr.readProxied.Add(1)
 	logger.Debugf("shard: proxying read for owner %s to home shard %d (%s)", owner, home, sr.peers[home])
-	c.Request.Header.Set(shardFwdHeader, "1")
+	sr.markForwarded(c.Request)
 	sr.proxies[home].ServeHTTP(c.Writer, c.Request)
 	c.Abort()
 	return true

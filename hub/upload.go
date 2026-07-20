@@ -271,14 +271,21 @@ func (s *Server) logFSWriteEx(addr string, bucket string, key string, kind strin
 	return mm, nil
 }
 
-func (s *Server) logFSRead(addr string, key string, w io.Writer) (int64, error) {
+// logFSRead reads the object bytes into w and also returns the owner it resolved
+// the object under. For an empty addr this is the needle's owner (from the shared
+// PG index) and is returned even when the local blob read fails — so a caller can
+// route a shard read-fallback by that owner without re-querying the needle.
+func (s *Server) logFSRead(addr string, key string, w io.Writer) (int64, string, error) {
 	if addr == "" {
 		ns, err := s.getNeedleByName(key)
 		if err != nil || len(ns) == 0 {
-			return 0, fmt.Errorf("no such needle %s", key)
+			return 0, "", fmt.Errorf("no such needle %s", key)
 		}
 		// Found the exact owner the needle was stored under — read it directly.
-		return s.logFSReadOne(ns[0].Owner, key, w)
+		// Return that owner even on a read error: the blob may be staged on
+		// another shard, and the caller routes the fallback by this owner.
+		n, err := s.logFSReadOne(ns[0].Owner, key, w)
+		return n, ns[0].Owner, err
 	}
 
 	// Client-supplied owner: try the canonical lowercase form first, then the
@@ -289,13 +296,13 @@ func (s *Server) logFSRead(addr string, key string, w io.Writer) (int64, error) 
 	for _, cand := range ownerCandidates(addr) {
 		n, err := s.logFSReadOne(cand, key, w)
 		if err == nil {
-			return n, nil
+			return n, cand, nil
 		}
 		if firstErr == nil {
 			firstErr = err
 		}
 	}
-	return 0, firstErr
+	return 0, addr, firstErr
 }
 
 func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, error) {
