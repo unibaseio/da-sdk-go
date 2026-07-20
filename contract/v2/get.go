@@ -361,6 +361,24 @@ func (c *ContractManage) GetRevenue(addr common.Address, typ string) (*big.Int, 
 
 		res.Set(val)
 		return res, nil
+	case types.ValidatorType:
+		// Validator reward lives in the separate ValidatorReward pool, not the
+		// Piece contract. Report the validator's claimable (pending) reward.
+		// If no ValidatorReward is wired (VALIDATOR_REWARD_ADDR unset), report 0
+		// rather than error — callers show 0, not the wallet balance.
+		if c.ValidatorRewardAddr == (common.Address{}) {
+			return res, nil
+		}
+		vi, err := c.NewValidatorReward(ctx)
+		if err != nil {
+			return res, err
+		}
+		val, err := vi.Pending(&bind.CallOpts{From: addr, Context: ctx}, addr)
+		if err != nil {
+			return res, err
+		}
+		res.Set(val)
+		return res, nil
 	default:
 		return res, fmt.Errorf("unsupported")
 	}
