@@ -100,6 +100,69 @@
   },
   {
     "type": "function",
+    "name": "emergencyLastPauseBlock",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "emergencyPause",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IEmergencyPause"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "emergencyPauseOverlapped",
+    "inputs": [
+      {
+        "name": "fromBlock",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "toBlock",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "emergencyPaused",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "epoch",
     "inputs": [],
     "outputs": [
@@ -485,6 +548,19 @@
   },
   {
     "type": "function",
+    "name": "setEmergencyPause",
+    "inputs": [
+      {
+        "name": "p",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "stake",
     "inputs": [
       {
@@ -598,6 +674,19 @@
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EmergencyPauseSet",
+    "inputs": [
+      {
+        "name": "pauser",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
       }
     ],
     "anonymous": false

@@ -501,6 +501,11 @@
         "internalType": "bytes[]"
       },
       {
+        "name": "_ver",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
         "name": "_proof",
         "type": "bytes",
         "internalType": "bytes"
@@ -524,6 +529,11 @@
         "internalType": "bytes32"
       },
       {
+        "name": "_ver",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
         "name": "_proof",
         "type": "bytes",
         "internalType": "bytes"
@@ -545,6 +555,11 @@
         "name": "_com",
         "type": "bytes",
         "internalType": "bytes"
+      },
+      {
+        "name": "_ver",
+        "type": "uint8",
+        "internalType": "uint8"
       },
       {
         "name": "_proof",
