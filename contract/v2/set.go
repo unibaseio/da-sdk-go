@@ -173,8 +173,11 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 			pval.Sub(pval, pinfo.StakedAmount)
 			val = pval
 		} else {
-			com.Logger.Debug("no need more pledge")
-			return nil
+			// Enough stake but inactive (terminated, or the minimum was lowered
+			// after a slash): Node only (re)activates inside stake(), so stake
+			// zero to flip it back instead of returning with the node still off.
+			com.Logger.Debug("stake already covers the minimum; re-activating")
+			val = big.NewInt(0)
 		}
 	}
 
@@ -208,8 +211,11 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	if err != nil {
 		return err
 	}
-	_, _, err = ni.Check(&bind.CallOpts{From: au.From}, au.From, _typ)
-	return err
+	active, _, err := ni.Check(&bind.CallOpts{From: au.From}, au.From, _typ)
+	if err != nil {
+		return err
+	}
+	return nodeStatusErr(active, au.From, _typ)
 }
 
 // AddPiece registers a piece on-chain (IncreaseAllowance + addPiece) under the

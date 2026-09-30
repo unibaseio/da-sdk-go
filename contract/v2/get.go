@@ -3,6 +3,7 @@ package contract
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -138,6 +139,14 @@ func (c *ContractManage) GetEpochInfo(_epoch uint64) (*big.Int, [32]byte, error)
 	return ei.GetEpoch(&bind.CallOpts{From: com.Base, Context: ctx}, _epoch)
 }
 
+// ErrNodeInactive means addr is not an active on-chain node of the given type:
+// exited, slashed below the minimum stake, never registered, or registered as
+// another type. Callers use errors.Is to tell it apart from an RPC failure.
+var ErrNodeInactive = errors.New("not an active on-chain node of this type")
+
+// CheckNode returns nil only when addr is an active node of type _typ.
+// Node.check does not revert for an inactive or mistyped node — it returns
+// (false, 0) — so the flag must be checked, not just the call error.
 func (c *ContractManage) CheckNode(addr common.Address, _typ uint8) error {
 	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
 	defer cancle()
@@ -147,8 +156,18 @@ func (c *ContractManage) CheckNode(addr common.Address, _typ uint8) error {
 		return err
 	}
 
-	_, _, err = ni.Check(&bind.CallOpts{From: addr, Context: ctx}, addr, _typ)
-	return err
+	active, _, err := ni.Check(&bind.CallOpts{From: addr, Context: ctx}, addr, _typ)
+	if err != nil {
+		return err
+	}
+	return nodeStatusErr(active, addr, _typ)
+}
+
+func nodeStatusErr(active bool, addr common.Address, _typ uint8) error {
+	if active {
+		return nil
+	}
+	return fmt.Errorf("%w: %s type %d", ErrNodeInactive, addr.Hex(), _typ)
 }
 
 func (c *ContractManage) GetPieceSerial(_pn string) (uint64, error) {
