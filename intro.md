@@ -2,7 +2,7 @@
 
 ## 架构
 
-![dimo data flow](./dimo_data_flow.png)
+![DA data flow](./da_data_flow.png)
 
 
 ### 数据格式

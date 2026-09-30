@@ -58,7 +58,7 @@ func TestModel(t *testing.T) {
 }
 
 func TestDecode(t *testing.T) {
-	pa := "~/dimo-go/bin/stream-edge"
+	pa := "~/da-go/bin/stream-edge"
 	pb := "~/as"
 
 	pa, _ = homedir.Expand(pa)

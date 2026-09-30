@@ -25,7 +25,7 @@ import (
 
 var serverCmd = &cli.Command{
 	Name:  "daemon",
-	Usage: "dimo hub daemon",
+	Usage: "DA hub daemon",
 	Subcommands: []*cli.Command{
 		runCmd,
 		cmd.StopCmd,
