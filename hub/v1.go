@@ -9,6 +9,7 @@ package hub
 // the other (one storage engine, two API façades).
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
@@ -83,6 +85,7 @@ type v1Receipt struct {
 	Key          string     `json:"key"`
 	Size         uint64     `json:"size"`
 	Sha256       string     `json:"sha256,omitempty"`     // content sha256 (best-effort, from logfs meta)
+	Keccak256    string     `json:"keccak256,omitempty"`  // content keccak256, 0x-hex (the hash ERC-8004 fields carry)
 	Commitment   string     `json:"commitment,omitempty"` // DA piece (content-addressed id)
 	Status       string     `json:"status"`               // staged → committed
 	Chain        *v1Chain   `json:"chain,omitempty"`
@@ -384,14 +387,17 @@ func (s *Server) v1PutObject(c *gin.Context) {
 	// ?wait=1: block until the object commits on-chain (drainInstance AddPiece),
 	// then return 200 + committed receipt. Best for passthrough kinds (own volume,
 	// uploads promptly); small coalesce kinds may stay staged until the batch flush.
+	kh := keccakHex(data)
 	if c.Query("wait") == "1" {
 		if nd, done := s.v1WaitCommitted(c.Request.Context(), owner, bucket, key); done {
-			c.JSON(http.StatusOK, receiptFromNeedle(bucket, nd))
+			r := receiptFromNeedle(bucket, nd)
+			r.Keccak256 = kh
+			c.JSON(http.StatusOK, r)
 			return
 		}
 	}
 	// staged: on logfs + indexed; committed later by drainInstance's AddPiece.
-	c.JSON(http.StatusAccepted, v1Receipt{Bucket: bucket, Key: key, Size: uint64(len(data)), Status: "staged", Availability: "pending"})
+	c.JSON(http.StatusAccepted, v1Receipt{Bucket: bucket, Key: key, Size: uint64(len(data)), Keccak256: kh, Status: "staged", Availability: "pending"})
 }
 
 // POST /v1/buckets/{bucket}/objects — batch put (multipart files[]).
@@ -715,9 +721,25 @@ func (s *Server) v1DeleteBucket(c *gin.Context) {
 		"note": "removed from index; on-chain DA data is immutable and persists"})
 }
 
+// v1Range locates an object's bytes inside its DA piece. The piece's original
+// data is the whole logfs volume file, and logfs writes each object raw at
+// Start (padding only after it), so [Start, Start+Size) of the reconstructed
+// piece is the object.
+type v1Range struct {
+	Volume uint64 `json:"volume"`
+	Start  uint64 `json:"start"`
+	Size   uint64 `json:"size"`
+}
+
+// maxProofHashBytes caps how much content /proof reads to compute keccak256.
+// Evidence and memory objects are small; large model/dataset objects skip it.
+const maxProofHashBytes = 16 << 20
+
 // GET /v1/buckets/{bucket}/objects/{key}/proof — verification bundle. Returns
 // the DA commitment + on-chain pointer so anyone can independently verify:
-// fetch content → recompute commitment → confirm the piece is registered on-chain.
+// the content hashes (sha256, and keccak256 for small objects), and — when the
+// volume is a single piece — the object's byte range inside that piece, so a
+// verifier can rebuild the piece from store nodes and check it without the hub.
 // (Full ZK availability-proof export is a future enhancement.)
 func (s *Server) v1GetObjectProof(c *gin.Context) {
 	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
@@ -740,14 +762,52 @@ func (s *Server) v1GetObjectProof(c *gin.Context) {
 		c.JSON(http.StatusTooEarly, lerror.ToAPIError("hub", fmt.Errorf("object not yet committed on-chain (status=staged)")))
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"bucket":     bucket,
 		"key":        key,
 		"commitment": n.Piece, // DA piece (content-addressed id)
 		"sha256":     s.objectSha256(n.Owner, key),
 		"chain":      v1Chain{TxHash: n.TxHash, ChainType: n.ChainType},
-		"verify":     "fetch content, recompute the DA commitment, and confirm the piece is on-chain via the Piece contract (chain.txHash)",
-	})
+		"verify":     "hash the content and compare; confirm the piece is registered and unexpired on the Piece contract; optionally rebuild the piece from store nodes and hash range.start..start+size",
+	}
+	if kh := s.objectKeccak(n.Owner, key, n.Size); kh != "" {
+		resp["keccak256"] = kh
+	}
+	vols, err := s.volumesOf(n.Owner, n.File)
+	if err == nil {
+		if cur := onChain(vols, s.currentChainType()); len(cur) > 0 {
+			vols = cur
+		}
+	}
+	switch {
+	case err != nil:
+		// range left out; the rest of the bundle still stands
+	case len(vols) == 1:
+		resp["range"] = v1Range{Volume: n.File, Start: n.Start, Size: n.Size}
+	default:
+		resp["rangeNote"] = fmt.Sprintf("volume %d spans %d pieces; the byte range inside a piece is not resolvable", n.File, len(vols))
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// objectKeccak returns the content keccak256 (0x-hex) for a small object,
+// best-effort: empty when there is no repo, the object is larger than
+// maxProofHashBytes, or the read fails.
+func (s *Server) objectKeccak(owner, key string, size uint64) string {
+	if owner == "" || s.rp == nil || size == 0 || size > maxProofHashBytes {
+		return ""
+	}
+	for _, cand := range ownerCandidates(owner) {
+		var buf bytes.Buffer
+		if _, err := s.logFSReadOne(cand, key, &buf); err == nil && uint64(buf.Len()) == size {
+			return keccakHex(buf.Bytes())
+		}
+	}
+	return ""
+}
+
+func keccakHex(b []byte) string {
+	return "0x" + hex.EncodeToString(crypto.Keccak256(b))
 }
 
 // objectMeta resolves the logfs LogMeta for (owner,key) — loading the owner's

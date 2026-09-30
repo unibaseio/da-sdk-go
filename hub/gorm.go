@@ -593,7 +593,15 @@ func (s *Server) getNeedleDisplay(owner, bucket, name string) ([]types.NeedleDis
 			Start:     needle[i].Start,
 			Size:      needle[i].Size,
 		}
-		vol, err := s.getVolume(needle[i].Owner, needle[i].File)
+		// volumesOf, not getVolume: getVolume treats file 0 as "all volumes",
+		// which handed objects in an owner's first volume whatever row the DB
+		// returned first.
+		vol, err := s.volumesOf(needle[i].Owner, needle[i].File)
+		if err == nil {
+			if cur := onChain(vol, s.currentChainType()); len(cur) > 0 {
+				vol = cur
+			}
+		}
 		if err == nil && len(vol) > 0 {
 			nd.Piece = vol[0].Piece
 			nd.TxHash = vol[0].TxHash
@@ -603,6 +611,40 @@ func (s *Server) getNeedleDisplay(owner, bucket, name string) ([]types.NeedleDis
 	}
 
 	return res, nil
+}
+
+// volumesOf returns the volume rows of exactly (owner, file). Unlike getVolume,
+// file 0 is a real volume index here, not "all volumes". Oldest first, so the
+// first row is the piece covering the start of a volume that spans several.
+func (s *Server) volumesOf(owner string, file uint64) ([]types.Volume, error) {
+	var vols []types.Volume
+	err := s.gdb.Where("LOWER(owner) = ? AND file = ?", strings.ToLower(owner), file).
+		Order("id asc").Find(&vols).Error
+	return vols, err
+}
+
+// currentChainType is the chain this hub commits to; "" when running without a
+// repo (tests), which onChain treats as "keep every row".
+func (s *Server) currentChainType() string {
+	if s.rp == nil {
+		return ""
+	}
+	return s.rp.Repo().Config().Chain.Type
+}
+
+// onChain keeps the volume rows committed on the given chain. A hub that moved
+// chains keeps its old rows, whose pieces live on the old chain.
+func onChain(vols []types.Volume, chain string) []types.Volume {
+	if chain == "" {
+		return vols
+	}
+	out := make([]types.Volume, 0, len(vols))
+	for _, v := range vols {
+		if v.ChainType == chain {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (s *Server) listNeedleDisplay(owner, bucket string, offset, limit int) ([]types.NeedleDisplay, error) {

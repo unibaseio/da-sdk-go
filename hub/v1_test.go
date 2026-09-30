@@ -191,6 +191,75 @@ func TestV1Objects(t *testing.T) {
 	}
 }
 
+// TestV1ProofRange covers the verification bundle an ERC-8004 evidence verifier
+// relies on: the right piece for objects in volume 0, the byte range inside the
+// piece, and no range when a volume spans several pieces.
+func TestV1ProofRange(t *testing.T) {
+	s := newV1TestServer(t)
+	owner := strings.ToLower("0x00000000000000000000000000000000000000a1")
+
+	s.gdb.Create(&types.Bucket{Name: "8004-evidence", Owner: owner, Kind: "file"})
+	s.gdb.Create(&types.Needle{Owner: owner, Bucket: "8004-evidence", Name: "e.json", File: 0, Start: 4096, Size: 812})
+	s.gdb.Create(&types.Needle{Owner: owner, Bucket: "8004-evidence", Name: "f.json", File: 1, Start: 0, Size: 50})
+	s.gdb.Create(&types.Needle{Owner: owner, Bucket: "8004-evidence", Name: "big.bin", File: 2, Start: 0, Size: 900})
+	// volume 1's row is inserted before volume 0's, so "first row of all the
+	// owner's volumes" would be the wrong piece for e.json.
+	s.gdb.Create(&types.Volume{Owner: owner, File: 1, Piece: "p1", TxHash: "0x01", ChainType: "base-sepolia"})
+	s.gdb.Create(&types.Volume{Owner: owner, File: 0, Piece: "p0", TxHash: "0x00", ChainType: "base-sepolia"})
+	// volume 2 spans two pieces
+	s.gdb.Create(&types.Volume{Owner: owner, File: 2, Piece: "q1", TxHash: "0x21", ChainType: "base-sepolia"})
+	s.gdb.Create(&types.Volume{Owner: owner, File: 2, Piece: "q2", TxHash: "0x22", ChainType: "base-sepolia"})
+
+	type proof struct {
+		Commitment string   `json:"commitment"`
+		Range      *v1Range `json:"range"`
+		RangeNote  string   `json:"rangeNote"`
+		Keccak256  string   `json:"keccak256"`
+	}
+	get := func(key string) proof {
+		t.Helper()
+		w := do(t, s, "GET", "/v1/buckets/8004-evidence/objects/"+key+"/proof?owner="+owner, "", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("proof %s: got %d body %s", key, w.Code, w.Body.String())
+		}
+		var p proof
+		if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+			t.Fatalf("proof %s: decode: %v", key, err)
+		}
+		return p
+	}
+
+	p := get("e.json")
+	if p.Commitment != "p0" {
+		t.Fatalf("volume-0 object got piece %q, want p0", p.Commitment)
+	}
+	if p.Range == nil || p.Range.Volume != 0 || p.Range.Start != 4096 || p.Range.Size != 812 {
+		t.Fatalf("range wrong: %+v", p.Range)
+	}
+	if p.Keccak256 != "" {
+		t.Fatalf("keccak256 without a repo should be omitted, got %q", p.Keccak256)
+	}
+
+	if p := get("f.json"); p.Commitment != "p1" || p.Range == nil {
+		t.Fatalf("volume-1 object wrong: %+v", p)
+	}
+
+	p = get("big.bin")
+	if p.Commitment != "q1" {
+		t.Fatalf("multi-piece volume should report its first piece, got %q", p.Commitment)
+	}
+	if p.Range != nil || p.RangeNote == "" {
+		t.Fatalf("multi-piece volume must not claim a range: %+v", p)
+	}
+}
+
+func TestKeccakHex(t *testing.T) {
+	// keccak256("") — the well-known empty-input digest
+	if got := keccakHex(nil); got != "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470" {
+		t.Fatalf("keccakHex(empty) = %s", got)
+	}
+}
+
 func TestV1DeleteBucket(t *testing.T) {
 	s := newV1TestServer(t)
 	addr, pk := testKey(t)
