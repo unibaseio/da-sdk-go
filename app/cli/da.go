@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/mitchellh/go-homedir"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	"github.com/unibaseio/da-sdk-go/evidence"
 	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/sdk"
@@ -42,7 +43,98 @@ func daCommand() *cli.Command {
 			daUploadCmd(),
 			daDownloadCmd(),
 			daLsCmd(),
+			daVerifyEvidenceCmd(),
 		},
+	}
+}
+
+// daVerifyEvidenceCmd — `ubcli da verify-evidence`: check an ERC-8004 evidence
+// file (registration / feedback / validation) stored on DA.
+func daVerifyEvidenceCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "verify-evidence",
+		Usage: "check an ERC-8004 evidence file: hash matches, piece registered, still rebuildable (exit 0 ok · 1 failed · 2 not committed yet)",
+		Flags: commonFlags(
+			&cli.StringFlag{Name: "uri", Required: true, Usage: "evidence URI as recorded on-chain (hub object URL)"},
+			&cli.StringFlag{Name: "hash", Required: true, Usage: "keccak256 recorded on-chain (feedbackHash / requestHash / responseHash)"},
+			&cli.StringFlag{Name: "chain", EnvVars: []string{"CHAIN_TYPE"}, Value: "base-sepolia", Usage: "chain type"},
+			&cli.BoolFlag{Name: "trustless", Usage: "also rebuild the piece from store nodes (needs --gateway) and hash the evidence range"},
+		),
+		Action: func(c *cli.Context) error {
+			// read-only: any key signs the chain/gateway reads, no funds needed
+			sk, err := loadKey(c)
+			if err != nil {
+				if sk, err = crypto.GenerateKey(); err != nil {
+					return err
+				}
+			}
+			cm, err := contract.NewContractManage(sk, c.String("chain"))
+			if err != nil {
+				return err
+			}
+			var opt evidence.Options
+			if c.Bool("trustless") {
+				gw, err := requireGateway(c)
+				if err != nil {
+					return err
+				}
+				au, err := key.BuildAuth(sk, []byte("download"))
+				if err != nil {
+					return err
+				}
+				opt.FetchPiece = func(p string) ([]byte, error) {
+					_, data, err := sdk.DownloadPiece(gw, au, p)
+					return data, err
+				}
+			}
+			res, err := evidence.Verify(c.String("uri"), c.String("hash"), evidence.NewChain(cm), opt)
+			if err != nil {
+				return err
+			}
+			if c.Bool("json") {
+				b, _ := json.MarshalIndent(res, "", "  ")
+				fmt.Println(string(b))
+			} else {
+				printEvidence(res)
+			}
+			failed := !res.ContentOK ||
+				(res.Committed && (!res.Registered || !res.Available)) ||
+				(res.Trustless != nil && !res.Trustless.OK)
+			switch {
+			case failed:
+				return cli.Exit("evidence check failed", 1)
+			case res.Staged:
+				return cli.Exit("not yet committed on-chain; retry later", 2)
+			}
+			return nil
+		},
+	}
+}
+
+func printEvidence(r evidence.Result) {
+	mark := func(ok bool) string {
+		if ok {
+			return "✓"
+		}
+		return "✗"
+	}
+	fmt.Printf("evidence   %s\n", r.URI)
+	fmt.Printf("content    %s keccak256 %s (expected %s)\n", mark(r.ContentOK), r.ContentHash, r.ExpectedHash)
+	switch {
+	case r.Staged:
+		fmt.Println("committed  … staged on the hub, not yet on-chain")
+	case r.Committed:
+		fmt.Printf("committed  %s piece %s (index %d) tx %s\n", mark(r.Registered), r.Piece, r.PieceIndex, r.TxHash)
+		if r.Registered {
+			fmt.Printf("available  %s %d healthy replicas (need %d of %d) · expires epoch %d (now %d)\n",
+				mark(r.Available), r.LiveReplicas, r.K, r.N, r.ExpireEpoch, r.CurrentEpoch)
+		}
+	}
+	if r.Trustless != nil {
+		fmt.Printf("trustless  %s rebuilt from store nodes, keccak256 %s\n", mark(r.Trustless.OK), r.Trustless.Hash)
+	}
+	for _, n := range r.Notes {
+		fmt.Printf("note       %s\n", n)
 	}
 }
 

@@ -165,6 +165,42 @@ func (c *ContractManage) GetPieceSerial(_pn string) (uint64, error) {
 	return gi.GetPIndex(&bind.CallOpts{From: com.Base, Context: ctx}, pnb)
 }
 
+// GetPieceRS returns a registered piece's erasure policy (n, k) and its expiry
+// epoch.
+func (c *ContractManage) GetPieceRS(_pi uint64) (uint8, uint8, uint64, error) {
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancle()
+	gi, err := c.NewPiece(ctx)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return gi.GetRS(&bind.CallOpts{From: com.Base, Context: ctx}, _pi)
+}
+
+// GetPieceReplica returns the replica index and store node holding slot _pri of
+// piece _pi; a zero address means the slot was never filled.
+func (c *ContractManage) GetPieceReplica(_pi uint64, _pri uint8) (uint64, common.Address, error) {
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancle()
+	gi, err := c.NewPiece(ctx)
+	if err != nil {
+		return 0, common.Address{}, err
+	}
+	return gi.GetPRI(&bind.CallOpts{From: com.Base, Context: ctx}, _pi, _pri)
+}
+
+// GetRSFake reports whether slot _pri of piece _pi was judged forged by the RS
+// fraud game. The mark is permanent; the slot is never re-replicated.
+func (c *ContractManage) GetRSFake(_pi uint64, _pri uint8) (bool, error) {
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancle()
+	ri, err := c.NewRSProof(ctx)
+	if err != nil {
+		return false, err
+	}
+	return ri.GetStat(&bind.CallOpts{From: com.Base, Context: ctx}, _pi, _pri)
+}
+
 func (c *ContractManage) GetReplicaSerial(_pn string) (uint64, error) {
 	pnb, err := com.G1StringInSolidity(_pn)
 	if err != nil {
