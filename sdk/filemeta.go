@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
@@ -113,14 +114,30 @@ func GetPieceReceipt(baseUrl string, auth types.Auth, name string) (types.PieceR
 }
 
 func ListPiece(baseUrl string, auth types.Auth, filter string) (types.ListPieceResult, error) {
+	return listPiece(baseUrl, filter, "")
+}
+
+// ListDispatch lists the pieces a stream can still hand to store: the stream
+// leaves out pieces store already holds or cannot be given a slot of, and puts
+// the most under-replicated first.
+func ListDispatch(baseUrl string, store common.Address) (types.ListPieceResult, error) {
+	return listPiece(baseUrl, "dispatch", store.Hex())
+}
+
+func listPiece(baseUrl, filter, store string) (types.ListPieceResult, error) {
 	res := types.ListPieceResult{}
 
 	u := v1URL(baseUrl, "/v1/pieces")
 	if filter != "" {
 		u += andSep(u) + "filter=" + url.QueryEscape(filter)
 	}
+	if store != "" {
+		u += andSep(u) + "store=" + url.QueryEscape(store)
+	}
 
-	resByte, err := Get(context.TODO(), u)
+	ctx, cancel := context.WithTimeout(context.TODO(), MetaTimeout)
+	defer cancel()
+	resByte, err := Get(ctx, u)
 	if err != nil {
 		return res, err
 	}
@@ -176,7 +193,9 @@ func RequestPiece(baseUrl string, auth types.Auth, name string) (types.PieceWitn
 	form.Set("chaintype", chaintype)
 
 	var res types.PieceWitness
-	resByte, err := doRequest(context.TODO(), baseUrl, "/v1/requestPiece", "", auth, strings.NewReader(form.Encode()))
+	ctx, cancel := context.WithTimeout(context.TODO(), MetaTimeout)
+	defer cancel()
+	resByte, err := doRequest(ctx, baseUrl, "/v1/requestPiece", "", auth, strings.NewReader(form.Encode()))
 	if err != nil {
 		return res, err
 	}

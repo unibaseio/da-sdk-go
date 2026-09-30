@@ -50,6 +50,11 @@ func init() {
 
 var ServerURL = build.ServerURL
 
+// MetaTimeout bounds the small metadata calls a node makes in its polling
+// loops (edge list, dispatch list, slot request), so one unresponsive stream
+// or gateway cannot stall the loop.
+var MetaTimeout = 30 * time.Second
+
 const InHashID = hash.MIMC_BW6_761
 
 func CheckENV() {

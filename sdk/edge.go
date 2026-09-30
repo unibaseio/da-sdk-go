@@ -70,7 +70,9 @@ func ListEdge(baseUrl string, auth types.Auth, filter string) (types.ListEdgeRes
 		u += andSep(u) + "type=" + url.QueryEscape(filter)
 	}
 
-	resByte, err := Get(context.TODO(), u)
+	ctx, cancel := context.WithTimeout(context.TODO(), MetaTimeout)
+	defer cancel()
+	resByte, err := Get(ctx, u)
 	if err != nil {
 		return res, err
 	}
