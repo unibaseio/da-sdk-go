@@ -8,6 +8,7 @@ import (
 	"time"
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/node"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/token"
 	"github.com/unibaseio/da-sdk-go/lib/bls"
 	"github.com/unibaseio/da-sdk-go/lib/types"
@@ -211,11 +212,31 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	if err != nil {
 		return err
 	}
-	active, _, err := ni.Check(&bind.CallOpts{From: au.From}, au.From, _typ)
-	if err != nil {
-		return err
+	return c.waitForActive(ctx, ni, au.From, _typ)
+}
+
+// waitForActive polls Node.check after a stake until the node reads active.
+// Right after the stake is mined a lagging RPC replica can still report the
+// old (inactive) state; deciding on the first read logged false failures.
+func (c *ContractManage) waitForActive(ctx context.Context, ni *node.Node, addr common.Address, _typ uint8) error {
+	var lastErr error
+	for i := 0; i < 15; i++ {
+		active, _, err := ni.Check(&bind.CallOpts{Context: ctx, From: addr}, addr, _typ)
+		if err == nil && active {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = nodeStatusErr(false, addr, _typ)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for node active: %w (last: %v)", ctx.Err(), lastErr)
+		case <-time.After(2 * time.Second):
+		}
 	}
-	return nodeStatusErr(active, au.From, _typ)
+	return lastErr
 }
 
 // AddPiece registers a piece on-chain (IncreaseAllowance + addPiece) under the
