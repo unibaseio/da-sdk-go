@@ -142,28 +142,27 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 		return err
 	}
 
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
 	ti, err := c.NewToken(ctx)
 	if err != nil {
 		return err
 	}
 
+	// Decide whether a tx is needed before reserving a nonce: an early return
+	// after MakeAuth left a nonce gap that stalled every later tx (every store
+	// startup took this path on an already-active node).
+	from := c.From()
 	if val == nil {
-		isActive, _, err := ni.Check(&bind.CallOpts{From: au.From}, au.From, _typ)
+		isActive, _, err := ni.Check(&bind.CallOpts{From: from}, from, _typ)
 		if err == nil && isActive {
-			com.Logger.Debugf("%s already pledge enough money in type %d", au.From, _typ)
+			com.Logger.Debugf("%s already pledge enough money in type %d", from, _typ)
 			return nil
 		}
 
-		pval, err := ni.MinStakeOf(&bind.CallOpts{From: au.From}, _typ)
+		pval, err := ni.MinStakeOf(&bind.CallOpts{From: from}, _typ)
 		if err != nil {
 			return err
 		}
-		pinfo, err := ni.NodeInfoOf(&bind.CallOpts{From: au.From}, au.From)
+		pinfo, err := ni.NodeInfoOf(&bind.CallOpts{From: from}, from)
 		if err != nil {
 			return err
 		}
@@ -186,9 +185,14 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 		return fmt.Errorf("negative value")
 	}
 
-	com.Logger.Debug("register node: ", au.From, val)
+	com.Logger.Debug("register node: ", from, val)
+	au, err := c.MakeAuth()
+	if err != nil {
+		return err
+	}
 	tx, err := ti.Approve(au, c.NodeAddr, val)
 	if err != nil {
+		c.releaseNonce(au.Nonce.Uint64()) // never broadcast
 		return err
 	}
 	err = c.CheckTx(tx.Hash())
@@ -206,6 +210,7 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	}
 	tx, err = ni.Stake(au, _typ, val)
 	if err != nil {
+		c.releaseNonce(au.Nonce.Uint64()) // never broadcast
 		return err
 	}
 	err = c.CheckTx(tx.Hash())

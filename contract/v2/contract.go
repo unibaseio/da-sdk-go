@@ -152,6 +152,24 @@ func (c *ContractManage) nextNonce() (uint64, error) {
 	return n, nil
 }
 
+// releaseNonce hands back a nonce from MakeAuth whose tx was never broadcast
+// (the send failed, e.g. gas estimation reverted). Kept, it becomes a gap that
+// stalls every later tx until the stuck-nonce heuristic resyncs minutes later.
+func (c *ContractManage) releaseNonce(n uint64) {
+	c.nonceMu.Lock()
+	defer c.nonceMu.Unlock()
+	if !c.nonceReady {
+		return
+	}
+	if c.localNonce == n+1 {
+		c.localNonce = n
+		return
+	}
+	// a later nonce is already out: let the next allocation re-read the chain,
+	// whose pending nonce stops at the gap, so the gap gets filled first
+	c.nonceReady = false
+}
+
 // Client returns the shared ethclient for the active endpoint, dialing it on
 // first use. The endpoints are HTTP, so the client needs no liveness management
 // — each request rides Go's pooled HTTP transport.
