@@ -305,6 +305,35 @@ func (s *Server) logFSRead(addr string, key string, w io.Writer) (int64, string,
 	return 0, addr, firstErr
 }
 
+// logFSReadAt reads one object by the location its index row records
+// (volume, start, size). Reading by key alone conflates objects sharing a key:
+// the logfs key index is per owner, not per bucket, so the newest write of a
+// key in any bucket wins. When the key's meta still points at this row (the
+// usual case) the read is hash-checked through it.
+func (s *Server) logFSReadAt(owner, key string, file, start, size uint64, w io.Writer) (int64, error) {
+	ck := fmt.Sprintf("@%d/%d/%d", file, start, size) // location, not key
+	if wbytes, ok := s.readCache.get(owner, ck); ok {
+		n, err := w.Write(wbytes)
+		return int64(n), err
+	}
+	fs, err := s.getFS(owner, false)
+	if err != nil {
+		return 0, err
+	}
+	var wbytes []byte
+	if lm, merr := fs.GetMeta([]byte(key)); merr == nil && lm.Index == file && lm.Start == start && lm.Size == size {
+		wbytes, err = fs.GetData(lm)
+	} else {
+		wbytes, err = fs.GetDataAt(file, start, size)
+	}
+	if err != nil {
+		return 0, err
+	}
+	s.readCache.put(owner, ck, wbytes)
+	n, err := w.Write(wbytes)
+	return int64(n), err
+}
+
 func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, error) {
 	// read-through hot-object cache (small objects; immutable content)
 	if wbytes, ok := s.readCache.get(addr, key); ok {
@@ -408,6 +437,10 @@ func (s *Server) uploadTo() {
 		if err := cm.CheckBalance(au.Addr); err != nil {
 			logger.Warnf("upload: balance check failed: %v", err)
 			continue
+		}
+		// a fresh header per pass: streams bound how old a signature may be
+		if fresh, err := key.BuildAuth(sk, []byte("upload")); err == nil {
+			au = fresh
 		}
 		s.drainAll(cm, au, policy)
 	}
@@ -575,7 +608,9 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		fname := fmt.Sprintf("%s/%d.vol", key, i)
 		fp := filepath.Join(s.rp.Path(), LOGFS, key, fmt.Sprintf("%d.vol", i))
 
-		fr, err := sdk.GetFileReceipt(sdk.ServerURL, au, fname)
+		// only the hub's own record counts: anyone can register a file under
+		// this (predictable) volume name, and trusting it would skip the volume
+		fr, err := sdk.GetFileReceiptOf(sdk.ServerURL, fname, au.Addr)
 		if err == nil {
 			logger.Infof("%s/%d.vol is already uploaded, check its piece onchain", key, i)
 			if fr.ChainType != s.rp.Repo().Config().Chain.Type {
@@ -615,6 +650,9 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 			continue
 		}
 		// upload to stream and submit to gateway
+		if fresh, ferr := s.rp.Key().BuildAuth([]byte("upload")); ferr == nil {
+			au = fresh // a pass can spend many minutes encoding earlier volumes
+		}
 		res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fp, fname)
 		if err != nil {
 			// The piece is already staged on a stream from a prior attempt whose

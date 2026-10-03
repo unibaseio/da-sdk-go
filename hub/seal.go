@@ -140,18 +140,8 @@ func (s *Server) seal(c *gin.Context) {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
 	}
-	expire := start + uint64(com.DefaultStoreEpoch)
-	if v := c.PostForm("expire"); v != "" {
-		if e, err := strconv.ParseUint(v, 10, 64); err == nil {
-			expire = e
-		}
-	}
-	price := big.NewInt(int64(com.DefaultReplicaPrice))
-	if v := c.PostForm("price"); v != "" {
-		if p, ok := new(big.Int).SetString(v, 10); ok {
-			price = p
-		}
-	}
+	expire, price := sealTerms(register, start, c.PostForm("expire"), c.PostForm("price"),
+		uint64(env.Int64("HUB_SEAL_MAX_EPOCHS", int64(com.DefaultStoreEpoch))))
 	pc.Start = start
 	pc.Expire = expire
 	pc.Price = price
@@ -262,4 +252,28 @@ func (s *Server) seal(c *gin.Context) {
 		// stream staging (~15 min) and is under-replicated (spec Q2).
 		"staging_deadline_epoch": pc.Start + uint64(com.DelaySubmit),
 	})
+}
+
+// sealTerms picks a seal's expiry epoch and replica price. When the client
+// registers (and pays) the piece itself, its expire/price are taken as given.
+// When the hub pays (register=hub), the bond the hub locks grows with price x
+// duration x size, so a client-chosen price is ignored and the duration is
+// capped at maxEpochs: otherwise one request could lock the hub's whole
+// balance. An unusable expire falls back to the default term.
+func sealTerms(register string, start uint64, expireArg, priceArg string, maxEpochs uint64) (uint64, *big.Int) {
+	expire := start + uint64(com.DefaultStoreEpoch)
+	if e, err := strconv.ParseUint(expireArg, 10, 64); expireArg != "" && err == nil && e > start {
+		expire = e
+	}
+	price := big.NewInt(int64(com.DefaultReplicaPrice))
+	if register != "hub" {
+		if p, ok := new(big.Int).SetString(priceArg, 10); priceArg != "" && ok && p.Sign() > 0 {
+			price = p
+		}
+		return expire, price
+	}
+	if maxEpochs > 0 && expire > start+maxEpochs {
+		expire = start + maxEpochs
+	}
+	return expire, price
 }

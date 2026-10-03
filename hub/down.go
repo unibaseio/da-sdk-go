@@ -11,6 +11,7 @@ import (
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/sdk"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 )
 
@@ -125,10 +126,21 @@ func (s *Server) download(ctx context.Context, name, owner string, w io.Writer) 
 // downloadRemote runs the DA fallback chain (file → piece → replica) into w.
 // On a total miss it records a negative-cache marker and returns an error.
 func (s *Server) downloadRemote(ctx context.Context, name, owner string, w io.Writer) error {
-	if _, err := sdk.GetFileReceipt(build.ServerURL, s.auth, name); err == nil {
-		if err = sdk.Download(build.ServerURL, s.auth, name, s.ps, w); err == nil {
-			return nil
+	// a file record is looked up as the caller's own when the caller is known
+	// (names are per owner), and the rebuilt file is checked against its hash
+	fowner := types.EmptyAddr
+	if common.IsHexAddress(owner) {
+		fowner = common.HexToAddress(owner)
+	}
+	if _, err := sdk.GetFileReceiptOf(build.ServerURL, name, fowner); err == nil {
+		// own buffer: a failed attempt (e.g. hash mismatch) has written partial
+		// bytes, which must not prefix the next fallback's output
+		var fb bytes.Buffer
+		if err = sdk.DownloadOf(build.ServerURL, s.auth, name, fowner, s.ps, &fb); err == nil {
+			_, err = w.Write(fb.Bytes())
+			return err
 		}
+		logger.Warnf("download file %s (owner %s) failed: %s", name, owner, err)
 	}
 
 	if _, err := sdk.GetPieceReceipt(build.ServerURL, s.auth, name); err == nil {
@@ -147,4 +159,31 @@ func (s *Server) downloadRemote(ctx context.Context, name, owner string, w io.Wr
 	// Fully missing everywhere — remember so repeat requests stay cheap.
 	s.missCache.add(owner, name)
 	return fmt.Errorf("no such file: %s at %s", name, owner)
+}
+
+// downloadPiece reads a committed piece by its DA commitment: from the local
+// piece store, else rebuilt from store nodes (then kept locally). Concurrent
+// requests for one piece share a single rebuild.
+func (s *Server) downloadPiece(ctx context.Context, cid string, w io.Writer) error {
+	if _, err := s.ps.GetPiece(ctx, cid, w, types.Options{}); err == nil {
+		return nil
+	}
+	v, err, _ := s.dlSF.Do("piece:"+cid, func() (interface{}, error) {
+		if _, err := sdk.GetPieceReceipt(build.ServerURL, s.auth, cid); err != nil {
+			return nil, err
+		}
+		if err := sdk.DownloadPieceAndSave(build.ServerURL, s.auth, cid, s.ps); err != nil {
+			return nil, err
+		}
+		var buf bytes.Buffer
+		if _, err := s.ps.GetPiece(ctx, cid, &buf, types.Options{}); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	})
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(v.([]byte))
+	return err
 }

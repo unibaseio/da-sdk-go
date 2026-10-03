@@ -618,54 +618,58 @@ func (s *Server) v1GetObject(c *gin.Context) {
 }
 
 // GET /v1/buckets/{bucket}/objects/{key}/content — download bytes.
+// The object is the newest index row for (owner, bucket, key) — the same row
+// its receipt and /proof describe — and its bytes are read from the location
+// that row records, never looked up by key alone.
 func (s *Server) v1GetObjectContent(c *gin.Context) {
 	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
 	if !ok {
 		return
 	}
+	bucket := c.Param("bucket")
 	key := c.Param("key")
-	var w strings.Builder
-	// logFSRead resolves owner candidates (lowercase + legacy checksum); empty
-	// owner falls back to a needle-name lookup and returns the owner it found.
-	if _, resolved, err := s.logFSRead(owner, key, &w); err != nil {
+	nds, err := s.getNeedleDisplay(owner, bucket, key)
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	if len(nds) == 0 {
+		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", fmt.Errorf("no such object %s/%s", bucket, key)))
+		return
+	}
+	n := nds[0]
+	var w bytes.Buffer
+	if _, err := s.logFSReadAt(n.Owner, key, n.File, n.Start, n.Size, &w); err != nil {
 		// P4 shard fallback: a STAGED object's bytes live only on its owner's
 		// home shard (index rows are shared, logfs blobs are not, and L2 fills
 		// on read, not write). If we're not the home shard, forward the read
-		// there instead of 404ing the read-after-write window. Route by the
-		// caller's owner, else the owner logFSRead already resolved from the
-		// shared needle index (no second lookup). Only when sharding is enabled.
-		if s.shard != nil {
-			routeOwn := owner
-			if routeOwn == "" {
-				routeOwn = resolved
-			}
-			if s.shardReadProxy(c, routeOwn) {
-				return
-			}
+		// there instead of 404ing the read-after-write window.
+		if s.shard != nil && s.shardReadProxy(c, n.Owner) {
+			return
 		}
 		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", err))
 		return
 	}
-	c.Data(http.StatusOK, "application/octet-stream", []byte(w.String()))
+	c.Data(http.StatusOK, "application/octet-stream", w.Bytes())
 }
 
 // GET /v1/pieces/{name}/content — download a committed DA piece by its
 // content-id (da_cid). Unlike object content (logfs by key), this resolves the
 // piece off the DA network (GetPieceReceipt → DownloadPiece) via the shared
 // download() helper — the cold-tier read path (seal'd segments) needs this.
+//
+// The name is a DA commitment, so it is resolved on DA only: never against
+// hub objects or file records, which anyone can create under that name.
 func (s *Server) v1GetPieceContent(c *gin.Context) {
-	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
-	if !ok {
+	if _, ok := ResolveOwnerForList(c, c.Query("owner")); !ok {
 		return
 	}
-	var w strings.Builder
-	size, err := s.download(c.Request.Context(), c.Param("name"), owner, &w)
-	if err != nil {
+	var w bytes.Buffer
+	if err := s.downloadPiece(c.Request.Context(), c.Param("name"), &w); err != nil {
 		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", err))
 		return
 	}
-	_ = size
-	c.Data(http.StatusOK, "application/octet-stream", []byte(w.String()))
+	c.Data(http.StatusOK, "application/octet-stream", w.Bytes())
 }
 
 // ---- Aggregates ------------------------------------------------------------

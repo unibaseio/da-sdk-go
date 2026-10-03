@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -98,31 +97,9 @@ func recoverSigner(authStr string, drift int64) (string, error) {
 		return "", fmt.Errorf("decode auth: %w", err)
 	}
 
-	// Verify the signature first, recovering the timestamp BOUND INTO the
-	// signature: au.Time for the legacy Hash||be64(Time) bytes, or the "Issued
-	// At" embedded in the SIWE message. Freshness is then checked against that
-	// bound timestamp, so a tampered envelope can't widen the window.
-	var signedAt int64
-	if len(au.Msg) > 0 {
-		// EIP-4361 / SIWE human-readable message (new clients)
-		if signedAt, err = sdk.VerifySIWE(au); err != nil {
-			return "", fmt.Errorf("verify auth: %w", err)
-		}
-	} else {
-		// legacy: signature over Hash(label) || be64(Time)
-		signedAt = au.Time
-		if err := sdk.VerifyAuth(au); err != nil {
-			return "", fmt.Errorf("verify auth: %w", err)
-		}
-	}
-
-	now := time.Now().Unix()
-	delta := now - signedAt
-	if delta < 0 {
-		delta = -delta
-	}
-	if delta > drift {
-		return "", fmt.Errorf("auth timestamp out of window (delta=%ds, max=%ds)", delta, drift)
+	// signature + freshness against the timestamp bound into the signature
+	if err := sdk.VerifyAuthFresh(au, drift); err != nil {
+		return "", err
 	}
 	return strings.ToLower(au.Addr.Hex()), nil
 }
