@@ -203,6 +203,75 @@ func (ew *EncodeWitness) Serialize() []byte {
 	return w.Bytes()
 }
 
+// CheckEncodeWitnessShape walks a serialized EncodeWitness without decoding it
+// and confirms it holds exactly n commits and k move commits, limit commits and
+// claimed values, with nothing left over. Run it on untrusted bytes before
+// Deserialize: the decoder allocates each slice at its declared length before
+// reading it, so a few bytes declaring 2^32 points exhausted memory.
+func CheckEncodeWitnessShape(buf []byte, n, k int) error {
+	if len(buf) > 0 && buf[0]&0x80 != 0 {
+		if len(buf) < 3 || buf[0] != ewMagic {
+			return fmt.Errorf("bad EncodeWitness frame")
+		}
+		buf = buf[3:]
+	}
+	pos := 0
+	g1 := func() error {
+		if pos >= len(buf) {
+			return fmt.Errorf("EncodeWitness truncated at %d", pos)
+		}
+		size := 96 // raw; the top flag bit marks a 48-byte compressed point
+		if buf[pos]&0x80 != 0 {
+			size = 48
+		}
+		if pos+size > len(buf) {
+			return fmt.Errorf("EncodeWitness truncated at %d", pos)
+		}
+		pos += size
+		return nil
+	}
+	slice := func(want int, elem func() error) error {
+		if pos+4 > len(buf) {
+			return fmt.Errorf("EncodeWitness truncated at %d", pos)
+		}
+		l := int(binary.BigEndian.Uint32(buf[pos:]))
+		pos += 4
+		if l != want {
+			return fmt.Errorf("EncodeWitness slice of %d, want %d", l, want)
+		}
+		for i := 0; i < l; i++ {
+			if err := elem(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	fr := func() error {
+		if pos+32 > len(buf) {
+			return fmt.Errorf("EncodeWitness truncated at %d", pos)
+		}
+		pos += 32
+		return nil
+	}
+	steps := []func() error{
+		g1,
+		func() error { return slice(n, g1) },
+		func() error { return slice(k, g1) },
+		func() error { return slice(k, g1) },
+		g1,
+		func() error { return slice(k, fr) },
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
+	}
+	if pos != len(buf) {
+		return fmt.Errorf("EncodeWitness has %d trailing bytes", len(buf)-pos)
+	}
+	return nil
+}
+
 func (ew *EncodeWitness) Deserialize(buf []byte) error {
 	// Versioned frame iff first byte has bit7 set (legacy raw G1 never does).
 	if len(buf) > 0 && buf[0]&0x80 != 0 {
