@@ -2,15 +2,19 @@ package hub
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -611,6 +615,12 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		// only the hub's own record counts: anyone can register a file under
 		// this (predictable) volume name, and trusting it would skip the volume
 		fr, err := sdk.GetFileReceiptOf(sdk.ServerURL, fname, au.Addr)
+		if err == nil && !volumeMatches(fp, fr.Hash) {
+			// a record of ours under this name that is not this volume's bytes
+			// (e.g. planted before seal names were namespaced): don't trust it
+			logger.Warnf("%s/%d.vol: file record %s does not match the local volume; uploading", key, i, fr.Hash)
+			err = fmt.Errorf("record does not match volume")
+		}
 		if err == nil {
 			logger.Infof("%s/%d.vol is already uploaded, check its piece onchain", key, i)
 			if fr.ChainType != s.rp.Repo().Config().Chain.Type {
@@ -650,10 +660,9 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 			continue
 		}
 		// upload to stream and submit to gateway
-		if fresh, ferr := s.rp.Key().BuildAuth([]byte("upload")); ferr == nil {
-			au = fresh // a pass can spend many minutes encoding earlier volumes
-		}
-		res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, fp, fname)
+		// each request signed when sent: encoding a volume takes minutes, and
+		// the gateway and streams reject signatures older than ~10 minutes
+		res, streamer, err := sdk.UploadWith(sdk.ServerURL, s.rp.Key().BuildAuth, policy, fp, fname)
 		if err != nil {
 			// The piece is already staged on a stream from a prior attempt whose
 			// on-chain AddPiece never completed (hub briefly out of gas, or a
@@ -700,4 +709,19 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		binary.BigEndian.PutUint64(buf, i+1)
 		s.rp.MetaStore().Put(dsKey, buf)
 	}
+}
+
+// volumeMatches reports whether the sealed volume file at fp has sha256 hash
+// (hex), i.e. a file record with that hash really is this volume.
+func volumeMatches(fp, hash string) bool {
+	f, err := os.Open(fp)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return false
+	}
+	return strings.EqualFold(hex.EncodeToString(h.Sum(nil)), hash)
 }

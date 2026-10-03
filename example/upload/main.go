@@ -74,7 +74,7 @@ func main() {
 		if nm == "" {
 			nm = filepath.Base(fp)
 		}
-		must(uploadOne(cm, au, policy, *gateway, fp, nm))
+		must(uploadOne(cm, sdk.KeySigner(sk), policy, *gateway, fp, nm))
 		return
 	}
 	// directory: upload each file under its basename
@@ -82,13 +82,13 @@ func main() {
 		if err != nil || info.IsDir() {
 			return err
 		}
-		return uploadOne(cm, au, policy, *gateway, p, filepath.Base(p))
+		return uploadOne(cm, sdk.KeySigner(sk), policy, *gateway, p, filepath.Base(p))
 	})
 	must(err)
 }
 
-func uploadOne(cm *contract.ContractManage, au types.Auth, policy types.Policy, gateway, fp, nm string) error {
-	ff, streamer, err := sdk.Upload(gateway, au, policy, fp, nm) // → stream (direct) + UploadFileMeta(gateway)
+func uploadOne(cm *contract.ContractManage, sign sdk.Signer, policy types.Policy, gateway, fp, nm string) error {
+	ff, streamer, err := sdk.UploadWith(gateway, sign, policy, fp, nm) // → stream (direct) + UploadFileMeta(gateway)
 	if err != nil {
 		return err
 	}

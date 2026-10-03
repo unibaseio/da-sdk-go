@@ -97,11 +97,23 @@ func recoverSigner(authStr string, drift int64) (string, error) {
 		return "", fmt.Errorf("decode auth: %w", err)
 	}
 
-	// signature + freshness against the timestamp bound into the signature
-	if err := sdk.VerifyAuthFresh(au, drift); err != nil {
+	// signature + freshness against the timestamp bound into the signature,
+	// and a SIWE message only if it was issued for this hub's domain
+	if err := sdk.VerifyAuthFreshDomains(au, drift, siweDomains()); err != nil {
 		return "", err
 	}
 	return strings.ToLower(au.Addr.Hex()), nil
+}
+
+// siweDomains lists the domains a SIWE sign-in must be issued for to be
+// accepted here (HUB_SIWE_DOMAINS, comma-separated, e.g. the frontends that
+// talk to this hub). Unset accepts any domain — set it in production.
+func siweDomains() []string {
+	v := strings.TrimSpace(env.Str("HUB_SIWE_DOMAINS", ""))
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, ",")
 }
 
 func AuthMiddleware() gin.HandlerFunc {

@@ -195,10 +195,9 @@ func (s *Server) v1ListConversations(c *gin.Context) {
 	if !ok {
 		return
 	}
-	offset, _ := strconv.Atoi(c.Query("offset"))
-	length, _ := strconv.Atoi(c.Query("length"))
-	if length == 0 {
-		length = 1024
+	offset, length, ok := v1Page(c, 1024)
+	if !ok {
+		return
 	}
 	res, err := s.listConversation(owner, c.Query("bucket"), offset, length)
 	if err != nil {
@@ -215,10 +214,15 @@ func (s *Server) v1GetConversation(c *gin.Context) {
 	if !ok {
 		return
 	}
-	offset, _ := strconv.Atoi(c.Query("offset"))
-	length, _ := strconv.Atoi(c.Query("length"))
-	if length == 0 {
-		length = 1024
+	// a conversation is one owner's: without an owner the lookup would span
+	// every account's conversations of that id
+	if owner == "" {
+		c.JSON(http.StatusBadRequest, lerror.ToAPIError("hub", fmt.Errorf("owner required")))
+		return
+	}
+	offset, length, ok := v1Page(c, 1024)
+	if !ok {
+		return
 	}
 	res, err := s.getConversation(c.Request.Context(), c.Param("id"), owner, c.Query("bucket"), offset, length)
 	if err != nil {
@@ -683,6 +687,9 @@ func (s *Server) v1Stats(c *gin.Context) {
 	if days <= 0 {
 		days = 7
 	}
+	if days > maxStatDays {
+		days = maxStatDays // the result is sized by days: unbounded, one request could exhaust memory
+	}
 	if s.statManager == nil {
 		c.JSON(http.StatusOK, []types.Stat{})
 		return
@@ -873,3 +880,22 @@ func v1Limit(c *gin.Context) int {
 	}
 	return n
 }
+
+// v1Page reads ?offset= and ?length=: length defaults to and is capped at max,
+// and negative values are refused (a negative length removes the SQL LIMIT).
+// On a bad value it has already written a 400 and returns ok=false.
+func v1Page(c *gin.Context, max int) (offset, length int, ok bool) {
+	offset, _ = strconv.Atoi(c.Query("offset"))
+	length, _ = strconv.Atoi(c.Query("length"))
+	if offset < 0 || length < 0 {
+		c.JSON(http.StatusBadRequest, lerror.ToAPIError("hub", fmt.Errorf("offset and length must not be negative")))
+		return 0, 0, false
+	}
+	if length == 0 || length > max {
+		length = max
+	}
+	return offset, length, true
+}
+
+// maxStatDays bounds GET /v1/stats?days=.
+const maxStatDays = 366

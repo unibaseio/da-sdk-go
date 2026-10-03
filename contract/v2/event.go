@@ -3,6 +3,7 @@ package contract
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -40,6 +41,27 @@ func (c *ContractManage) HandleSetEpoch(elog etypes.Log, cabi abi.ABI) (types.Ep
 	return ei, nil
 }
 
+// ErrNotDirectCall means the transaction that emitted an event did not call the
+// contract's method directly (it went through another contract), so its
+// calldata is not that method's arguments and cannot be decoded as such.
+var ErrNotDirectCall = errors.New("event's transaction is not a direct call to the method")
+
+// directCallInputs decodes the arguments of method m from tx's calldata, but
+// only when tx calls the emitting contract directly with m's selector. Any
+// other shape (a call routed through a contract, or crafted calldata) is
+// refused: decoding it as m's arguments would read attacker-chosen bytes, and
+// slicing short calldata used to crash every syncing node.
+func directCallInputs(tx *etypes.Transaction, emitter common.Address, m abi.Method) ([]interface{}, error) {
+	if tx.To() == nil || *tx.To() != emitter {
+		return nil, fmt.Errorf("%w: tx %s targets %v, event emitted by %s", ErrNotDirectCall, tx.Hash().Hex(), tx.To(), emitter.Hex())
+	}
+	data := tx.Data()
+	if len(data) < 4 || !bytes.Equal(data[:4], m.ID) {
+		return nil, fmt.Errorf("%w: tx %s is not %s", ErrNotDirectCall, tx.Hash().Hex(), m.Name)
+	}
+	return m.Inputs.UnpackValues(data[4:])
+}
+
 // decodeAddPieceFields recovers the piece fields
 // [pn, price, size, expire, rsn, rsk, streamer] from a tx's calldata. The
 // AddPiece event is emitted by BOTH addPiece (owner == caller) and addPieceFor
@@ -49,7 +71,7 @@ func (c *ContractManage) HandleSetEpoch(elog etypes.Log, cabi abi.ABI) (types.Ep
 // layout. The owner itself comes from the indexed event topic, not here.
 func decodeAddPieceFields(cabi abi.ABI, inputData []byte) ([]interface{}, error) {
 	if len(inputData) < 4 {
-		return nil, fmt.Errorf("invalid calldata length")
+		return nil, fmt.Errorf("%w: calldata shorter than a selector", ErrNotDirectCall)
 	}
 	selector := inputData[:4]
 
@@ -106,6 +128,9 @@ func (c *ContractManage) HandleAddPiece(elog etypes.Log, cabi abi.ABI) (types.Pi
 		return pc, err
 	}
 
+	if tx.To() == nil || *tx.To() != elog.Address {
+		return pc, fmt.Errorf("%w: AddPiece tx %s targets %v, event emitted by %s", ErrNotDirectCall, elog.TxHash.Hex(), tx.To(), elog.Address.Hex())
+	}
 	fields, err := decodeAddPieceFields(cabi, tx.Data())
 	if err != nil {
 		return pc, err
@@ -163,14 +188,16 @@ func (c *ContractManage) HandleAddReplica(elog etypes.Log, cabi abi.ABI) (types.
 		return rc, fmt.Errorf("no method 'addReplica' in ABI")
 	}
 
-	inputData := tx.Data()
-	inputs, err := method.Inputs.UnpackValues(inputData[4:])
+	inputs, err := directCallInputs(tx, elog.Address, method)
 	if err != nil {
 		return rc, err
 	}
 
 	if len(inputs) != 4 {
 		return rc, fmt.Errorf("invalid input length")
+	}
+	if err := c.checkReplicaFields(rc.Serial, rc.StoredOn, inputs[0].([]byte), inputs[1].(uint64), inputs[2].(uint8), inputs[3].([]byte)); err != nil {
+		return rc, err
 	}
 
 	g1, err := com.SolidityToG1(inputs[0].([]byte))
@@ -268,8 +295,7 @@ func (c *ContractManage) HandleSubmitEProof(elog etypes.Log, cabi abi.ABI) (type
 		return ei, fmt.Errorf("no method 'submit' in ABI")
 	}
 
-	inputData := tx.Data()
-	inputs, err := method.Inputs.UnpackValues(inputData[4:])
+	inputs, err := directCallInputs(tx, elog.Address, method)
 	if err != nil {
 		return ei, err
 	}
@@ -355,36 +381,26 @@ func (c *ContractManage) HandleEPProve(elog etypes.Log, cabi abi.ABI) (types.EPC
 	ei.Epoch = ld[0].(uint64)
 	ei.Round = ld[1].(uint8)
 
-	tx, err := com.GetTransactionRetry(c.RPC, elog.TxHash)
+	// A proveCom answer is the 8 child commitments it stored in EVerify
+	// (commit[store][epoch][i]); read them from there rather than from the
+	// tx's calldata, which a call routed through a contract does not carry.
+	// Prove events from proveKZG (round 0) and proveOne (the leaf) have none.
+	ci, err := c.GetEpochChalDetail(ei.Store, ei.Epoch)
 	if err != nil {
 		return ei, err
 	}
-
-	method, ok := cabi.Methods["proveCom"]
-	if !ok {
-		return ei, fmt.Errorf("no method 'proveCom' in ABI")
+	if ei.Round == 0 || ei.Round > ci.Round {
+		return ei, nil
 	}
-
-	inputData := tx.Data()
-	inputs, err := method.Inputs.UnpackValues(inputData[4:])
+	if ci.RoundAt != ei.Round {
+		// the game has moved past this event; the current commits are not its own
+		return ei, fmt.Errorf("stale Prove event: round %d, game now at %d", ei.Round, ci.RoundAt)
+	}
+	coms, err := c.GetEpochCommits(ei.Store, ei.Epoch)
 	if err != nil {
-		return ei, nil
+		return ei, err
 	}
-
-	if len(inputs) != 3 {
-		return ei, nil
-	}
-
-	coms := inputs[1].([][]byte)
-	ei.Coms = make([][]byte, 0, len(coms))
-	for i := 0; i < len(coms); i++ {
-		g1, err := com.SolidityToG1(coms[i])
-		if err == nil {
-			g1b := g1.Bytes()
-			ei.Coms = append(ei.Coms, g1b[:])
-		}
-	}
-
+	ei.Coms = coms
 	return ei, nil
 }
 

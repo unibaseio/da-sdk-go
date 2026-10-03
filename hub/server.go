@@ -134,6 +134,9 @@ type Server struct {
 }
 
 func NewServer(rp repo.Repo) (*Server, error) {
+	if len(siweDomains()) == 0 {
+		logger.Warn("HUB_SIWE_DOMAINS is not set: SIWE sign-ins issued for any website are accepted")
+	}
 	log.SetLogLevel("DEBUG")
 
 	gin.SetMode(gin.ReleaseMode)
@@ -392,9 +395,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func login(url string, auth types.Auth) {
+// login re-announces this node to the gateway hourly, signing each time: the
+// gateway rejects signatures older than ~10 minutes, and one reused header
+// would be replayable by anyone who saw it.
+func login(url string, sign sdk.Signer) {
 	for {
-		sdk.Login(url, auth)
+		if auth, err := sign([]byte("login")); err == nil {
+			sdk.Login(url, auth)
+		}
 		time.Sleep(time.Hour)
 	}
 }
@@ -405,7 +413,7 @@ func (s *Server) register() error {
 		return err
 	}
 
-	go login(s.rp.Config().Remote.URL, auth)
+	go login(s.rp.Config().Remote.URL, s.rp.Key().BuildAuth)
 
 	mm := types.EdgeMeta{
 		Type:      s.typ,

@@ -54,7 +54,7 @@ func TestV1ContentReadsTheRowsOwnBytes(t *testing.T) {
 	s.gdb.Create(&types.Bucket{Name: "bobs", Owner: bob, Kind: "file"})
 	put(alice, "notes", "todo.txt", "alice notes")
 	put(alice, "drafts", "todo.txt", "alice drafts") // same owner, same key, other bucket
-	put(bob, "bobs", "todo.txt", "bob's text")      // other owner, same key, written last
+	put(bob, "bobs", "todo.txt", "bob's text")       // other owner, same key, written last
 
 	for _, c := range []struct{ path, want string }{
 		{"/v1/buckets/notes/objects/todo.txt/content?owner=" + alice, "alice notes"},

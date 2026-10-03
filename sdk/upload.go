@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/unibaseio/da-sdk-go/lib/archive"
 	"github.com/unibaseio/da-sdk-go/lib/bls"
+	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 
 	darchive "github.com/docker/docker/pkg/archive"
@@ -25,8 +27,28 @@ import (
 	"github.com/schollz/progressbar/v3"
 )
 
+// Signer signs one request's Authorization for the given purpose label.
+type Signer func(label []byte) (types.Auth, error)
+
+// KeySigner signs with a private key, fresh on every call.
+func KeySigner(sk *ecdsa.PrivateKey) Signer {
+	return func(label []byte) (types.Auth, error) { return key.BuildAuth(sk, label) }
+}
+
 func Upload(baseUrl string, auth types.Auth, policy types.Policy, filePath string, name string) (types.FileFull, common.Address, error) {
+	return UploadWith(baseUrl, func([]byte) (types.Auth, error) { return auth, nil }, policy, filePath, name)
+}
+
+// UploadWith is Upload with a signer instead of one fixed header: the stream
+// upload and the gateway file record are each signed just before they are
+// sent, so the record still carries a fresh signature after a long encode.
+// Gateways and streams reject signatures older than a few minutes.
+func UploadWith(baseUrl string, sign Signer, policy types.Policy, filePath string, name string) (types.FileFull, common.Address, error) {
 	var res types.FileFull
+	auth, err := sign([]byte("upload"))
+	if err != nil {
+		return res, common.Address{}, err
+	}
 	er, err := ListEdge(baseUrl, auth, types.StreamType)
 	if err != nil {
 		return res, common.Address{}, err
@@ -61,7 +83,11 @@ func Upload(baseUrl string, auth types.Auth, policy types.Policy, filePath strin
 		if !em.OnChain {
 			continue
 		}
-		fr, err := UploadData(em.ExposeURL, auth, policy, filePath)
+		upAuth, err := sign([]byte("upload"))
+		if err != nil {
+			return res, common.Address{}, err
+		}
+		fr, err := UploadData(em.ExposeURL, upAuth, policy, filePath)
 		if err != nil {
 			logger.Debug("upload: ", filePath, " to: ", em.ExposeURL, " fail: ", err)
 			if strings.Contains(err.Error(), "already has") {
@@ -79,7 +105,11 @@ func Upload(baseUrl string, auth types.Auth, policy types.Policy, filePath strin
 		}
 
 		logger.Debug("upload meta: ", filePath, " to: ", baseUrl)
-		err = UploadFileMeta(baseUrl, auth, fr.FileReceipt)
+		metaAuth, err := sign([]byte("upload"))
+		if err != nil {
+			return fr, em.Name, err
+		}
+		err = UploadFileMeta(baseUrl, metaAuth, fr.FileReceipt)
 		return fr, em.Name, err
 	}
 

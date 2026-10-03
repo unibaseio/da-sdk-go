@@ -203,20 +203,20 @@ func daUploadCmd() *cli.Command {
 				if nm == "" {
 					nm = filepath.Base(fp)
 				}
-				return uploadOne(cm, au, policy, gw, fp, nm, isJSON)
+				return uploadOne(cm, sdk.KeySigner(sk), policy, gw, fp, nm, isJSON)
 			}
 			return filepath.Walk(fp, func(p string, info os.FileInfo, e error) error {
 				if e != nil || info.IsDir() {
 					return e
 				}
-				return uploadOne(cm, au, policy, gw, p, filepath.Base(p), isJSON)
+				return uploadOne(cm, sdk.KeySigner(sk), policy, gw, p, filepath.Base(p), isJSON)
 			})
 		},
 	}
 }
 
-func uploadOne(cm *contract.ContractManage, au types.Auth, policy types.Policy, gw, fp, nm string, isJSON bool) error {
-	ff, streamer, err := sdk.Upload(gw, au, policy, fp, nm) // direct → stream + UploadFileMeta(gateway)
+func uploadOne(cm *contract.ContractManage, sign sdk.Signer, policy types.Policy, gw, fp, nm string, isJSON bool) error {
+	ff, streamer, err := sdk.UploadWith(gw, sign, policy, fp, nm) // direct → stream + UploadFileMeta(gateway)
 	if err != nil {
 		return err
 	}

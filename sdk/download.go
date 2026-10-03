@@ -28,6 +28,16 @@ func DownloadPiece(baseUrl string, auth types.Auth, name string) (types.PieceCor
 		return pr.PieceCore, nil, err
 	}
 
+	if pr.Name != name {
+		return pr.PieceCore, nil, fmt.Errorf("receipt for piece %s names %s", name, pr.Name)
+	}
+	if err := pr.Policy.Check(); err != nil {
+		return pr.PieceCore, nil, err
+	}
+	if err := checkReplicaList(pr); err != nil {
+		return pr.PieceCore, nil, err
+	}
+
 	res := make([][]byte, pr.Policy.N)
 	suc := 0
 	need := make([]int, 0, pr.Policy.K)
@@ -41,20 +51,43 @@ func DownloadPiece(baseUrl string, auth types.Auth, name string) (types.PieceCor
 	}
 	streamURL := ""
 	if suc < int(pr.Policy.K) {
+		// Too few stored replicas: the piece's streamer may still hold its
+		// staged shards. Only its replica list is taken from it — name, policy
+		// and size stay as the gateway recorded them — and only from an
+		// on-chain stream of this chain (anyone can name themselves streamer).
 		er, err := GetEdge(baseUrl, auth, pr.Streamer)
 		if err != nil {
 			return pr.PieceCore, nil, err
 		}
+		if len(relayStreams([]types.EdgeReceipt{er}, chaintype)) == 0 {
+			return pr.PieceCore, nil, fmt.Errorf("streamer %s of piece %s is not an on-chain stream of this chain", pr.Streamer, name)
+		}
 		streamURL = er.ExposeURL
-		pr, err = GetPieceReceipt(streamURL, auth, name)
+		spr, err := GetPieceReceipt(streamURL, auth, name)
 		if err != nil {
+			return pr.PieceCore, nil, err
+		}
+		if spr.Name != name {
+			return pr.PieceCore, nil, fmt.Errorf("streamer answered for %s, asked for %s", spr.Name, name)
+		}
+		pr.Replicas, pr.StoredOn = spr.Replicas, spr.StoredOn
+		if err := checkReplicaList(pr); err != nil {
 			return pr.PieceCore, nil, err
 		}
 	}
 
 	suc = 0
+	shardLen := -1
 	for i, rep := range pr.Replicas {
 		val, err := DownloadReplica(baseUrl, streamURL, auth, rep, pr.StoredOn[i])
+		if err == nil && len(val) > 0 {
+			// shards of one piece are equal-length multiples of PadSize
+			if len(val)%bls.PadSize != 0 || (shardLen >= 0 && len(val) != shardLen) {
+				err = fmt.Errorf("replica %s has a malformed length %d", rep, len(val))
+			} else {
+				shardLen = len(val)
+			}
+		}
 		if err != nil || len(val) == 0 {
 			if i < int(pr.Policy.K) {
 				need = append(need, i)
@@ -111,8 +144,20 @@ func DownloadPiece(baseUrl string, auth types.Auth, name string) (types.PieceCor
 		}
 		pbyte = append(pbyte, data...)
 	}
+	if pr.Size < 0 || int64(len(pbyte)) < pr.Size {
+		return pr.PieceCore, nil, fmt.Errorf("piece %s rebuilt to %d bytes, receipt says %d", name, len(pbyte), pr.Size)
+	}
 
 	return pr.PieceCore, pbyte[:pr.Size], nil
+}
+
+// checkReplicaList makes a receipt's replica list safe to index: one name and
+// one storing address per slot, at most N slots.
+func checkReplicaList(pr types.PieceReceipt) error {
+	if len(pr.Replicas) > int(pr.Policy.N) || len(pr.StoredOn) < len(pr.Replicas) {
+		return fmt.Errorf("piece %s: %d replicas / %d stores for N=%d", pr.Name, len(pr.Replicas), len(pr.StoredOn), pr.Policy.N)
+	}
+	return nil
 }
 
 func DownloadReplica(baseUrl, streamUrl string, auth types.Auth, name string, addr common.Address) ([]byte, error) {

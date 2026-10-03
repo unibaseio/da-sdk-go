@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -18,7 +19,6 @@ import (
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
-	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/sdk"
 )
@@ -101,14 +101,13 @@ func (s *Server) seal(c *gin.Context) {
 	}
 	tmp.Close()
 
-	name := c.PostForm("name") // optional; "" => hub-generated (commitment hex)
+	// optional; "" => hub-generated (commitment hex). The file record is
+	// registered under the hub's key, so a client-chosen name is kept in the
+	// signer's own namespace: unprefixed it could take the name of a hub volume
+	// ("<owner>/<i>.vol") and the drain would trust it as that volume's record.
+	name := sealFileName(owner, c.PostForm("name"))
 
 	sk := s.rp.Key().Export().PrivateKey
-	au, err := key.BuildAuth(sk, []byte("seal"))
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
 	cm, err := s.chainManager()
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
@@ -116,7 +115,7 @@ func (s *Server) seal(c *gin.Context) {
 	}
 
 	// 1. erasure-encode + stream-stage + KZG commit.
-	res, streamer, err := sdk.Upload(sdk.ServerURL, au, policy, tmpPath, name)
+	res, streamer, err := sdk.UploadWith(sdk.ServerURL, sdk.KeySigner(sk), policy, tmpPath, name)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, lerror.ToAPIError("hub", err))
 		return
@@ -255,8 +254,9 @@ func (s *Server) seal(c *gin.Context) {
 }
 
 // sealTerms picks a seal's expiry epoch and replica price. When the client
-// registers (and pays) the piece itself, its expire/price are taken as given.
-// When the hub pays (register=hub), the bond the hub locks grows with price x
+// registers (and pays) the piece itself (register=client), its expire/price
+// are taken as given. In every other mode the hub pays (register=hub, and
+// hub_attributed, which only attributes ownership), and the bond it locks grows with price x
 // duration x size, so a client-chosen price is ignored and the duration is
 // capped at maxEpochs: otherwise one request could lock the hub's whole
 // balance. An unusable expire falls back to the default term.
@@ -266,7 +266,7 @@ func sealTerms(register string, start uint64, expireArg, priceArg string, maxEpo
 		expire = e
 	}
 	price := big.NewInt(int64(com.DefaultReplicaPrice))
-	if register != "hub" {
+	if register == "client" {
 		if p, ok := new(big.Int).SetString(priceArg, 10); priceArg != "" && ok && p.Sign() > 0 {
 			price = p
 		}
@@ -276,4 +276,12 @@ func sealTerms(register string, start uint64, expireArg, priceArg string, maxEpo
 		expire = start + maxEpochs
 	}
 	return expire, price
+}
+
+// sealFileName namespaces a client-chosen seal name under its signer.
+func sealFileName(owner, name string) string {
+	if name == "" {
+		return ""
+	}
+	return "seal/" + strings.ToLower(owner) + "/" + name
 }

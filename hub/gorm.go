@@ -931,8 +931,8 @@ func (s *Server) getConversation(ctx context.Context, conversation, addr, bucket
 	}
 
 	var needles []types.Needle
-	query := s.gdb.Model(&types.Needle{}).Where("name like ? and created_at >= ?",
-		conversation+"_%",
+	query := s.gdb.Model(&types.Needle{}).Where(`name like ? escape '\' and created_at >= ?`,
+		likeEscape(conversation)+`\_%`,
 		time.Date(2025, 3, 7, 0, 0, 0, 0, time.UTC))
 	if addr != "" {
 		query = query.Where("LOWER(owner) = ?", strings.ToLower(addr))
@@ -954,7 +954,7 @@ func (s *Server) getConversation(ctx context.Context, conversation, addr, bucket
 		// the by-name path stays as the fallback for remote-only data
 		if _, err := s.logFSReadAt(needle.Owner, needle.Name, needle.File, needle.Start, needle.Size, &w); err != nil {
 			w.Reset()
-			if _, err := s.download(ctx, needle.Name, addr, &w); err != nil {
+			if _, err := s.download(ctx, needle.Name, needle.Owner, &w); err != nil {
 				continue
 			}
 		}
@@ -988,4 +988,11 @@ func (s *Server) periodicCheckpoint() {
 			}
 		}
 	}
+}
+
+// likeEscape makes s match literally inside a LIKE pattern that uses
+// ESCAPE '\': conversation ids are client-chosen, and an id of "%" would
+// otherwise match every row.
+func likeEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

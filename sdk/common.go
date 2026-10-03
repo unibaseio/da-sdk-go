@@ -277,7 +277,29 @@ func personalSignDigest(msg []byte) []byte {
 var (
 	siweAddrRe   = regexp.MustCompile(`(?m)^0x[0-9a-fA-F]{40}$`)
 	siweIssuedRe = regexp.MustCompile(`(?mi)^Issued At:[ \t]*(.+?)[ \t]*$`)
+	siweExpRe    = regexp.MustCompile(`(?mi)^Expiration Time:[ \t]*(.+?)[ \t]*$`)
+	siweNbfRe    = regexp.MustCompile(`(?mi)^Not Before:[ \t]*(.+?)[ \t]*$`)
+	siweDomainRe = regexp.MustCompile(`^(\S+) wants you to sign in with your Ethereum account:`)
 )
+
+// siweTime parses an optional RFC3339 field; ok=false when it is absent.
+func siweTime(re *regexp.Regexp, msg string) (t time.Time, ok bool, err error) {
+	m := re.FindStringSubmatch(msg)
+	if m == nil {
+		return time.Time{}, false, nil
+	}
+	t, err = time.Parse(time.RFC3339, strings.TrimSpace(m[1]))
+	return t, true, err
+}
+
+// siweDomain returns the domain an EIP-4361 message was issued for (the
+// first line's "<domain> wants you to sign in ..."), "" if it has none.
+func siweDomain(msg string) string {
+	if m := siweDomainRe.FindStringSubmatch(msg); m != nil {
+		return strings.ToLower(m[1])
+	}
+	return ""
+}
 
 // parseSIWE pulls the two security-relevant fields out of a SIWE / EIP-4361
 // message: the account address line (^0x…40 hex…$) and the "Issued At:" RFC3339
@@ -299,12 +321,6 @@ func parseSIWE(msg string) (addr string, issuedAt int64, err error) {
 	return strings.ToLower(a), t.Unix(), nil
 }
 
-// VerifySIWE verifies a human-readable EIP-4361 / SIWE auth. au.Sign must be a
-// personal_sign over the EXACT au.Msg text and recover au.Addr, and the account
-// address embedded in au.Msg must equal au.Addr. It returns the message's
-// "Issued At" as a unix timestamp so the caller can enforce its own freshness
-// window. Security model is identical to VerifyAuth (prove control of Addr +
-// a fresh in-signature timestamp); only the signed bytes are readable.
 // DefaultAuthDrift is how far (seconds) a signed timestamp may be from now
 // before VerifyAuthFresh rejects it.
 const DefaultAuthDrift int64 = 600
@@ -339,6 +355,12 @@ func VerifyAuthFresh(au types.Auth, drift int64) error {
 	return nil
 }
 
+// VerifySIWE verifies a human-readable EIP-4361 / SIWE auth. au.Sign must be a
+// personal_sign over the EXACT au.Msg text and recover au.Addr, and the account
+// address embedded in au.Msg must equal au.Addr. It returns the message's
+// "Issued At" as a unix timestamp so the caller can enforce its own freshness
+// window. Security model is identical to VerifyAuth (prove control of Addr +
+// a fresh in-signature timestamp); only the signed bytes are readable.
 func VerifySIWE(au types.Auth) (int64, error) {
 	if len(au.Msg) == 0 {
 		return 0, fmt.Errorf("siwe: empty message")
@@ -369,7 +391,38 @@ func VerifySIWE(au types.Auth) (int64, error) {
 	if addrInMsg != strings.ToLower(au.Addr.Hex()) {
 		return 0, fmt.Errorf("siwe: message address %s != envelope %s", addrInMsg, au.Addr)
 	}
+	now := time.Now()
+	if exp, ok, err := siweTime(siweExpRe, au.Msg); err != nil {
+		return 0, fmt.Errorf("siwe: bad 'Expiration Time': %w", err)
+	} else if ok && !now.Before(exp) {
+		return 0, fmt.Errorf("siwe: message expired at %s", exp.Format(time.RFC3339))
+	}
+	if nbf, ok, err := siweTime(siweNbfRe, au.Msg); err != nil {
+		return 0, fmt.Errorf("siwe: bad 'Not Before': %w", err)
+	} else if ok && now.Before(nbf) {
+		return 0, fmt.Errorf("siwe: message not valid before %s", nbf.Format(time.RFC3339))
+	}
 	return issuedAt, nil
+}
+
+// VerifyAuthFreshDomains is VerifyAuthFresh that, for a SIWE message, also
+// requires the domain it was issued for to be one of domains. Without this a
+// sign-in message any other site obtained from the user would be accepted
+// here. An empty domains list skips the domain check.
+func VerifyAuthFreshDomains(au types.Auth, drift int64, domains []string) error {
+	if err := VerifyAuthFresh(au, drift); err != nil {
+		return err
+	}
+	if len(au.Msg) == 0 || len(domains) == 0 {
+		return nil
+	}
+	d := siweDomain(au.Msg)
+	for _, want := range domains {
+		if d != "" && d == strings.ToLower(strings.TrimSpace(want)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("verify auth: siwe message issued for %q, not for this service", d)
 }
 
 // hash is random byte now
