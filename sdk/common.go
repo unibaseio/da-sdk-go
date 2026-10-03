@@ -305,6 +305,40 @@ func parseSIWE(msg string) (addr string, issuedAt int64, err error) {
 // "Issued At" as a unix timestamp so the caller can enforce its own freshness
 // window. Security model is identical to VerifyAuth (prove control of Addr +
 // a fresh in-signature timestamp); only the signed bytes are readable.
+// DefaultAuthDrift is how far (seconds) a signed timestamp may be from now
+// before VerifyAuthFresh rejects it.
+const DefaultAuthDrift int64 = 600
+
+// VerifyAuthFresh verifies au's signature and that the timestamp bound into
+// it (au.Time for the legacy Hash||be64(Time) bytes, "Issued At" for SIWE) is
+// within drift seconds of now, so a captured header cannot be replayed later.
+// The freshness check uses the signed timestamp, so editing the envelope
+// cannot widen the window.
+func VerifyAuthFresh(au types.Auth, drift int64) error {
+	var signedAt int64
+	if len(au.Msg) > 0 {
+		t, err := VerifySIWE(au)
+		if err != nil {
+			return fmt.Errorf("verify auth: %w", err)
+		}
+		signedAt = t
+	} else {
+		signedAt = au.Time
+		if err := VerifyAuth(au); err != nil {
+			return fmt.Errorf("verify auth: %w", err)
+		}
+	}
+
+	delta := time.Now().Unix() - signedAt
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > drift {
+		return fmt.Errorf("auth timestamp out of window (delta=%ds, max=%ds)", delta, drift)
+	}
+	return nil
+}
+
 func VerifySIWE(au types.Auth) (int64, error) {
 	if len(au.Msg) == 0 {
 		return 0, fmt.Errorf("siwe: empty message")

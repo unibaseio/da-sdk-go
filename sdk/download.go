@@ -3,6 +3,8 @@ package sdk
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/url"
@@ -151,7 +153,7 @@ func DownloadReplicaFromStream(baseUrl string, auth types.Auth, name string, add
 	form.Set("name", name)
 	form.Set("storedOn", addr.String())
 
-	for _, er := range el.Edges {
+	for _, er := range relayStreams(el.Edges, chaintype) {
 		logger.Debug("download replica: ", name, " via stream: ", er.Name, " at: ", er.ExposeURL)
 		ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Minute)
 		defer cancle()
@@ -227,18 +229,53 @@ func CheckFileParallel(baseUrl string, auth types.Auth, name string, parallel in
 	return nil
 }
 
+// relayStreams keeps the registered streams a replica may be fetched through:
+// active on-chain and, when the chain is known, on it. The registry is open,
+// so this narrows who can answer; the bytes are still checked by the caller.
+func relayStreams(edges []types.EdgeReceipt, chain string) []types.EdgeReceipt {
+	out := make([]types.EdgeReceipt, 0, len(edges))
+	for _, e := range edges {
+		if !e.OnChain {
+			continue
+		}
+		if chain != "" && e.ChainType != chain {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 func Download(baseUrl string, auth types.Auth, name string, ks types.IPieceStore, w io.Writer) error {
-	fr, err := GetFileReceipt(baseUrl, auth, name)
+	return DownloadOf(baseUrl, auth, name, types.EmptyAddr, ks, w)
+}
+
+// DownloadOf downloads owner's file (EmptyAddr: any owner's file of that name)
+// and checks the result against the sha256 in its receipt. Pieces fetched
+// from the network go into ks only after the whole file checks out, so data
+// from a lying store or stream is never cached. Bytes are written to w as
+// they arrive; on a mismatch the error comes at the end and w holds bad data,
+// which the caller must discard.
+func DownloadOf(baseUrl string, auth types.Auth, name string, owner common.Address, ks types.IPieceStore, w io.Writer) error {
+	fr, err := GetFileReceiptOf(baseUrl, name, owner)
 	if err != nil {
 		return err
 	}
+
+	h := sha256.New()
+	out := io.MultiWriter(w, h)
+	type fetched struct {
+		pc   types.PieceCore
+		data []byte
+	}
+	var toCache []fetched
 
 	for _, com := range fr.Pieces {
 		if ks != nil {
 			var b bytes.Buffer
 			_, err := ks.GetPiece(context.TODO(), com, &b, types.Options{})
 			if err == nil {
-				w.Write(b.Bytes())
+				out.Write(b.Bytes())
 				continue
 			}
 		}
@@ -247,14 +284,18 @@ func Download(baseUrl string, auth types.Auth, name string, ks types.IPieceStore
 		if err != nil {
 			return err
 		}
-
 		if ks != nil {
-			ks.PutPiece(context.TODO(), pc, resByte, true)
+			toCache = append(toCache, fetched{pc, resByte})
 		}
-
-		w.Write(resByte)
+		out.Write(resByte)
 	}
 
+	if got := hex.EncodeToString(h.Sum(nil)); fr.Hash != "" && !strings.EqualFold(got, fr.Hash) {
+		return fmt.Errorf("file %s: downloaded data hashes to %s, receipt says %s", name, got, fr.Hash)
+	}
+	for _, f := range toCache {
+		ks.PutPiece(context.TODO(), f.pc, f.data, true)
+	}
 	return nil
 }
 

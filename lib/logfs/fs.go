@@ -469,6 +469,38 @@ func (sf *LogFS) GetMeta(key []byte) (*LogMeta, error) {
 	return lm, nil
 }
 
+// GetDataAt reads size bytes at start of volume index without the content
+// hash check GetData makes. For readers that know a record's location but not
+// its hash (the key's meta may since point at a newer record); prefer GetData
+// whenever the meta is at hand.
+func (sf *LogFS) GetDataAt(index, start, size uint64) ([]byte, error) {
+	lm := &LogMeta{Index: index, Start: start, Size: size}
+	fi, release, err := sf.fdc.acquire(lm.Index)
+	if err != nil {
+		if sf.volBackend != nil && os.IsNotExist(err) {
+			res, err := sf.volBackend.RangeAt(lm.Index, int64(lm.Start), int64(lm.Size))
+			if err != nil {
+				return nil, err
+			}
+			if len(res) != int(lm.Size) {
+				return nil, fmt.Errorf("unequal size")
+			}
+			return res, nil
+		}
+		return nil, err
+	}
+	defer release()
+	res := make([]byte, lm.Size)
+	n, err := fi.ReadAt(res, int64(lm.Start))
+	if err != nil {
+		return nil, err
+	}
+	if n != int(lm.Size) {
+		return nil, fmt.Errorf("unequal size")
+	}
+	return res, nil
+}
+
 func (sf *LogFS) GetData(lm *LogMeta, opts ...int) ([]byte, error) {
 	logger.Debugf("logfs read at: %s %d %d %d", sf.addr, lm.Index, lm.Start, lm.Size)
 	fi, release, err := sf.fdc.acquire(lm.Index)

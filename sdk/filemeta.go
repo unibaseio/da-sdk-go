@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -151,9 +152,21 @@ func listPiece(baseUrl, filter, store string) (types.ListPieceResult, error) {
 }
 
 func GetFileReceipt(baseUrl string, auth types.Auth, name string) (types.FileReceipt, error) {
+	return GetFileReceiptOf(baseUrl, name, types.EmptyAddr)
+}
+
+// GetFileReceiptOf looks up owner's file of this name. File names are only
+// unique per owner, so a caller that knows the owner should always pass it;
+// the owner of the returned record is checked as well, in case the gateway
+// predates owner filtering. EmptyAddr means any owner.
+func GetFileReceiptOf(baseUrl string, name string, owner common.Address) (types.FileReceipt, error) {
 	var res types.FileReceipt
 
-	resByte, err := Get(context.TODO(), v1URL(baseUrl, "/v1/files/"+url.PathEscape(name)))
+	u := v1URL(baseUrl, "/v1/files/"+url.PathEscape(name))
+	if owner != types.EmptyAddr {
+		u += andSep(u) + "owner=" + url.QueryEscape(owner.Hex())
+	}
+	resByte, err := Get(context.TODO(), u)
 	if err != nil {
 		return res, err
 	}
@@ -161,6 +174,9 @@ func GetFileReceipt(baseUrl string, auth types.Auth, name string) (types.FileRec
 	err = json.Unmarshal(resByte, &res)
 	if err != nil {
 		return res, err
+	}
+	if owner != types.EmptyAddr && res.Owner != owner {
+		return types.FileReceipt{}, fmt.Errorf("file %s belongs to %s, not %s", name, res.Owner, owner)
 	}
 
 	return res, nil
