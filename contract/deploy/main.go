@@ -92,6 +92,8 @@ func main() {
 	skipDAO := flag.Bool("skip-dao", false, "skip phase-2 DAO governance deployment")
 	govToken := flag.String("dao-gov-token", "vub", "DAO governance token: vub (stake UB->ve votes) or legacy (placeholder GovernanceToken)")
 	rewardTok := flag.String("dao-reward-token", "", "reward token address for vUB APY (default: reuse UB token)")
+	rsoneV2 = flag.Bool("rsone-v2", true, "deploy and register the RSOne v2 verifier (proof version 2)")
+	rsoneV2Cutoff = flag.Bool("rsone-v2-cutoff", true, "require v2 proofs for every replica (fresh deployments)")
 	slotsFlag := flag.Uint64("slots", 0, "epoch length in blocks (default 16000; use a small value on local anvil)")
 	mptFlag := flag.Int64("min-prove-time", 0, "min prove time in blocks (default 8000)")
 	tokenFlag := flag.String("token", "", "reuse an EXISTING ERC20 as the stake/penalty token (skip deploying a fresh test token); e.g. the canonical UB on this chain")
@@ -296,6 +298,8 @@ func deployall_v1(client *ethclient.Client, sk string) {
 // 3. Deploy ERC1967 proxies with initialization
 // 4. Set cross-contract references (EProof in EVerify, addresses in Node)
 // 5. Configure RS VK roots and minimum pledges
+var rsoneV2, rsoneV2Cutoff *bool
+
 func deployall_v2(client *ethclient.Client, sk string) {
 	// Get owner address from private key WITHOUT makeAuth — makeAuth advances the
 	// local nonce counter, so calling it just to read the address would burn a
@@ -520,6 +524,16 @@ func deployall_v2(client *ethclient.Client, sk string) {
 	if err := SetValidatorPool(client, sk, rsproofProxy, eproofProxy, validatorPool); err != nil {
 		log.Println("Failed to set validator pool on RSProof/EProof:", err)
 		return
+	}
+
+	// RSOne v2 (no unconstrained hints): registered as proof version 2. Last,
+	// so every address above stays where the LocalAnvil table expects it.
+	if *rsoneV2 {
+		log.Println("=== RSOne v2 verifier ===")
+		if _, err := DeployRSOneV2(client, sk, rsproofProxy, types.SupportedPolicies, *rsoneV2Cutoff); err != nil {
+			log.Println("Failed to deploy/register RSOne v2:", err)
+			return
+		}
 	}
 
 	log.Println("=== V2 Deployment Complete ===")

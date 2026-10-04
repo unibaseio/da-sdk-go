@@ -9,6 +9,7 @@ import (
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/node"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/plonk/rsone"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/token"
 	"github.com/unibaseio/da-sdk-go/lib/bls"
 	"github.com/unibaseio/da-sdk-go/lib/types"
@@ -507,7 +508,9 @@ func (c *ContractManage) ChallengeRS(_pn, _rn string, _pri uint8) error {
 	return nil
 }
 
-func (c *ContractManage) ProveRS(_pn, _rn string, _pri uint8, _pf []byte) error {
+// ProveRS answers an RS challenge with an outer proof of RSOne version ver —
+// the version the replica's stored inner proof was made with.
+func (c *ContractManage) ProveRS(ver uint8, _pn, _rn string, _pri uint8, _pf []byte) error {
 	ctx, cancle := context.WithTimeout(context.TODO(), 3*time.Minute)
 	defer cancle()
 	rsp, err := c.NewRSProof(ctx)
@@ -530,7 +533,7 @@ func (c *ContractManage) ProveRS(_pn, _rn string, _pri uint8, _pf []byte) error 
 		return err
 	}
 
-	tx, err := rsp.Prove(au, pname, rname, _pri, CurrentProofVersion, _pf)
+	tx, err := rsp.Prove(au, pname, rname, _pri, ver, _pf)
 	if err != nil {
 		return err
 	}
@@ -931,7 +934,9 @@ func (c *ContractManage) CheckEpochChallenge(addr common.Address, _ep uint64) er
 	return nil
 }
 
-func (c *ContractManage) TestProveRS(rsn, rsk uint8, pub []*big.Int, _pf []byte) error {
+// TestProveRS dry-runs an RS answer of RSOne version ver against that
+// version's on-chain VK root and verifier, before spending gas on it.
+func (c *ContractManage) TestProveRS(ver, rsn, rsk uint8, pub []*big.Int, _pf []byte) error {
 	if len(pub) != 3 {
 		return fmt.Errorf("invalid public length")
 	}
@@ -941,8 +946,9 @@ func (c *ContractManage) TestProveRS(rsn, rsk uint8, pub []*big.Int, _pf []byte)
 	if err != nil {
 		return err
 	}
+	opts := &bind.CallOpts{From: com.Base, Context: ctx}
 
-	vt, err := rsp.GetVKRoot(&bind.CallOpts{From: com.Base}, rsn, rsk)
+	vt, err := rsp.GetVKRootV(opts, ver, rsn, rsk)
 	if err != nil {
 		return err
 	}
@@ -951,7 +957,18 @@ func (c *ContractManage) TestProveRS(rsn, rsk uint8, pub []*big.Int, _pf []byte)
 		return fmt.Errorf("unequal vkroot")
 	}
 
-	rsv, err := c.NewRSOne(ctx)
+	vaddr, err := rsp.RsoneOf(opts, ver)
+	if err != nil {
+		return err
+	}
+	if vaddr == (common.Address{}) {
+		return fmt.Errorf("no RSOne verifier for version %d", ver)
+	}
+	client, err := c.Client(ctx)
+	if err != nil {
+		return err
+	}
+	rsv, err := rsone.NewPlonkVerifier(vaddr, client)
 	if err != nil {
 		return err
 	}
@@ -1089,4 +1106,52 @@ func (c *ContractManage) WithdrawRevenue(_money *big.Int) error {
 	}
 
 	return nil
+}
+
+// RSOneVersionFor is the RSOne version to prove a NEW replica of (rsn, rsk)
+// with: v2 once the chain has its verifier and this policy's v2 VK root,
+// else v1. Proving v2 before the chain can verify it would leave the replica
+// unanswerable when challenged.
+func (c *ContractManage) RSOneVersionFor(rsn, rsk uint8) (uint8, error) {
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancle()
+	rsp, err := c.NewRSProof(ctx)
+	if err != nil {
+		return 0, err
+	}
+	opts := &bind.CallOpts{From: com.Base, Context: ctx}
+	v2, err := rsp.RsoneOf(opts, 2)
+	if err != nil {
+		return 0, err
+	}
+	if v2 == (common.Address{}) {
+		return 1, nil
+	}
+	root, err := rsp.GetVKRootV(opts, 2, rsn, rsk)
+	if err != nil {
+		return 0, err
+	}
+	if root.Sign() == 0 {
+		return 1, nil
+	}
+	return 2, nil
+}
+
+// RSOneCutoff returns RSProof's version cutoff: replicas with index >= from
+// must be proven with version >= minVer (minVer 0: no cutoff).
+func (c *ContractManage) RSOneCutoff() (minVer uint8, from uint64, err error) {
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancle()
+	rsp, err := c.NewRSProof(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	opts := &bind.CallOpts{From: com.Base, Context: ctx}
+	if minVer, err = rsp.MinVersion(opts); err != nil {
+		return 0, 0, err
+	}
+	if from, err = rsp.MinVersionFrom(opts); err != nil {
+		return 0, 0, err
+	}
+	return minVer, from, nil
 }

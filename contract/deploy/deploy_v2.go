@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	etypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/plonk/rsone2"
+	"github.com/unibaseio/da-sdk-go/lib/types"
 	"log"
 	"math/big"
 	"os"
@@ -798,4 +801,86 @@ func SetValidatorPool(client *ethclient.Client, sk string, rsproofProxy, eproofP
 	}
 	log.Printf("validatorPool set on RSProof+EProof: %s\n", pool.Hex())
 	return nil
+}
+
+// rsoneV2VKRoot is the RSOne v2 inner VK root of a policy.
+func rsoneV2VKRoot(n, k int) (*big.Int, error) {
+	vt := new(big.Int)
+	switch {
+	case n == 6 && k == 4:
+		vt.SetString(contract.RSn6k4VKRootV2, 10)
+	case n == 14 && k == 7:
+		vt.SetString(contract.RSn14k7VKRootV2, 10)
+	case n == 32 && k == 16:
+		vt.SetString(contract.RSn32k16VKRootV2, 10)
+	case n == 64 && k == 32:
+		vt.SetString(contract.RSn64k32VKRootV2, 10)
+	default:
+		return nil, fmt.Errorf("unsupported rs policy: %d %d", n, k)
+	}
+	return vt, nil
+}
+
+// DeployRSOneV2 deploys the RSOne v2 outer verifier and registers it on
+// RSProof as version 2 with every policy's v2 VK root. With cutoff set, every
+// replica must then be proven with v2 (fresh deployments: from replica 0).
+func DeployRSOneV2(client *ethclient.Client, sk string, rsproofAddr common.Address, policies []types.Policy, cutoff bool) (common.Address, error) {
+	au, err := makeAuth(sk)
+	if err != nil {
+		return common.Address{}, err
+	}
+	vAddr, tx, _, err := rsone2.DeployPlonkVerifier(au, client)
+	if err != nil {
+		return common.Address{}, err
+	}
+	if err := contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+		return common.Address{}, err
+	}
+	log.Println("rsone v2: ", vAddr.Hex())
+	SaveDeployment("RSOneVerifierV2", vAddr)
+	if err := waitForCode(client, vAddr); err != nil {
+		return common.Address{}, err
+	}
+
+	rp, err := rsproof.NewRSProof(rsproofAddr, client)
+	if err != nil {
+		return common.Address{}, err
+	}
+	send := func(what string, f func(*bind.TransactOpts) (*etypes.Transaction, error)) error {
+		au, err := makeAuth(sk)
+		if err != nil {
+			return err
+		}
+		tx, err := f(au)
+		if err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return contract.CheckTx(ChainURL, tx.Hash())
+	}
+	if err := send("registerRSOneVerifier(2)", func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return rp.RegisterRSOneVerifier(au, 2, vAddr)
+	}); err != nil {
+		return common.Address{}, err
+	}
+	for _, p := range policies {
+		root, err := rsoneV2VKRoot(int(p.N), int(p.K))
+		if err != nil {
+			return common.Address{}, err
+		}
+		if err := send(fmt.Sprintf("setVKRootV(2,%d,%d)", p.N, p.K), func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+			return rp.SetVKRootV(au, 2, p.N, p.K, root)
+		}); err != nil {
+			return common.Address{}, err
+		}
+		log.Printf("set v2 vk root: %d %d %s\n", p.N, p.K, root)
+	}
+	if cutoff {
+		if err := send("setMinVersion(2,0)", func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+			return rp.SetMinVersion(au, 2, 0)
+		}); err != nil {
+			return common.Address{}, err
+		}
+		log.Println("rsone: every replica must be proven with v2")
+	}
+	return vAddr, nil
 }
