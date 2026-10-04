@@ -27,7 +27,7 @@ func main() {
 			&cli.StringFlag{
 				Name:    cmd.PasswordStr,
 				Aliases: []string{"pwd"},
-				Value:   "aidemo123",
+				Usage:   "keystore password (no default; prompted on a terminal)",
 			},
 		},
 		Commands: local,
