@@ -116,7 +116,8 @@ func main() {
 	}
 	deployDAOPhase = !*skipDAO
 
-	fmt.Println("connect to: ", ChainURL)
+	dlog.RegisterURL(ChainURL)
+	fmt.Println("connect to: ", dlog.RedactURL(ChainURL))
 	client, err := ethclient.DialContext(context.TODO(), ChainURL)
 	if err != nil {
 		return

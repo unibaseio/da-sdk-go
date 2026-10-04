@@ -2,6 +2,8 @@ package log
 
 import (
 	"fmt"
+	stdlog "log"
+	"os"
 	"sync"
 
 	"github.com/unibaseio/da-sdk-go/lib/env"
@@ -40,7 +42,10 @@ func init() {
 
 	encoder := getEncoder()
 
-	core := zapcore.NewCore(encoder, debugWriter, mLoglevel)
+	// secrets registered with RegisterURL (RPC keys) never reach the output,
+	// from zap or from the stdlib logger many node packages use
+	core := zapcore.NewCore(encoder, scrubWriteSyncer(debugWriter), mLoglevel)
+	stdlog.SetOutput(ScrubWriter(os.Stderr))
 
 	// NewProduction
 	logger := zap.New(core, zap.AddCaller())

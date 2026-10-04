@@ -8,6 +8,7 @@ import (
 	"os"
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
+	dlog "github.com/unibaseio/da-sdk-go/lib/log"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -51,6 +52,8 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 		cm.RPC = chainRPC
 	}
 
+	dlog.RegisterURL(cm.RPC)
+
 	// check chain RPC is connected
 	// check chain id
 	client, err := ethclient.Dial(cm.RPC)
@@ -67,7 +70,7 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 		return nil, fmt.Errorf("chain id mismatch, expected %d, got %d", cm.ChainID, chainID)
 	}
 
-	com.Logger.Info("connected to chain: ", cm.RPC)
+	com.Logger.Info("connected to chain: ", dlog.RedactURL(cm.RPC))
 
 	return cm, nil
 }

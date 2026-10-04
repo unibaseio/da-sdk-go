@@ -13,6 +13,7 @@ import (
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
 	"github.com/unibaseio/da-sdk-go/lib/env"
+	dlog "github.com/unibaseio/da-sdk-go/lib/log"
 
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -204,7 +205,7 @@ func (c *ContractManage) rotateRPC() {
 	if len(c.rpcs) > 1 {
 		c.rpcIdx = (c.rpcIdx + 1) % len(c.rpcs)
 		c.RPC = c.rpcs[c.rpcIdx]
-		com.Logger.Warn("rpc failover -> ", c.RPC)
+		com.Logger.Warn("rpc failover -> ", dlog.RedactURL(c.RPC))
 	}
 	c.rpcMu.Unlock()
 
@@ -389,6 +390,11 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 	cm.RPC = cm.rpcs[0]
 	cm.filterRPCs = splitEndpoints(cm.RPCForFilterLog)
 	cm.RPCForFilterLog = cm.filterRPCs[0]
+	// hosted RPC URLs carry the provider API key: keep it out of all logs,
+	// including transport errors that quote the URL
+	for _, ep := range append(append([]string(nil), cm.rpcs...), cm.filterRPCs...) {
+		dlog.RegisterURL(ep)
+	}
 
 	// FixB+A2: validator reward pool address (post-deploy, env-configured).
 	if v := os.Getenv("VALIDATOR_REWARD_ADDR"); v != "" {
@@ -410,7 +416,7 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 		return nil, fmt.Errorf("chain id mismatch, expected %d, got %d", cm.ChainID, chainID)
 	}
 
-	com.Logger.Info("connected to chain: ", cm.RPC)
+	com.Logger.Info("connected to chain: ", dlog.RedactURL(cm.RPC))
 
 	return cm, nil
 }
@@ -532,7 +538,7 @@ func (c *ContractManage) rotateFilterRPC() {
 	if len(c.filterRPCs) > 1 {
 		c.filterIdx = (c.filterIdx + 1) % len(c.filterRPCs)
 		c.RPCForFilterLog = c.filterRPCs[c.filterIdx]
-		com.Logger.Warn("filter-log rpc failover -> ", c.RPCForFilterLog)
+		com.Logger.Warn("filter-log rpc failover -> ", dlog.RedactURL(c.RPCForFilterLog))
 	}
 	c.filterMu.Unlock()
 
