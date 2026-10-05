@@ -65,20 +65,105 @@ func CheckENV() {
 	logger.Warn("connect to chain: ", chaintype)
 }
 
+// MaxPieceSize is the most raw bytes one piece holds under policy p (what the
+// stream reads per piece; every piece but the last of a file is this size).
+func MaxPieceSize(p types.Policy) int64 {
+	if p.K == 0 {
+		return 0
+	}
+	k := int64(p.K)
+	return (int64(bls.MaxSize) / (bls.UnPadSize * k)) * k * bls.UnPadSize
+}
+
+// CheckFileFullShape checks the structure of a stream's upload answer before
+// anything is decoded or evaluated: a supported policy (equal to want unless
+// want is the zero Policy), one proof and one size per piece, every witness
+// holding exactly N commits and K move/limit commits and claimed values, piece
+// sizes within a piece and summing to Size, and a well-formed sha256 Hash.
+// It does not read the file; CheckFileFull does that.
+func CheckFileFullShape(ff types.FileFull, want types.Policy) error {
+	pol := ff.Policy
+	if err := pol.Check(); err != nil {
+		return err
+	}
+	if pol.K == 0 || pol.N <= pol.K {
+		return fmt.Errorf("bad rs policy %d/%d", pol.N, pol.K)
+	}
+	if want != (types.Policy{}) && pol != want {
+		return fmt.Errorf("stream encoded with policy %d/%d, requested %d/%d", pol.N, pol.K, want.N, want.K)
+	}
+	if len(ff.Proofs) != len(ff.Pieces) || len(ff.PieceSizes) != len(ff.Pieces) {
+		return fmt.Errorf("receipt has %d pieces, %d proofs, %d sizes", len(ff.Pieces), len(ff.Proofs), len(ff.PieceSizes))
+	}
+	if hb, err := hex.DecodeString(ff.Hash); err != nil || len(hb) != sha256.Size {
+		return fmt.Errorf("receipt hash %q is not a sha256", ff.Hash)
+	}
+	if ff.Size < 0 {
+		return fmt.Errorf("negative file size %d", ff.Size)
+	}
+	maxp := MaxPieceSize(pol)
+	total := int64(0)
+	for i, ps := range ff.PieceSizes {
+		if ps <= 0 || ps > maxp {
+			return fmt.Errorf("piece %d has size %d, want 1..%d", i, ps, maxp)
+		}
+		total += ps
+		if total > ff.Size {
+			return fmt.Errorf("piece sizes exceed the file size %d", ff.Size)
+		}
+		if err := bls.CheckEncodeWitnessShape(ff.Proofs[i], int(pol.N), int(pol.K)); err != nil {
+			return fmt.Errorf("piece %d witness: %w", i, err)
+		}
+	}
+	if total != ff.Size {
+		return fmt.Errorf("pieces cover %d bytes, file is %d", total, ff.Size)
+	}
+	return nil
+}
+
+// CheckFileFull verifies a stream's upload answer against the local file at
+// fp: see CheckFileFullPolicy. Any supported policy is accepted; callers that
+// know the policy they asked for should use CheckFileFullPolicy.
 func CheckFileFull(ff types.FileFull, stream common.Address, fp string) ([]types.PieceCore, error) {
+	return CheckFileFullPolicy(ff, stream, fp, types.Policy{})
+}
+
+// CheckFileFullPolicy verifies that the stream encoded exactly the file at fp
+// under policy want (zero Policy: any supported one) and returns the pieces to
+// register. Besides the per-piece encoding check (Eval(data)==ClaimedValues at
+// the Fiat-Shamir point, Σ MoveCommits==Root, RS-valid parity commits) it
+// requires each piece name to be its witness root, the pieces to cover the
+// whole file with nothing left over, and Size and Hash to be the file's own.
+func CheckFileFullPolicy(ff types.FileFull, stream common.Address, fp string, want types.Policy) ([]types.PieceCore, error) {
 	logger.Debug("check stream handle of file: ", fp)
-	res := make([]types.PieceCore, len(ff.Pieces))
+	if err := CheckFileFullShape(ff, want); err != nil {
+		return nil, err
+	}
 	p, err := homedir.Expand(fp)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
 
-	fi, err := os.Open(p)
+	f, err := os.Open(p)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
-	defer fi.Close()
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", fp)
+	}
+	if st.Size() != ff.Size {
+		return nil, fmt.Errorf("receipt size %d, file is %d bytes", ff.Size, st.Size())
+	}
 
+	h := sha256.New()
+	fi := io.TeeReader(f, h)
+
+	res := make([]types.PieceCore, len(ff.Pieces))
 	var rnd bls.Fr
 	for i := 0; i < len(ff.Pieces); i++ {
 		ew := new(bls.EncodeWitness)
@@ -90,6 +175,12 @@ func CheckFileFull(ff types.FileFull, stream common.Address, fp string) ([]types
 		err = CheckWitness(int(ff.Policy.N), int(ff.Policy.K), ew)
 		if err != nil {
 			return nil, err
+		}
+
+		root := ew.Root.Bytes()
+		name := hex.EncodeToString(root[:])
+		if !strings.EqualFold(name, ff.Pieces[i]) {
+			return nil, fmt.Errorf("piece %d is named %s, its witness root is %s", i, ff.Pieces[i], name)
 		}
 
 		// Fiat-Shamir point — shared with the encoder via bls.Challenge so the
@@ -105,12 +196,8 @@ func CheckFileFull(ff types.FileFull, stream common.Address, fp string) ([]types
 				size = rest
 			}
 			buf := make([]byte, size)
-			n, err := fi.Read(buf)
-			if err != nil {
-				return nil, err
-			}
-			if n != int(size) {
-				return nil, fmt.Errorf("short read length")
+			if _, err := io.ReadFull(fi, buf); err != nil {
+				return nil, fmt.Errorf("read piece %d shard %d: %w", i, j, err)
 			}
 			rest -= size
 
@@ -122,10 +209,18 @@ func CheckFileFull(ff types.FileFull, stream common.Address, fp string) ([]types
 
 		res[i] = types.PieceCore{
 			Policy:   ff.Policy,
-			Name:     ff.Pieces[i],
+			Name:     name,
 			Size:     ff.PieceSizes[i],
 			Streamer: stream,
 		}
+	}
+
+	// the pieces must cover the whole file, and the receipt hash must be its own
+	if n, _ := io.Copy(io.Discard, fi); n != 0 {
+		return nil, fmt.Errorf("%d bytes of %s are not in any piece", n, fp)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, ff.Hash) {
+		return nil, fmt.Errorf("receipt hash %s, file hashes to %s", ff.Hash, got)
 	}
 	return res, nil
 }
