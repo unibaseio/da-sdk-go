@@ -2,9 +2,11 @@ package hub
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"crypto/sha256"
-
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
+
+	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
 // Set CHAIN_TYPE so the indirect import of sdk (which init()s on it) doesn't
@@ -63,55 +65,50 @@ func buildHeader(t *testing.T, skHex string, label string, ts int64) string {
 	return string(b)
 }
 
-func newTestRouter() *gin.Engine {
-	r := gin.New()
-	g := r.Group("/api")
-	g.Use(MaxBodySize())
-	g.Use(AuthMiddleware())
-
-	// fake info endpoint (bypassed)
-	g.GET("/info", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"ok": true})
-	})
-
-	// fake upload that exercises RequireOwnerMatch
-	g.POST("/upload", func(c *gin.Context) {
-		var body struct {
-			Owner   string `json:"owner"`
-			ID      string `json:"id"`
-			Message string `json:"message"`
-		}
-		if err := c.ShouldBindJSON(&body); err != nil {
-			c.JSON(599, gin.H{"err": err.Error()})
-			return
-		}
-		if !RequireOwnerMatch(c, body.Owner) {
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"ok": true, "owner": body.Owner})
-	})
-
-	// fake download that exercises ResolveOwnerForList
-	g.POST("/download", func(c *gin.Context) {
-		owner, ok := ResolveOwnerForList(c, c.PostForm("owner"))
-		if !ok {
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"ok": true, "owner": owner})
-	})
-	return r
-}
+// The tests below run against the real /v1 router (registV1 on an in-memory
+// sqlite Server, see newV1TestServer): the middleware order, body caps and
+// owner checks are the ones the hub binary serves.
 
 const testSK = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
 const testAddr = "0x6370eF2f4Db3611D657b90667De398a2Cc2a370C"
+const otherAddr = "0x1111111111111111111111111111111111111111"
+
+// signedWrite is a signed /v1 write that needs no LogFS or chain: create the
+// bucket name.
+func signedWrite(hdr, bucket string) *http.Request {
+	req := httptest.NewRequest("PUT", "/v1/buckets/"+bucket, strings.NewReader(`{"kind":"memory"}`))
+	req.Header.Set("Content-Type", "application/json")
+	if hdr != "" {
+		req.Header.Set("Authorization", hdr)
+	}
+	return req
+}
+
+// sealReq is a signed POST /v1/seal carrying only the owner field: seal checks
+// owner==signer before anything else, so the owner check is all that runs.
+func sealReq(t *testing.T, hdr, owner string) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("owner", owner); err != nil {
+		t.Fatal(err)
+	}
+	mw.Close()
+	req := httptest.NewRequest("POST", "/v1/seal", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", hdr)
+	return req
+}
+
+func serve(s *Server, req *http.Request) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	s.Router.ServeHTTP(w, req)
+	return w
+}
 
 func TestAuthMiddleware_RejectsNoHeader(t *testing.T) {
-	r := newTestRouter()
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/upload",
-		strings.NewReader(`{"owner":"`+testAddr+`","id":"x","message":"y"}`))
-	req.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(w, req)
+	s := newV1TestServer(t)
+	w := serve(s, signedWrite("", "b"))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -121,33 +118,21 @@ func TestAuthMiddleware_RejectsNoHeader(t *testing.T) {
 }
 
 func TestAuthMiddleware_AcceptsValidSignature(t *testing.T) {
-	r := newTestRouter()
-	hdr := buildHeader(t, testSK, "upload", time.Now().Unix())
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/upload",
-		strings.NewReader(`{"owner":"`+testAddr+`","id":"x","message":"y"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", hdr)
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	s := newV1TestServer(t)
+	w := serve(s, signedWrite(buildHeader(t, testSK, "hub", time.Now().Unix()), "b"))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d body=%s", w.Code, w.Body.String())
+	}
+	// the bucket belongs to the signer (lowercase canonical form)
+	if !strings.Contains(w.Body.String(), `"owner":"`+strings.ToLower(testAddr)+`"`) {
+		t.Errorf("want signer as owner, got %s", w.Body.String())
 	}
 }
 
 func TestAuthMiddleware_RejectsStaleTimestamp(t *testing.T) {
-	r := newTestRouter()
+	s := newV1TestServer(t)
 	// 1 hour ago — outside the default 10 min window
-	hdr := buildHeader(t, testSK, "upload", time.Now().Add(-1*time.Hour).Unix())
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/upload",
-		strings.NewReader(`{"owner":"`+testAddr+`","id":"x","message":"y"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", hdr)
-	r.ServeHTTP(w, req)
-
+	w := serve(s, signedWrite(buildHeader(t, testSK, "hub", time.Now().Add(-time.Hour).Unix()), "b"))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -157,16 +142,8 @@ func TestAuthMiddleware_RejectsStaleTimestamp(t *testing.T) {
 }
 
 func TestOwnerMatch_RejectsNonHexOwner(t *testing.T) {
-	r := newTestRouter()
-	hdr := buildHeader(t, testSK, "upload", time.Now().Unix())
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/upload",
-		strings.NewReader(`{"owner":"noah-2026","id":"x","message":"y"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", hdr)
-	r.ServeHTTP(w, req)
-
+	s := newV1TestServer(t)
+	w := serve(s, sealReq(t, buildHeader(t, testSK, "hub", time.Now().Unix()), "noah-2026"))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -176,16 +153,8 @@ func TestOwnerMatch_RejectsNonHexOwner(t *testing.T) {
 }
 
 func TestOwnerMatch_RejectsOtherAddress(t *testing.T) {
-	r := newTestRouter()
-	hdr := buildHeader(t, testSK, "upload", time.Now().Unix())
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/upload",
-		strings.NewReader(`{"owner":"0x0000000000000000000000000000000000000001","id":"x","message":"y"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", hdr)
-	r.ServeHTTP(w, req)
-
+	s := newV1TestServer(t)
+	w := serve(s, sealReq(t, buildHeader(t, testSK, "hub", time.Now().Unix()), otherAddr))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -194,157 +163,150 @@ func TestOwnerMatch_RejectsOtherAddress(t *testing.T) {
 	}
 }
 
-func TestResolveOwnerForList_DefaultsToSigner(t *testing.T) {
-	r := newTestRouter()
-	hdr := buildHeader(t, testSK, "download", time.Now().Unix())
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/download",
-		strings.NewReader("")) // no owner field
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Authorization", hdr)
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(strings.ToLower(w.Body.String()), strings.ToLower(testAddr)) {
-		t.Errorf("expected signer addr in response, got %s", w.Body.String())
-	}
-}
-
-// newPublicTestRouter mirrors the public, read-only /api group in server.go:
-// body-size cap only, NO AuthMiddleware (and no rate limiting).
-func newPublicTestRouter() *gin.Engine {
-	r := gin.New()
-	g := r.Group("/api")
-	g.Use(MaxBodySize())
-
-	// fake list endpoint that exercises ResolveOwnerForList on the public path
-	g.GET("/listBucket", func(c *gin.Context) {
-		owner, ok := ResolveOwnerForList(c, c.Query("owner"))
-		if !ok {
-			return
+// The signer's own address passes the owner check whatever its case, and the
+// request reaches seal's own validation.
+func TestOwnerMatch_AcceptsSigner(t *testing.T) {
+	s := newV1TestServer(t)
+	for _, owner := range []string{testAddr, strings.ToLower(testAddr)} {
+		w := serve(s, sealReq(t, buildHeader(t, testSK, "hub", time.Now().Unix()), owner))
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "rsn/rsk") {
+			t.Fatalf("owner %s: want 400 from seal validation, got %d body=%s", owner, w.Code, w.Body.String())
 		}
-		c.JSON(http.StatusOK, gin.H{"ok": true, "owner": owner})
-	})
-	return r
-}
-
-const otherAddr = "0x1111111111111111111111111111111111111111"
-
-func TestPublicList_NoAuthAcceptsExplicitOwner(t *testing.T) {
-	r := newPublicTestRouter()
-	w := httptest.NewRecorder()
-	// No Authorization header, explicit owner (someone else's) — must succeed.
-	req := httptest.NewRequest("GET", "/api/listBucket?owner="+otherAddr, nil)
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200 on public list, got %d body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(strings.ToLower(w.Body.String()), strings.ToLower(otherAddr)) {
-		t.Errorf("expected owner addr in response, got %s", w.Body.String())
 	}
 }
 
-func TestPublicList_CanonicalizesOwnerToLowercase(t *testing.T) {
-	// Ethereum addresses are case-insensitive (EIP-55 case is just a UI
-	// checksum). The hub canonicalizes owner to lowercase so a wallet can't
-	// split into mixed-case vs lowercase namespaces; reads then match the
-	// stored rows via LOWER(owner) and the legacy-checksum fallback.
-	r := newPublicTestRouter()
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/listBucket?owner="+testAddr, nil) // testAddr is EIP-55 mixed case
-	r.ServeHTTP(w, req)
+// Enumeration without an owner is scoped to the signer, and naming another
+// owner is refused.
+func TestListDefaultsToSigner(t *testing.T) {
+	s := newV1TestServer(t)
+	s.gdb.Create(&types.Bucket{Name: "mine", Owner: strings.ToLower(testAddr), Kind: "memory"})
+	s.gdb.Create(&types.Bucket{Name: "theirs", Owner: strings.ToLower(otherAddr), Kind: "memory"})
+	hdr := buildHeader(t, testSK, "hub", time.Now().Unix())
 
+	req := httptest.NewRequest("GET", "/v1/buckets", nil)
+	req.Header.Set("Authorization", hdr)
+	w := serve(s, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"owner":"`+strings.ToLower(testAddr)+`"`) {
-		t.Errorf("owner not canonicalized to lowercase; want %s, got %s", strings.ToLower(testAddr), w.Body.String())
+	if !strings.Contains(w.Body.String(), `"mine"`) || strings.Contains(w.Body.String(), `"theirs"`) {
+		t.Fatalf("listing not scoped to the signer: %s", w.Body.String())
 	}
-}
 
-func TestPublicList_NoAuthNoOwnerListsAll(t *testing.T) {
-	r := newPublicTestRouter()
-	w := httptest.NewRecorder()
-	// No auth and no owner: owner is optional on public reads — this is the
-	// explorer's global browse view, which lists every owner's entries.
-	// Resolves to "" (no filter → list all), so the handler runs and 200s.
-	req := httptest.NewRequest("GET", "/api/listBucket", nil)
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200 (list-all) when owner omitted on public list, got %d body=%s", w.Code, w.Body.String())
-	}
-	// resolved owner is empty in the response — the unscoped query marker.
-	if !strings.Contains(w.Body.String(), `"owner":""`) {
-		t.Errorf("expected empty resolved owner (list-all) in response, got %s", w.Body.String())
-	}
-}
-
-func TestPublicList_NoAuthRejectsBadOwner(t *testing.T) {
-	r := newPublicTestRouter()
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/listBucket?owner=not-an-address", nil)
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("want 400 on malformed owner, got %d body=%s", w.Code, w.Body.String())
-	}
-}
-
-func TestInfoBypass(t *testing.T) {
-	r := newTestRouter()
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/info", nil)
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200 on /api/info (bypass), got %d body=%s", w.Code, w.Body.String())
-	}
-}
-
-func TestMaxBodySize_RejectsHugePayload(t *testing.T) {
-	t.Setenv("HUB_MAX_JSON_BYTES", "1024") // 1 KiB cap for this test
-	r := newTestRouter()
-	hdr := buildHeader(t, testSK, "upload", time.Now().Unix())
-
-	big := bytes.Repeat([]byte("a"), 8192)
-	body := `{"owner":"` + testAddr + `","id":"x","message":"` + string(big) + `"}`
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/upload", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req = httptest.NewRequest("GET", "/v1/buckets?owner="+otherAddr, nil)
 	req.Header.Set("Authorization", hdr)
-	r.ServeHTTP(w, req)
+	if w := serve(s, req); w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "does not match signer") {
+		t.Fatalf("listing another owner: want 401, got %d body=%s", w.Code, w.Body.String())
+	}
+}
 
-	// gin's ShouldBindJSON over a truncated body returns a 599 from our handler;
-	// the important thing is it doesn't succeed as 200.
-	if w.Code == http.StatusOK {
-		t.Fatalf("expected non-200 (body too large), got 200 body=%s", w.Body.String())
+// Public point reads (ResolveOwnerForList without a signer): owner is
+// optional, any valid owner may be named, case doesn't matter, junk is a 400.
+func newPublicReadServer(t *testing.T) *Server {
+	s := newV1TestServer(t)
+	s.gdb.Create(&types.Bucket{Name: "pub", Owner: strings.ToLower(testAddr), Kind: "memory"})
+	s.gdb.Create(&types.Needle{Owner: strings.ToLower(testAddr), Bucket: "pub", Name: "k", File: 1, Size: 3})
+	return s
+}
+
+func getStatus(s *Server, path string) (int, string) {
+	w := serve(s, httptest.NewRequest("GET", path, nil))
+	return w.Code, w.Body.String()
+}
+
+func TestPublicRead_NoAuthAcceptsExplicitOwner(t *testing.T) {
+	s := newPublicReadServer(t)
+	if code, body := getStatus(s, "/v1/buckets/pub/objects/k?owner="+strings.ToLower(testAddr)); code != http.StatusOK {
+		t.Fatalf("want 200 on public read, got %d body=%s", code, body)
+	}
+	// another owner is a valid scope too: not found, but not refused
+	if code, body := getStatus(s, "/v1/buckets/pub/objects/k?owner="+otherAddr); code != http.StatusNotFound {
+		t.Fatalf("want 404 for another owner's scope, got %d body=%s", code, body)
+	}
+}
+
+func TestPublicRead_CanonicalizesOwner(t *testing.T) {
+	// Ethereum addresses are case-insensitive (EIP-55 case is just a UI
+	// checksum): the EIP-55 form finds rows stored under the lowercase form.
+	s := newPublicReadServer(t)
+	if code, body := getStatus(s, "/v1/buckets/pub/objects/k?owner="+testAddr); code != http.StatusOK {
+		t.Fatalf("want 200 for the EIP-55 owner form, got %d body=%s", code, body)
+	}
+}
+
+func TestPublicRead_NoAuthNoOwner(t *testing.T) {
+	s := newPublicReadServer(t)
+	if code, body := getStatus(s, "/v1/buckets/pub/objects/k"); code != http.StatusOK {
+		t.Fatalf("want 200 (unscoped) when owner is omitted, got %d body=%s", code, body)
+	}
+}
+
+func TestPublicRead_NoAuthRejectsBadOwner(t *testing.T) {
+	s := newPublicReadServer(t)
+	if code, body := getStatus(s, "/v1/buckets/pub/objects/k?owner=not-an-address"); code != http.StatusBadRequest {
+		t.Fatalf("want 400 on malformed owner, got %d body=%s", code, body)
+	}
+}
+
+func TestInfoIsPublic(t *testing.T) {
+	s := newV1TestServer(t)
+	if code, body := getStatus(s, "/v1/info"); code != http.StatusOK {
+		t.Fatalf("want 200 on /v1/info without auth, got %d body=%s", code, body)
+	}
+}
+
+func TestWriteBodyCap(t *testing.T) {
+	t.Setenv("HUB_MAX_MULTIPART_BYTES", "1024") // read when the write group is mounted
+	s := newV1TestServer(t)
+	hdr := buildHeader(t, testSK, "hub", time.Now().Unix())
+	if w := serve(s, signedWrite(hdr, "b")); w.Code != http.StatusCreated {
+		t.Fatalf("create bucket: got %d body=%s", w.Code, w.Body.String())
+	}
+
+	req := httptest.NewRequest("PUT", "/v1/buckets/b/objects/k", bytes.NewReader(bytes.Repeat([]byte("a"), 8192)))
+	req.Header.Set("Authorization", hdr)
+	w := serve(s, req)
+	if w.Code >= 200 && w.Code < 300 {
+		t.Fatalf("expected the oversized body to be refused, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "too large") {
+		t.Errorf("want 'too large', got %s", w.Body.String())
 	}
 }
 
 func TestRateLimit_PerIPKicks(t *testing.T) {
 	t.Setenv("HUB_RATE_IP_RPS", "1")
 	t.Setenv("HUB_RATE_IP_BURST", "3")
-	r := gin.New()
-	g := r.Group("/api")
-	g.Use(RateLimit())
-	g.GET("/listBucket", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	s := newV1TestServer(t)
 
 	hits429 := 0
 	for i := 0; i < 10; i++ {
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/api/listBucket", nil)
+		req := httptest.NewRequest("GET", "/v1/info", nil)
 		req.RemoteAddr = "203.0.113.7:1234" // same IP each time → shared bucket
-		r.ServeHTTP(w, req)
-		if w.Code == http.StatusTooManyRequests {
+		if serve(s, req).Code == http.StatusTooManyRequests {
 			hits429++
 		}
 	}
 	if hits429 == 0 {
 		t.Fatalf("expected at least one 429 from a single IP doing 10 rapid requests (burst=3)")
+	}
+}
+
+// The per-owner tier keys on the recovered signer, so one wallet can't escape
+// it by spreading writes over many IPs.
+func TestRateLimit_PerOwnerKicks(t *testing.T) {
+	t.Setenv("HUB_RATE_OWNER_RPS", "0.001")
+	t.Setenv("HUB_RATE_OWNER_BURST", "1")
+	s := newV1TestServer(t)
+	hdr := buildHeader(t, testSK, "hub", time.Now().Unix())
+
+	codes := map[int]int{}
+	for i := 0; i < 3; i++ {
+		req := signedWrite(hdr, fmt.Sprintf("b%d", i))
+		req.RemoteAddr = fmt.Sprintf("203.0.113.%d:1", 10+i)
+		codes[serve(s, req).Code]++
+	}
+	if codes[http.StatusCreated] != 1 || codes[http.StatusTooManyRequests] != 2 {
+		t.Fatalf("want 1x201 then 429s, got %v", codes)
 	}
 }
