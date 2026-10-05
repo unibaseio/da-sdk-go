@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -212,7 +215,18 @@ func DownloadReplicaFromStream(baseUrl string, auth types.Auth, name string, add
 	return nil, fmt.Errorf("no avail stream")
 }
 
+// DownloadPieceAndSave rebuilds piece com from store nodes and keeps it in ks.
+// ⚠️ A bare piece has nothing a light client can check its bytes against (the
+// commitment needs the full SRS), so this caches what the stores returned.
+// Callers that can check the data (a file hash, a volume digest) should use
+// DownloadPieceAndSaveVerified; file downloads use CheckFileParallelOf.
 func DownloadPieceAndSave(baseUrl string, auth types.Auth, com string, ks types.IPieceStore) error {
+	return DownloadPieceAndSaveVerified(baseUrl, auth, com, ks, nil)
+}
+
+// DownloadPieceAndSaveVerified is DownloadPieceAndSave that runs verify (when
+// non-nil) on the rebuilt piece and caches it only if verify accepts it.
+func DownloadPieceAndSaveVerified(baseUrl string, auth types.Auth, com string, ks types.IPieceStore, verify func(types.PieceCore, []byte) error) error {
 	if ks != nil {
 		_, err := ks.GetPiece(context.TODO(), com, nil, types.Options{})
 		if err == nil {
@@ -224,53 +238,137 @@ func DownloadPieceAndSave(baseUrl string, auth types.Auth, com string, ks types.
 	if err != nil {
 		return err
 	}
+	if verify != nil {
+		if err := verify(pc, resByte); err != nil {
+			return fmt.Errorf("piece %s: %w", com, err)
+		}
+	}
 
 	if ks != nil {
-		ks.PutPiece(context.TODO(), pc, resByte, true)
+		return ks.PutPiece(context.TODO(), pc, resByte, true)
+	}
+	return nil
+}
+
+// ErrFileHashMismatch is wrapped by the errors a download returns when the
+// rebuilt file does not hash to its receipt's sha256.
+var ErrFileHashMismatch = errors.New("downloaded data does not match the file hash")
+
+// checkReceiptHash rejects a file receipt whose Hash cannot be checked: a
+// blank hash would otherwise let any data through.
+func checkReceiptHash(fr types.FileReceipt) error {
+	if hb, err := hex.DecodeString(fr.Hash); err != nil || len(hb) != sha256.Size {
+		return fmt.Errorf("file %s: receipt hash %q is not a sha256; the download cannot be verified", fr.Name, fr.Hash)
 	}
 	return nil
 }
 
 func CheckFile(baseUrl string, auth types.Auth, name string, ks types.IPieceStore) error {
-	fr, err := GetFileReceipt(baseUrl, auth, name)
-	if err != nil {
-		return err
-	}
-
-	for _, com := range fr.Pieces {
-		err = DownloadPieceAndSave(baseUrl, auth, com, ks)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return CheckFileParallelOf(baseUrl, auth, name, types.EmptyAddr, 1, ks)
 }
 
 func CheckFileParallel(baseUrl string, auth types.Auth, name string, parallel int, ks types.IPieceStore) error {
+	return CheckFileParallelOf(baseUrl, auth, name, types.EmptyAddr, parallel, ks)
+}
+
+// CheckFileParallelOf fetches owner's file (EmptyAddr: any owner's file of
+// that name) piece by piece, parallel at a time, into temporary files, checks
+// the whole file against the receipt's sha256, and only then puts the fetched
+// pieces into ks. Nothing that fails the check is cached.
+func CheckFileParallelOf(baseUrl string, auth types.Auth, name string, owner common.Address, parallel int, ks types.IPieceStore) error {
 	logger.Debug("download piece in parallel: ", parallel)
-	fr, err := GetFileReceipt(baseUrl, auth, name)
+	if parallel < 1 {
+		parallel = 1
+	}
+	fr, err := GetFileReceiptOf(baseUrl, name, owner)
 	if err != nil {
 		return err
 	}
+	if err := checkReceiptHash(fr); err != nil {
+		return err
+	}
+
+	dir, err := os.MkdirTemp("", "da-check-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+
+	type slot struct {
+		cached bool
+		pc     types.PieceCore
+		path   string
+		err    error
+	}
+	slots := make([]slot, len(fr.Pieces))
 
 	var wg sync.WaitGroup
 	sm := semaphore.NewWeighted(int64(parallel))
 	for i, com := range fr.Pieces {
-		err := sm.Acquire(context.TODO(), 1)
-		if err != nil {
+		if ks != nil {
+			if _, err := ks.GetPiece(context.TODO(), com, nil, types.Options{}); err == nil {
+				slots[i].cached = true
+				continue
+			}
+		}
+		if err := sm.Acquire(context.TODO(), 1); err != nil {
 			return err
 		}
 		wg.Add(1)
-		go func(ni int, com string, ks types.IPieceStore) {
+		go func(i int, com string) {
 			defer sm.Release(1)
 			defer wg.Done()
-
-			DownloadPieceAndSave(baseUrl, auth, com, ks)
-		}(i, com, ks)
+			pc, data, err := DownloadPiece(baseUrl, auth, com)
+			if err == nil {
+				p := filepath.Join(dir, strconv.Itoa(i))
+				err = os.WriteFile(p, data, 0o600)
+				slots[i].path = p
+			}
+			slots[i].pc, slots[i].err = pc, err
+		}(i, com)
 	}
 	wg.Wait()
 
+	h := sha256.New()
+	for i, s := range slots {
+		if s.err != nil {
+			return fmt.Errorf("piece %s: %w", fr.Pieces[i], s.err)
+		}
+		if s.cached {
+			if _, err := ks.GetPiece(context.TODO(), fr.Pieces[i], h, types.Options{}); err != nil {
+				return err
+			}
+			continue
+		}
+		f, err := os.Open(s.path)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(h, f)
+		f.Close()
+		if err != nil {
+			return err
+		}
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, fr.Hash) {
+		return fmt.Errorf("file %s: data hashes to %s, receipt says %s: %w", name, got, fr.Hash, ErrFileHashMismatch)
+	}
+
+	if ks == nil {
+		return nil
+	}
+	for _, s := range slots {
+		if s.cached {
+			continue
+		}
+		data, err := os.ReadFile(s.path)
+		if err != nil {
+			return err
+		}
+		if err := ks.PutPiece(context.TODO(), s.pc, data, true); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -306,6 +404,9 @@ func DownloadOf(baseUrl string, auth types.Auth, name string, owner common.Addre
 	if err != nil {
 		return err
 	}
+	if err := checkReceiptHash(fr); err != nil {
+		return err
+	}
 
 	h := sha256.New()
 	out := io.MultiWriter(w, h)
@@ -335,24 +436,37 @@ func DownloadOf(baseUrl string, auth types.Auth, name string, owner common.Addre
 		out.Write(resByte)
 	}
 
-	if got := hex.EncodeToString(h.Sum(nil)); fr.Hash != "" && !strings.EqualFold(got, fr.Hash) {
-		return fmt.Errorf("file %s: downloaded data hashes to %s, receipt says %s", name, got, fr.Hash)
+	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, fr.Hash) {
+		return fmt.Errorf("file %s: downloaded data hashes to %s, receipt says %s: %w", name, got, fr.Hash, ErrFileHashMismatch)
 	}
 	for _, f := range toCache {
-		ks.PutPiece(context.TODO(), f.pc, f.data, true)
+		if err := ks.PutPiece(context.TODO(), f.pc, f.data, true); err != nil {
+			logger.Warnf("cache piece %s: %v", f.pc.Name, err)
+		}
 	}
 	return nil
 }
 
 func DownloadParallel(baseUrl string, auth types.Auth, name string, parallel int, ks types.IPieceStore, w io.Writer) error {
+	return DownloadParallelOf(baseUrl, auth, name, types.EmptyAddr, parallel, ks, w)
+}
+
+// DownloadParallelOf is DownloadOf that, with a cache, first fetches the
+// pieces parallel at a time and caches them once the whole file checks out.
+// A failed prefetch falls back to the serial download, except on a hash
+// mismatch, which is returned.
+func DownloadParallelOf(baseUrl string, auth types.Auth, name string, owner common.Address, parallel int, ks types.IPieceStore, w io.Writer) error {
 	if ks != nil {
-		err := CheckFileParallel(baseUrl, auth, name, parallel, ks)
-		if err != nil {
+		err := CheckFileParallelOf(baseUrl, auth, name, owner, parallel, ks)
+		if errors.Is(err, ErrFileHashMismatch) {
 			return err
+		}
+		if err != nil {
+			logger.Warnf("parallel fetch of %s: %v; downloading serially", name, err)
 		}
 	}
 
-	return Download(baseUrl, auth, name, ks, w)
+	return DownloadOf(baseUrl, auth, name, owner, ks, w)
 }
 
 // todo: handle size > piece size
