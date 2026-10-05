@@ -36,7 +36,10 @@ import (
 )
 
 var logger = log.Logger("sdk")
-var ChainType = build.BNBTestnetDAO
+// ChainType is the chain used when CHAIN_TYPE is unset. CheckENV exports it, and
+// CLI flags reading CHAIN_TYPE see it before their own default, so it must be
+// the live chain: DA anchors on Base (BSC testnets are retired).
+var ChainType = build.BaseSepolia
 var chaintype = ""
 
 func init() {
