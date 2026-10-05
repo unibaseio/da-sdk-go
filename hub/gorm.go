@@ -3,7 +3,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -186,7 +185,8 @@ END $$;`, t, t))
 		go s.periodicCheckpoint()
 	}
 
-	// One-time backfill rewrites rows → writer only (and only when requested).
+	// One-time backfill (writer only, and only when requested): a conversation
+	// row for each "<id>_0" needle written since 2025-03-07.
 	ni := os.Getenv("NEED_INIT")
 	if ni != "" && !s.readonly {
 		logger.Info("handle need init")
@@ -203,42 +203,14 @@ END $$;`, t, t))
 				continue
 			}
 
+			// SQL "_" is a wildcard: the query also returns names ending in a
+			// bare "0", which are left alone
 			if strings.HasSuffix(needle.Name, "_0") {
-				name := strings.TrimSuffix(needle.Name, "_0")
 				db.Save(&types.Conversation{
-					Name:   name,
+					Name:   strings.TrimSuffix(needle.Name, "_0"),
 					Owner:  needle.Owner,
 					Bucket: needle.Bucket,
 				})
-				continue
-			}
-			if needle.Name != "" {
-				continue
-			}
-			if needle.Bucket != "" {
-				continue
-			}
-			fmt.Println("update bucket: ", needle.Name)
-			var w bytes.Buffer
-			s.logFSRead(needle.Owner, needle.Name, &w)
-			if w.Len() > 0 {
-				// decode w to json
-				var meta map[string]interface{}
-				err := json.Unmarshal(w.Bytes(), &meta)
-				if err != nil {
-					continue
-				}
-				bucketName, ok := meta["name"].(string)
-				if ok {
-					s.addBucket(needle.Owner, bucketName, "memory")
-					// update needle
-					db.Model(&needle).Update("bucket", bucketName)
-				} else {
-					bucketName := needle.Owner
-					s.addBucket(needle.Owner, bucketName, "memory")
-					// update needle
-					db.Model(&needle).Update("bucket", bucketName)
-				}
 			}
 		}
 	}
@@ -342,16 +314,6 @@ func (s *Server) getAccount(owner string) ([]types.Account, error) {
 	return accounts, nil
 }
 
-func (s *Server) listAccount(offset, limit int) ([]types.Account, error) {
-	var accounts []types.Account
-	result := s.gdb.Order("id desc").Limit(limit).Offset(offset).Find(&accounts)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-
-	return accounts, nil
-}
-
 // computeMemStats runs the heavy aggregation ONCE: a single GROUP BY over
 // needles yields the full per-owner list, from which the overview totals are
 // derived (no separate COUNT/SUM scans). This is a full-table scan and must
@@ -389,166 +351,6 @@ func (s *Server) computeMemStats() (types.MemoryOverview, []types.MemoryStat, er
 	ov.MemoryBytes = totalBytes
 	ov.MemoryGB = float64(totalBytes) / 1e9
 	return ov, owners, nil
-}
-
-func (s *Server) getBucket(owner, bucket string) ([]types.BucketDisplay, error) {
-	var buckets []types.Bucket
-	q := s.gdb
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
-	}
-	if bucket != "" {
-		q = q.Where("name = ?", bucket)
-	}
-	result := q.Find(&buckets)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	res := make([]types.BucketDisplay, 0, len(buckets))
-	for _, bucket := range buckets {
-		s.bucketDisplayLock.RLock()
-		bd, ok := s.bucketDisplay[bucket.Name]
-		if ok && bucket.UpdatedAt.Equal(bd.Last) {
-			res = append(res, bd)
-			s.bucketDisplayLock.RUnlock()
-			continue
-		}
-		s.bucketDisplayLock.RUnlock()
-		if !ok {
-			bd = types.BucketDisplay{
-				Bucket: bucket,
-				Last:   bucket.UpdatedAt,
-			}
-		}
-		// read data
-		needles, err := s.getNeedleByName(bucket.Name)
-		if err == nil && len(needles) > 0 {
-			if ok && needles[0].UpdatedAt.Equal(bd.Last) {
-				res = append(res, bd)
-				continue
-			}
-			bd.Last = needles[0].UpdatedAt
-
-			var w bytes.Buffer
-			s.logFSRead(needles[0].Owner, needles[0].Name, &w)
-			if w.Len() > 0 {
-				// decode w to json
-				var mjson map[string]interface{}
-				err := json.Unmarshal(w.Bytes(), &mjson)
-				if err != nil {
-					continue
-				}
-				description, ok := mjson["content"].(string)
-				if ok {
-					bd.Description = description
-				}
-
-				meta, ok := mjson["metadata"].(map[string]interface{})
-				if ok {
-					transport, ok := meta["transport"].(string)
-					if ok {
-						bd.Transport = transport
-					}
-					typ, ok := meta["type"].(string)
-					if ok {
-						bd.Type = typ
-					}
-					state, ok := meta["state"].(string)
-					if ok {
-						bd.State = state
-					}
-				}
-			}
-		}
-		s.bucketDisplayLock.Lock()
-		s.bucketDisplay[bucket.Name] = bd
-		s.bucketDisplayLock.Unlock()
-		res = append(res, bd)
-	}
-	return res, nil
-}
-
-func (s *Server) listBucket(owner, kind string, offset, limit int) ([]types.BucketDisplay, error) {
-	var buckets []types.Bucket
-	q := s.gdb
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
-	}
-	// kind filter: "memory" also matches legacy empty-kind rows; others exact.
-	if kind == "memory" {
-		q = q.Where("kind = ? OR kind = '' OR kind IS NULL", kind)
-	} else if kind != "" {
-		q = q.Where("kind = ?", kind)
-	}
-	result := q.Order("id desc").Limit(limit).Offset(offset).Find(&buckets)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-
-	res := make([]types.BucketDisplay, 0, len(buckets))
-	for _, bucket := range buckets {
-		s.bucketDisplayLock.RLock()
-		bd, ok := s.bucketDisplay[bucket.Name]
-		if ok && bucket.CreatedAt.Equal(bd.Last) {
-			res = append(res, bd)
-			s.bucketDisplayLock.RUnlock()
-			continue
-		}
-		s.bucketDisplayLock.RUnlock()
-		if !ok {
-			bd = types.BucketDisplay{
-				Bucket: bucket,
-				Last:   bucket.CreatedAt,
-			}
-		}
-		// read data
-		needles, err := s.getNeedleByName(bucket.Name)
-		if err == nil && len(needles) > 0 {
-			if ok && needles[0].UpdatedAt.Equal(bd.Last) {
-				res = append(res, bd)
-				continue
-			}
-			bd.Last = needles[0].UpdatedAt
-
-			var w bytes.Buffer
-			s.logFSRead(needles[0].Owner, needles[0].Name, &w)
-			if w.Len() > 0 {
-				// decode w to json
-				var mjson map[string]interface{}
-				err := json.Unmarshal(w.Bytes(), &mjson)
-				if err != nil {
-					continue
-				}
-				description, ok := mjson["content"].(string)
-				if ok {
-					bd.Description = description
-				}
-
-				meta, ok := mjson["metadata"].(map[string]interface{})
-				if ok {
-					transport, ok := meta["transport"].(string)
-					if ok {
-						bd.Transport = transport
-					}
-					typ, ok := meta["type"].(string)
-					if ok {
-						bd.Type = typ
-					}
-
-					state, ok := meta["state"].(string)
-					if ok {
-						bd.State = state
-					}
-				}
-			}
-		}
-		s.bucketDisplayLock.Lock()
-		s.bucketDisplay[bucket.Name] = bd
-		s.bucketDisplayLock.Unlock()
-		res = append(res, bd)
-	}
-
-	return res, nil
 }
 
 func (s *Server) addNeedle(owner, bucket, name string, findex uint64, start, length uint64) error {
@@ -593,15 +395,6 @@ func (s *Server) addNeedle(owner, bucket, name string, findex uint64, start, len
 	}
 	logger.Info("create needle: ", owner)
 	return nil
-}
-
-func (s *Server) getNeedleByName(name string) ([]types.Needle, error) {
-	var needle []types.Needle
-	result := s.gdb.Where(&types.Needle{Name: name}).Order("id desc").Limit(1).Find(&needle)
-	if result.Error != nil {
-		return needle, result.Error
-	}
-	return needle, nil
 }
 
 func (s *Server) getNeedleDisplay(owner, bucket, name string) ([]types.NeedleDisplay, error) {
@@ -685,44 +478,6 @@ func onChain(vols []types.Volume, chain string) []types.Volume {
 	return out
 }
 
-func (s *Server) listNeedleDisplay(owner, bucket string, offset, limit int) ([]types.NeedleDisplay, error) {
-	logger.Debug("list needle: ", owner, bucket, offset, limit)
-	var needle []types.Needle
-	q := s.gdb
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
-	}
-	if bucket != "" {
-		q = q.Where("bucket = ?", bucket)
-	}
-	result := q.Order("id desc").Limit(limit).Offset(offset).Find(&needle)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-
-	vmap := s.volumesFor(needle) // one query instead of getVolume per needle (N+1)
-	res := make([]types.NeedleDisplay, 0, len(needle))
-	for i := 0; i < len(needle); i++ {
-		nd := types.NeedleDisplay{
-			CreatedAt: needle[i].CreatedAt,
-			Name:      needle[i].Name,
-			Owner:     needle[i].Owner,
-			Bucket:    needle[i].Bucket,
-			File:      needle[i].File,
-			Start:     needle[i].Start,
-			Size:      needle[i].Size,
-		}
-		if v, ok := vmap[volKey(needle[i].Owner, needle[i].File)]; ok {
-			nd.Piece = v.Piece
-			nd.TxHash = v.TxHash
-			nd.ChainType = v.ChainType
-		}
-		res = append(res, nd)
-	}
-
-	return res, nil
-}
-
 func (s *Server) addVolume(owner string, findex uint64, piece, txn string) {
 	s.gdb.Create(&types.Volume{
 		ChainType: s.rp.Repo().Config().Chain.Type,
@@ -732,22 +487,6 @@ func (s *Server) addVolume(owner string, findex uint64, piece, txn string) {
 		TxHash:    txn,
 	})
 	logger.Info("create volume: ", piece)
-}
-
-func (s *Server) getVolume(owner string, fid uint64) ([]types.Volume, error) {
-	var vol []types.Volume
-	q := s.gdb
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
-	}
-	if fid != 0 {
-		q = q.Where("file = ?", fid)
-	}
-	result := q.Find(&vol)
-	if result.Error != nil {
-		return vol, result.Error
-	}
-	return vol, nil
 }
 
 // volKey keys the per-(owner,file) volume map; owner lowercased to match how
@@ -790,20 +529,6 @@ func (s *Server) volumesFor(needles []types.Needle) map[string]types.Volume {
 	return m
 }
 
-func (s *Server) listVolume(owner string, offset, limit int) ([]types.Volume, error) {
-	var vols []types.Volume
-	q := s.gdb
-	if owner != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(owner))
-	}
-	result := q.Order("id desc").Limit(limit).Offset(offset).Find(&vols)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-
-	return vols, nil
-}
-
 func (s *Server) listConversationDisplay(addr, bucket string, offset, limit int) ([]types.Conversation, error) {
 	var conversations []types.Conversation
 	q := s.gdb
@@ -818,86 +543,6 @@ func (s *Server) listConversationDisplay(addr, bucket string, offset, limit int)
 		return nil, result.Error
 	}
 	return conversations, nil
-}
-
-func (s *Server) getConversationDisplay(addr, bucket, name string) ([]types.Conversation, error) {
-	var conversations []types.Conversation
-	q := s.gdb
-	if addr != "" {
-		q = q.Where("LOWER(owner) = ?", strings.ToLower(addr))
-	}
-	if bucket != "" {
-		q = q.Where("bucket = ?", bucket)
-	}
-	if name != "" {
-		q = q.Where("name = ?", name)
-	}
-	result := q.Find(&conversations)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	return conversations, nil
-}
-
-func (s *Server) listNeedleDisplayByConversation(addr, bucket, conversation string, offset, limit int) ([]types.NeedleDisplay, error) {
-	var needles []types.Needle
-	var result *gorm.DB
-
-	// 首先获取conversation_0的id
-	var firstNeedle types.Needle
-	firstQuery := s.gdb.Model(&types.Needle{}).Where("name = ?", conversation+"_0")
-	if addr != "" {
-		firstQuery = firstQuery.Where("LOWER(owner) = ?", strings.ToLower(addr))
-	}
-	if bucket != "" {
-		firstQuery = firstQuery.Where("bucket = ?", bucket)
-	}
-
-	firstResult := firstQuery.First(&firstNeedle)
-
-	query := s.gdb.Model(&types.Needle{})
-	if addr != "" {
-		query = query.Where("LOWER(owner) = ?", strings.ToLower(addr))
-	}
-	if bucket != "" {
-		query = query.Where("bucket = ?", bucket)
-	}
-
-	// 如果找到了conversation_0记录，使用id进行优化查询
-	if firstResult.Error == nil {
-		query = query.Where("name like ? AND id >= ?",
-			conversation+"_%", firstNeedle.ID)
-	} else {
-		// 如果没有找到，使用原来的查询方式
-		query = query.Where("name like ? and created_at >= ?",
-			conversation+"_%",
-			time.Date(2025, 3, 7, 0, 0, 0, 0, time.UTC))
-	}
-
-	result = query.Order("id desc").Limit(limit).Offset(offset).Find(&needles)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	vmap := s.volumesFor(needles) // batch instead of getVolume per needle (N+1)
-	res := make([]types.NeedleDisplay, 0, len(needles))
-	for i := 0; i < len(needles); i++ {
-		nd := types.NeedleDisplay{
-			CreatedAt: needles[i].CreatedAt,
-			Name:      needles[i].Name,
-			Owner:     needles[i].Owner,
-			Bucket:    needles[i].Bucket,
-			File:      needles[i].File,
-			Start:     needles[i].Start,
-			Size:      needles[i].Size,
-		}
-		if v, ok := vmap[volKey(needles[i].Owner, needles[i].File)]; ok {
-			nd.Piece = v.Piece
-			nd.TxHash = v.TxHash
-			nd.ChainType = v.ChainType
-		}
-		res = append(res, nd)
-	}
-	return res, nil
 }
 
 func (s *Server) listConversation(addr, bucket string, offset, limit int) ([]string, error) {

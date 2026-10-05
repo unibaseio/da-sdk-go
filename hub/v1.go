@@ -4,9 +4,8 @@ package hub
 // S3 SHAPE (bucket/object/key) but web3/DA-native semantics: kind on the bucket,
 // verifiable receipt (commitment + chain + status), async staged→committed.
 //
-// This is a THIN FAÇADE over the same Server (gdb + logfs) that /api/* uses —
-// old /api/* is untouched; an object written via either surface is visible from
-// the other (one storage engine, two API façades).
+// A thin façade over the Server's index (gdb) and per-owner LogFS; it is the
+// hub's only HTTP surface.
 
 import (
 	"bytes"
@@ -128,8 +127,7 @@ func maxBodyV1() gin.HandlerFunc {
 	}
 }
 
-// registV1 mounts the /v1 surface. Public reads (no auth) + authed writes,
-// mirroring the /api group split; same Server/gdb/logfs underneath.
+// registV1 mounts the /v1 surface: public reads (no auth) + authed writes.
 func (s *Server) registV1() {
 	pub := s.Router.Group("/v1")
 	// public reads carry no signer at middleware time: per-IP tier only
@@ -194,7 +192,7 @@ func (s *Server) v1Info(c *gin.Context) {
 // owner (ResolveOwnerForList) — same authz as objects.
 
 // GET /v1/conversations?owner=&bucket=&offset=&limit= — list an owner's conversation
-// ids (the raw prefixes, same as the legacy /api/conversation without id).
+// ids (the raw prefixes).
 func (s *Server) v1ListConversations(c *gin.Context) {
 	owner, ok := RequireOwnerForList(c, c.Query("owner"))
 	if !ok {
@@ -213,7 +211,7 @@ func (s *Server) v1ListConversations(c *gin.Context) {
 }
 
 // GET /v1/conversations/{id}?owner=&bucket= — the raw records under {id} in write
-// order (same as legacy /api/conversation with id; each record = a stored payload).
+// order (each record = a stored payload).
 func (s *Server) v1GetConversation(c *gin.Context) {
 	owner, ok := ResolveOwnerForList(c, c.Query("owner"))
 	if !ok {
@@ -681,8 +679,8 @@ func (s *Server) v1GetObjectContent(c *gin.Context) {
 
 // GET /v1/pieces/{name}/content — download a committed DA piece by its
 // content-id (da_cid). Unlike object content (logfs by key), this resolves the
-// piece off the DA network (GetPieceReceipt → DownloadPiece) via the shared
-// download() helper — the cold-tier read path (seal'd segments) needs this.
+// piece off the DA network (GetPieceReceipt → DownloadPiece) via
+// downloadPiece — the cold-tier read path (seal'd segments) needs this.
 //
 // The name is a DA commitment, so it is resolved on DA only: never against
 // hub objects or file records, which anyone can create under that name.

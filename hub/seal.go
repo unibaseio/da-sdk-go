@@ -25,7 +25,7 @@ import (
 )
 
 // defaultSealChainTimeoutSec bounds the synchronous on-chain registration in the
-// /api/seal register=hub path. On expiry the blob is already erasure-staged; the
+// /v1/seal register=hub path. On expiry the blob is already erasure-staged; the
 // client retries seal (idempotent) to confirm the on-chain serial.
 const defaultSealChainTimeoutSec int64 = 90
 
@@ -41,11 +41,7 @@ const (
 // cached (governance can change them, rarely).
 const storeDurationTTL = 10 * time.Minute
 
-func (s *Server) addSeal(g *gin.RouterGroup) {
-	g.Group("/").POST("/seal", s.seal)
-}
-
-// chainManager lazily builds (and caches) the chain client used by /api/seal to
+// chainManager lazily builds (and caches) the chain client used by /v1/seal to
 // sign AddPiece with the hub's own key (v1, hub-paid registration).
 func (s *Server) chainManager() (*contract.ContractManage, error) {
 	s.cmMu.Lock()

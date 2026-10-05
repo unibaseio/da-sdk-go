@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -61,30 +60,21 @@ func buildSiweHeader(t *testing.T, skHex string, issuedAt time.Time) string {
 	return string(b)
 }
 
-func siweUploadReq(hdr string) *http.Request {
-	req := httptest.NewRequest("POST", "/api/upload",
-		strings.NewReader(`{"owner":"`+testAddr+`","id":"x","message":"y"}`))
-	req.Header.Set("Content-Type", "application/json")
-	if hdr != "" {
-		req.Header.Set("Authorization", hdr)
-	}
-	return req
-}
+// siweWriteReq is a signed /v1 write (create a bucket) on the real router.
+func siweWriteReq(hdr string) *http.Request { return signedWrite(hdr, "siwe") }
 
 func TestAuthMiddleware_AcceptsSIWE(t *testing.T) {
-	r := newTestRouter()
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, siweUploadReq(buildSiweHeader(t, testSK, time.Now().UTC())))
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d body=%s", w.Code, w.Body.String())
+	s := newV1TestServer(t)
+	w := serve(s, siweWriteReq(buildSiweHeader(t, testSK, time.Now().UTC())))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d body=%s", w.Code, w.Body.String())
 	}
 }
 
 func TestAuthMiddleware_SIWE_RejectsStale(t *testing.T) {
-	r := newTestRouter()
+	s := newV1TestServer(t)
 	// default drift is 600s; 1h old is well outside the window.
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, siweUploadReq(buildSiweHeader(t, testSK, time.Now().UTC().Add(-time.Hour))))
+	w := serve(s, siweWriteReq(buildSiweHeader(t, testSK, time.Now().UTC().Add(-time.Hour))))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -94,7 +84,7 @@ func TestAuthMiddleware_SIWE_RejectsStale(t *testing.T) {
 }
 
 func TestAuthMiddleware_SIWE_RejectsTamperedMessage(t *testing.T) {
-	r := newTestRouter()
+	s := newV1TestServer(t)
 	hdr := buildSiweHeader(t, testSK, time.Now().UTC())
 
 	// Tamper the signed text after signing: signature no longer recovers Addr.
@@ -105,8 +95,7 @@ func TestAuthMiddleware_SIWE_RejectsTamperedMessage(t *testing.T) {
 	env["Msg"] = env["Msg"].(string) + " (tampered)"
 	tb, _ := json.Marshal(env)
 
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, siweUploadReq(string(tb)))
+	w := serve(s, siweWriteReq(string(tb)))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401 on tampered message, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -116,7 +105,7 @@ func TestAuthMiddleware_SIWE_RejectsTamperedMessage(t *testing.T) {
 // the format the CURRENTLY DEPLOYED extension sends: personal_sign over
 // label||be64(ts), with NO Msg field. Must keep verifying via the legacy path.
 func TestAuthMiddleware_AcceptsLegacyPersonalSign(t *testing.T) {
-	r := newTestRouter()
+	s := newV1TestServer(t)
 	sk, err := crypto.HexToECDSA(testSK)
 	if err != nil {
 		t.Fatal(err)
@@ -144,10 +133,9 @@ func TestAuthMiddleware_AcceptsLegacyPersonalSign(t *testing.T) {
 	}
 	jb, _ := json.Marshal(payload)
 
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, siweUploadReq(string(jb)))
-	if w.Code != http.StatusOK {
-		t.Fatalf("legacy personal_sign want 200, got %d body=%s", w.Code, w.Body.String())
+	w := serve(s, siweWriteReq(string(jb)))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("legacy personal_sign want 201, got %d body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -155,7 +143,7 @@ func TestAuthMiddleware_AcceptsLegacyPersonalSign(t *testing.T) {
 // swapped to a victim: VerifySIWE recovers the real signer from Msg and it must
 // equal Addr, so claiming a different Addr fails.
 func TestAuthMiddleware_SIWE_RejectsAddrSwap(t *testing.T) {
-	r := newTestRouter()
+	s := newV1TestServer(t)
 	hdr := buildSiweHeader(t, testSK, time.Now().UTC())
 
 	var env map[string]any
@@ -163,8 +151,7 @@ func TestAuthMiddleware_SIWE_RejectsAddrSwap(t *testing.T) {
 	env["Addr"] = "0x000000000000000000000000000000000000dEaD"
 	tb, _ := json.Marshal(env)
 
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, siweUploadReq(string(tb)))
+	w := serve(s, siweWriteReq(string(tb)))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401 on Addr swap, got %d body=%s", w.Code, w.Body.String())
 	}

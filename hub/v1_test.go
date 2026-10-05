@@ -22,6 +22,13 @@ import (
 // by the on-chain smoke, not here.
 func newV1TestServer(t *testing.T) *Server {
 	t.Helper()
+	return newV1TestServerMode(t, false)
+}
+
+// newV1TestServerMode is newV1TestServer for a writer (readonly=false) or a
+// reader replica (readonly=true, HUB_READONLY).
+func newV1TestServerMode(t *testing.T, readonly bool) *Server {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	dsn := "file:" + t.Name() + "?mode=memory&cache=shared"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
@@ -34,10 +41,10 @@ func newV1TestServer(t *testing.T) *Server {
 		t.Fatalf("migrate: %v", err)
 	}
 	s := &Server{
-		Router:        gin.New(),
-		gdb:           db,
-		memStat:       &memStatCache{},
-		bucketDisplay: make(map[string]types.BucketDisplay),
+		Router:   gin.New(),
+		gdb:      db,
+		memStat:  &memStatCache{},
+		readonly: readonly,
 	}
 	s.registV1()
 	return s

@@ -1,40 +1,23 @@
 package hub
 
 import (
+	"encoding/json"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/unibaseio/da-sdk-go/lib/types"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
-// newKindTestServer stands up an in-memory sqlite with the bucket/needle/account
-// schema so addBucket/listBucket kind logic can be exercised without chain/logfs.
-func newKindTestServer(t *testing.T) *Server {
-	t.Helper()
-	dsn := "file:" + t.Name() + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	sqlDB, _ := db.DB()
-	sqlDB.SetMaxOpenConns(1)
-	if err := db.AutoMigrate(&types.Bucket{}, &types.Needle{}, &types.Account{}); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return &Server{
-		gdb:           db,
-		memStat:       &memStatCache{},
-		bucketDisplay: make(map[string]types.BucketDisplay),
-	}
-}
-
 // TestBucketKind covers the A-tier object-store kind model: addBucket records the
-// scenario kind, listBucket filters by it, and the "memory" filter also matches
-// legacy empty-kind rows (so pre-migration buckets keep showing under memory).
+// scenario kind, GET /v1/buckets?kind= filters by it, and the "memory" filter
+// also matches legacy empty-kind rows (so pre-migration buckets keep showing
+// under memory).
 func TestBucketKind(t *testing.T) {
-	s := newKindTestServer(t)
-	const owner = "0xabc0000000000000000000000000000000000001"
+	s := newV1TestServer(t)
+	signer, pk := testKey(t)
+	owner := strings.ToLower(signer)
+	auth := authHeader(signer, pk)
 
 	if err := s.addBucket(owner, "mem-a", "memory"); err != nil {
 		t.Fatalf("addBucket memory: %v", err)
@@ -55,11 +38,17 @@ func TestBucketKind(t *testing.T) {
 	}
 
 	count := func(kind string) int {
-		res, err := s.listBucket(owner, kind, 0, 100)
-		if err != nil {
-			t.Fatalf("listBucket %q: %v", kind, err)
+		w := do(t, s, "GET", "/v1/buckets?kind="+kind, auth, "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("list kind=%q: got %d body %s", kind, w.Code, w.Body.String())
 		}
-		return len(res)
+		var res struct {
+			Buckets []types.Bucket `json:"buckets"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return len(res.Buckets)
 	}
 
 	// memory filter: mem-a + mem-default + legacy(empty) = 3
@@ -81,7 +70,7 @@ func TestBucketKind(t *testing.T) {
 // TestBucketKindBackfill: uploading model content to a bucket that exists with an
 // empty kind backfills its kind (idempotent; memory never gets overwritten).
 func TestBucketKindBackfill(t *testing.T) {
-	s := newKindTestServer(t)
+	s := newV1TestServer(t)
 	const owner = "0xabc0000000000000000000000000000000000002"
 
 	// legacy empty-kind bucket

@@ -101,7 +101,7 @@ func TestReadCacheL2Promote(t *testing.T) {
 	f := newFakeL2()
 	c.l2 = f
 	// seed only L2 (as if another replica cached it)
-	f.set(missKey("o", "x"), bytes.Repeat([]byte{9}, 50))
+	f.set(cacheKey("o", "x"), bytes.Repeat([]byte{9}, 50))
 
 	v, ok := c.get("o", "x")
 	if !ok || len(v) != 50 {
@@ -130,11 +130,11 @@ func TestReadCacheL2WriteThroughAndDel(t *testing.T) {
 	c.l2 = f
 
 	c.put("o", "k", bytes.Repeat([]byte{1}, 64))
-	if _, ok := f.get(missKey("o", "k")); !ok {
+	if _, ok := f.get(cacheKey("o", "k")); !ok {
 		t.Fatal("put must write through to L2")
 	}
 	c.del("o", "k")
-	if _, ok := f.get(missKey("o", "k")); ok {
+	if _, ok := f.get(cacheKey("o", "k")); ok {
 		t.Fatal("del must clear L2")
 	}
 	if _, ok := c.get("o", "k"); ok {
