@@ -158,6 +158,7 @@ func (s *Server) loadGORM() {
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_accounts_name ON accounts(name);")
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_conversations_name ON conversations(name);")
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_buckets_lower_owner_id ON buckets(LOWER(owner), id);")
+		ensureBucketNameUnique(db)
 		db.Exec("CREATE INDEX IF NOT EXISTS idx_conversations_lower_owner_id ON conversations(LOWER(owner), id);")
 
 		// Ensure a PRIMARY KEY on id for every table (Postgres). A gorm/AutoMigrate-
@@ -259,7 +260,33 @@ func (s *Server) addAccount(owner string) {
 	logger.Info("create account: ", owner)
 }
 
-// TODO: bucket is global unique
+// ensureBucketNameUnique adds a unique index on live bucket names when the
+// table allows it. Bucket names are global and first-come-first-served, but
+// nothing enforced that in the DB, so a concurrent create (or another shard) could
+// insert a second owner's row under a taken name. Existing deployments may
+// already hold such duplicates, and a failing CREATE UNIQUE INDEX must not stop
+// the hub (AutoMigrate with a uniqueIndex tag would), so the index is created
+// only when no duplicate exists and any failure is just logged; addBucket and
+// v1LookupBucket enforce ownership in code either way (oldest row wins).
+// Partial on deleted_at IS NULL so a deleted bucket's name can be reused.
+func ensureBucketNameUnique(db *gorm.DB) {
+	var dup []string
+	if err := db.Raw("SELECT name FROM buckets WHERE deleted_at IS NULL GROUP BY name HAVING COUNT(*) > 1 LIMIT 5").
+		Scan(&dup).Error; err != nil {
+		logger.Warnf("bucket name uniqueness check failed: %v", err)
+		return
+	}
+	if len(dup) > 0 {
+		logger.Warnf("buckets table has duplicate live names (e.g. %v); not adding the unique index — ownership is enforced in code (oldest row wins). Resolve the duplicates to enable it.", dup)
+		return
+	}
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_buckets_name_live_unique ON buckets(name) WHERE deleted_at IS NULL;").Error; err != nil {
+		logger.Warnf("unique bucket name index not created: %v", err)
+	}
+}
+
+// addBucket creates bucket for owner, or checks that an existing bucket of that
+// name is owner's. Bucket names are global (first come, first served).
 // kind = object-store scenario ("memory"/"model"/"dataset"); empty defaults to memory.
 func (s *Server) addBucket(owner, bucket, kind string) error {
 	if kind == "" {
@@ -282,11 +309,22 @@ func (s *Server) addBucket(owner, bucket, kind string) error {
 		return nil
 	}
 
-	s.gdb.Create(&types.Bucket{
+	if err := s.gdb.Create(&types.Bucket{
 		Name:  bucket,
 		Owner: owner,
 		Kind:  kind,
-	})
+	}).Error; err != nil {
+		// lost a race for the name (unique index) or a DB error: whoever holds
+		// the oldest row owns it
+		var cur types.Bucket
+		if r := s.gdb.Clauses(dbresolver.Write).Order("id asc").First(&cur, "name = ?", bucket); r.RowsAffected > 0 {
+			if strings.EqualFold(cur.Owner, owner) {
+				return nil
+			}
+			return fmt.Errorf("bucket: %s is owned by %s", bucket, cur.Owner)
+		}
+		return err
+	}
 	logger.Info("create bucket: ", bucket)
 	return nil
 }

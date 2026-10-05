@@ -731,8 +731,16 @@ func (s *Server) v1DeleteBucket(c *gin.Context) {
 		c.JSON(http.StatusForbidden, lerror.ToAPIError("hub", fmt.Errorf("bucket %s owned by another account", bucket)))
 		return
 	}
-	s.gdb.Where("name = ?", bucket).Delete(&types.Bucket{})
-	s.gdb.Where("bucket = ?", bucket).Delete(&types.Needle{})
+	// scoped to the owner, not the bare name: legacy data can hold another
+	// owner's bucket or objects under the same name
+	if err := s.gdb.Where("name = ? AND LOWER(owner) = ?", bucket, strings.ToLower(owner)).Delete(&types.Bucket{}).Error; err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	if err := s.gdb.Where("bucket = ? AND LOWER(owner) = ?", bucket, strings.ToLower(owner)).Delete(&types.Needle{}).Error; err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"bucket": bucket, "deleted": true,
 		"note": "removed from index; on-chain DA data is immutable and persists"})
 }
