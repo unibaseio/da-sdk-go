@@ -59,6 +59,9 @@ const (
 	readCacheMaxItemByte int64 = 4 << 20 // don't cache objects larger than 4MiB
 )
 
+// cacheKey is the read-cache key of (owner, name), in L1 and the shared L2.
+func cacheKey(owner, name string) string { return owner + "/" + name }
+
 func newReadCache() *readCache {
 	mb := env.Int64("HUB_READCACHE_MB", defaultReadCacheMB)
 	if mb <= 0 {
@@ -86,7 +89,7 @@ func (c *readCache) get(owner, name string) ([]byte, bool) {
 	if c == nil {
 		return nil, false
 	}
-	k := missKey(owner, name)
+	k := cacheKey(owner, name)
 
 	c.mu.Lock()
 	if el, ok := c.m[k]; ok {
@@ -115,7 +118,7 @@ func (c *readCache) put(owner, name string, val []byte) {
 	if c == nil || int64(len(val)) > c.maxItem {
 		return
 	}
-	k := missKey(owner, name)
+	k := cacheKey(owner, name)
 	if c.l2 != nil {
 		c.l2.set(k, val) // outside the L1 lock (network)
 	}
@@ -154,7 +157,7 @@ func (c *readCache) del(owner, name string) {
 	if c == nil {
 		return
 	}
-	k := missKey(owner, name)
+	k := cacheKey(owner, name)
 	if c.l2 != nil {
 		c.l2.del(k) // outside the L1 lock (network)
 	}

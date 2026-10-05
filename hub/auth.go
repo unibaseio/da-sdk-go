@@ -23,17 +23,15 @@ const (
 	// signature freshness window, both sides
 	defaultAuthDriftSec int64 = 600 // 10 min
 
-	// body size caps
-	defaultMaxJSONBytes      int64 = 4 << 20  // 4 MB for /upload (JSON message)
-	defaultMaxMultipartBytes int64 = 64 << 20 // 64 MB for /uploadData (file)
+	// body size cap of the /v1 write group (object bodies, multipart batches, seal)
+	defaultMaxMultipartBytes int64 = 64 << 20 // 64 MB
 
 	// rate limit defaults. Deliberately generous: (1) legitimate explorer
 	// traffic all arrives from the explorer's reverse-proxy IP (one IP, many
 	// users); (2) there is no batch/stream read API, so a client syncing N
-	// records issues N separate small GET /download calls — a few thousand
-	// objects must not trip the limiter. The negative cache (not this limiter)
-	// is the primary absorber of non-existent-key floods, so a high cap here is
-	// safe; the real ceiling is single-instance read throughput.
+	// records issues N separate small object reads — a few thousand objects
+	// must not trip the limiter. The real ceiling is single-instance read
+	// throughput.
 	//
 	// burst = 2x rps so a one-shot batch of up to `burst` requests clears
 	// immediately, then sustains at `rps`. Tune per deployment via
@@ -47,48 +45,14 @@ const (
 // env helpers now live in lib/env (Int64/Float/Int); HUB_* keys stay local
 // string literals since they're hub-specific.
 
-// authBypassPaths are exempted from AuthMiddleware. Keep this list tiny.
-var authBypassPaths = map[string]bool{
-	"/api/info": true,
-}
-
-// ----------------------------------------------------------------------------
-// Body size limit middleware
-// ----------------------------------------------------------------------------
-
-// MaxBodySize wraps r.Body with http.MaxBytesReader using a per-route cap.
-// Multipart file-upload routes (/uploadData, /seal) get the larger cap;
-// everything else gets the JSON cap.
-func MaxBodySize() gin.HandlerFunc {
-	jsonCap := env.Int64("HUB_MAX_JSON_BYTES", defaultMaxJSONBytes)
-	multipartCap := env.Int64("HUB_MAX_MULTIPART_BYTES", defaultMaxMultipartBytes)
-
-	return func(c *gin.Context) {
-		var capBytes int64 = jsonCap
-		switch c.Request.URL.Path {
-		case "/api/uploadData", "/api/seal":
-			// both stream a (potentially large) file part — must not be
-			// truncated by the small JSON cap.
-			capBytes = multipartCap
-		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, capBytes)
-		c.Next()
-	}
-}
-
 // ----------------------------------------------------------------------------
 // Auth middleware
 // ----------------------------------------------------------------------------
 
-// AuthMiddleware parses Authorization header, verifies signature, enforces
-// freshness, and stores the recovered ETH address (lowercased) in the gin
-// context under ctxAuthAddrKey.
-//
-// Any /api/* request that isn't in authBypassPaths must carry a valid signature.
 // recoverSigner verifies an Authorization header and returns the recovered
 // lowercased signer address, or an error. Shared by AuthMiddleware (write group)
-// and the read-side enumeration guards (RequireOwnerForList / RequireAuthenticated)
-// so identical signature + freshness rules apply everywhere.
+// and the read-side enumeration guard (RequireOwnerForList) so identical
+// signature + freshness rules apply everywhere.
 func recoverSigner(authStr string, drift int64) (string, error) {
 	au, err := sdk.DecodeAuth(authStr)
 	if err != nil {
@@ -114,15 +78,13 @@ func siweDomains() []string {
 	return strings.Split(v, ",")
 }
 
+// AuthMiddleware parses the Authorization header, verifies the signature,
+// enforces freshness, and stores the recovered ETH address (lowercased) in the
+// gin context under ctxAuthAddrKey. Every request through it must be signed.
 func AuthMiddleware() gin.HandlerFunc {
 	drift := env.Int64("HUB_AUTH_DRIFT_SEC", defaultAuthDriftSec)
 
 	return func(c *gin.Context) {
-		if authBypassPaths[c.Request.URL.Path] {
-			c.Next()
-			return
-		}
-
 		authStr := c.GetHeader("Authorization")
 		if authStr == "" {
 			abortWithAuthError(c, fmt.Errorf("missing Authorization header"))
@@ -208,22 +170,6 @@ func readerScope(c *gin.Context, owner string) (string, bool) {
 	return CanonOwner(owner), true
 }
 
-// RequireAuthenticated guards global (not owner-scoped) enumeration such as the
-// account registry: any valid signed request passes, anonymous is rejected — so
-// the full owner list can't be dumped anonymously.
-func RequireAuthenticated(c *gin.Context) bool {
-	authStr := c.GetHeader("Authorization")
-	if authStr == "" {
-		abortWithAuthError(c, fmt.Errorf("this listing requires a signed request"))
-		return false
-	}
-	if _, err := recoverSigner(authStr, env.Int64("HUB_AUTH_DRIFT_SEC", defaultAuthDriftSec)); err != nil {
-		abortWithAuthError(c, err)
-		return false
-	}
-	return true
-}
-
 func abortWithAuthError(c *gin.Context, err error) {
 	logger.Warnf("auth reject from %s %s %s: %v", c.ClientIP(), c.Request.Method, c.Request.URL.Path, err)
 	c.AbortWithStatusJSON(http.StatusUnauthorized, lerror.ToAPIError("hub", err))
@@ -248,24 +194,8 @@ func CanonOwner(owner string) string {
 	return strings.ToLower(owner)
 }
 
-// ownerCandidates returns the owner forms to try when reading, newest-scheme
-// first: the canonical lowercase form (how we store going forward), then the
-// EIP-55 checksum form (how legacy data was stored). Deduped.
-func ownerCandidates(owner string) []string {
-	lc := strings.ToLower(owner)
-	out := []string{lc}
-	if common.IsHexAddress(owner) {
-		if cs := common.HexToAddress(owner).Hex(); cs != lc {
-			out = append(out, cs)
-		}
-	} else if owner != lc {
-		out = append(out, owner)
-	}
-	return out
-}
-
 // CtxAuthAddr returns the lowercased 0x... address stored by AuthMiddleware,
-// or "" if auth wasn't applied (e.g. on bypass routes).
+// or "" if auth wasn't applied (the public read group).
 func CtxAuthAddr(c *gin.Context) string {
 	if v, ok := c.Get(ctxAuthAddrKey); ok {
 		if s, ok2 := v.(string); ok2 {
@@ -306,8 +236,8 @@ func RequireOwnerMatch(c *gin.Context, owner string) bool {
 	return true
 }
 
-// ResolveOwnerForList is the read-side variant used by list/get endpoints.
-// These run on the public (unauthenticated) /api group, so the common case
+// ResolveOwnerForList is the read-side variant used by point-read endpoints.
+// These run on the public (unauthenticated) /v1 group, so the common case
 // has no signer. Behavior:
 //   - no signer (public read): owner is OPTIONAL. Empty means "no filter —
 //     list everything", which the explorer's global /agents and /memory
@@ -322,8 +252,8 @@ func RequireOwnerMatch(c *gin.Context, owner string) bool {
 //
 // The owner is returned in canonical lowercase form (CanonOwner). Ethereum
 // addresses are case-insensitive, so callers must match it case-insensitively
-// (the gorm queries use LOWER(owner)=?, and logFSRead also tries the EIP-55
-// checksum form for legacy data). This keeps a single wallet from splitting
+// (the gorm queries use LOWER(owner)=?; content is then read under the owner
+// form the matched row stores). This keeps a single wallet from splitting
 // into mixed-case vs lowercase namespaces regardless of what case the client
 // sent.
 //

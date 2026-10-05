@@ -231,15 +231,3 @@ func OwnerRateLimit() gin.HandlerFunc {
 		}
 	}
 }
-
-// RateLimit applies both tiers in one middleware (per-IP, then per-owner when a
-// signer is already in context). Kept for callers that mount a single limiter;
-// the /v1 write group splits them around AuthMiddleware instead.
-func RateLimit() gin.HandlerFunc {
-	ipReg, ownerReg := newIPRegistry(), newOwnerRegistry()
-	return func(c *gin.Context) {
-		if ipAllowed(c, ipReg) && ownerAllowed(c, ownerReg) {
-			c.Next()
-		}
-	}
-}

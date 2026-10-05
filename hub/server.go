@@ -11,7 +11,6 @@ import (
 	"time"
 
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
-	"github.com/unibaseio/da-sdk-go/docs"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
@@ -23,11 +22,8 @@ import (
 	"github.com/unibaseio/da-sdk-go/sdk"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/gin-contrib/static"
 	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
-	swaggerFiles "github.com/swaggo/files"
-	ginSwagger "github.com/swaggo/gin-swagger"
 	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
@@ -81,12 +77,6 @@ type Server struct {
 
 	statManager *StatManager
 
-	bucketDisplayLock sync.RWMutex
-	bucketDisplay     map[string]types.BucketDisplay
-
-	// negative cache of download keys confirmed missing (download-flood guard)
-	missCache *missCache
-
 	// read-through byte LRU of small hot objects (nil when HUB_READCACHE_MB=0)
 	readCache *readCache
 
@@ -120,7 +110,7 @@ type Server struct {
 	// P4-Route: owner-sharded sticky write routing (nil = single-node, default).
 	shard *shardRouter
 
-	// lazily-built chain client for the /api/seal path (hub-signed AddPiece)
+	// lazily-built chain client for the /v1/seal path (hub-signed AddPiece)
 	cmMu sync.Mutex
 	cm   *contract.ContractManage
 
@@ -186,9 +176,6 @@ func NewServer(rp repo.Repo) (*Server, error) {
 		ps:    piece.New(rp.MetaStore(), rp.DataStore()),
 		auth:  auth,
 
-		bucketDisplay: make(map[string]types.BucketDisplay),
-
-		missCache: newMissCache(),
 		readCache: newReadCache(),
 		memStat:   &memStatCache{},
 		totals:    newTotalCache(),
@@ -267,7 +254,7 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	s.loadGORM()
 
 	// StatManager's background loop writes StatRecord; on a reader replica we
-	// create it (so /api/stat doesn't nil-panic) but don't start the writer.
+	// create it (so /v1/stats doesn't nil-panic) but don't start the writer.
 	sm := NewStatManager(s.gdb)
 	if !s.readonly {
 		err = sm.Start(context.Background())
@@ -285,8 +272,8 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	// memory-stats recompute is a full-index scan over the needles table. Run it
 	// on the WRITER only: if every replica ran it independently against the shared
 	// DB, the heavy scan would be multiplied N times. Stats are low-QPS
-	// (dashboard), so the ALB routes /api/memoryStat + /api/memoryOverview to the
-	// writer (like uploads); a replica that gets one serves an empty snapshot.
+	// (dashboard), so the ALB routes /v1/overview to the writer (like uploads);
+	// a replica that gets one serves an empty snapshot.
 	if !s.readonly {
 		s.startMemStats(context.Background())
 	}
@@ -305,19 +292,9 @@ func NewServer(rp repo.Repo) (*Server, error) {
 }
 
 func (s *Server) registRoute() {
-	swaghost := s.rp.Config().API.Expose
-	if swaghost != "" {
-		swaghost = strings.TrimPrefix(swaghost, "http://")
-		docs.SwaggerInfo.Host = swaghost
-	}
-
 	s.Router.Use(Cors())
 
 	s.Router.Use(ginzap.Ginzap(log.Logger("gin").Desugar(), time.RFC3339, true))
-
-	s.Router.Use(static.Serve("/", static.LocalFile("assets", true)))
-
-	s.Router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	// Single clean, resource-oriented /v1 surface (no legacy /api) — same as the
 	// gateway + nodes. Public reads + signed writes; content is client-encrypted,
@@ -507,17 +484,4 @@ func (s *Server) register() error {
 		return err
 	}
 	return nil
-}
-
-func (s *Server) addInfo(g *gin.RouterGroup) {
-	g.Group("/").GET("/info", func(c *gin.Context) {
-		res := types.EdgeReceipt{
-			EdgeMeta: types.EdgeMeta{
-				Type: s.typ,
-				Name: s.local,
-			},
-		}
-
-		c.JSON(http.StatusOK, res)
-	})
 }

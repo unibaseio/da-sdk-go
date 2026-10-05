@@ -41,11 +41,10 @@ func newV1TestServerMode(t *testing.T, readonly bool) *Server {
 		t.Fatalf("migrate: %v", err)
 	}
 	s := &Server{
-		Router:        gin.New(),
-		gdb:           db,
-		memStat:       &memStatCache{},
-		bucketDisplay: make(map[string]types.BucketDisplay),
-		readonly:      readonly,
+		Router:   gin.New(),
+		gdb:      db,
+		memStat:  &memStatCache{},
+		readonly: readonly,
 	}
 	s.registV1()
 	return s

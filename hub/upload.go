@@ -5,11 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,179 +16,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
 	"github.com/unibaseio/da-sdk-go/lib/env"
-	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/sdk"
 )
-
-func (s *Server) addUpload(g *gin.RouterGroup) {
-	g.Group("/").POST("/uploadData", s.uploadData)
-	g.Group("/").POST("/upload", s.upload)
-	g.Group("/").POST("/uploadDir", s.uploadDir) // large-file folder (model/dataset)
-}
-
-// addUploadReadonly registers the write paths on a read-only replica so they
-// return 503 instead of writing to the replica's local logfs/badger (which
-// would fork the data). Writes must be routed to the primary by the LB.
-func (s *Server) addUploadReadonly(g *gin.RouterGroup) {
-	reject := func(c *gin.Context) {
-		c.JSON(http.StatusServiceUnavailable,
-			lerror.ToAPIError("hub", fmt.Errorf("this node is read-only; route writes to the primary")))
-	}
-	g.Group("/").POST("/uploadData", reject)
-	g.Group("/").POST("/upload", reject)
-	g.Group("/").POST("/uploadDir", reject)
-}
-
-// uploadDir ingests a folder of large files (model/dataset scenario) in ONE
-// multipart request: each file becomes its own DA-backed object under bucket.
-// kind is "model" or "dataset"; bucket = the repo name. Unlike memory's
-// small-write coalescing, each file is written with the passthrough-large
-// policy (its own volume) so it uploads to DA promptly and cleanly.
-func (s *Server) uploadDir(c *gin.Context) {
-	addr := c.PostForm("owner")
-	if !RequireOwnerMatch(c, addr) {
-		return
-	}
-	kind := c.PostForm("kind")
-	if kind != "model" && kind != "dataset" {
-		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("kind must be 'model' or 'dataset'")))
-		return
-	}
-	bucket := c.PostForm("bucket")
-	if bucket == "" {
-		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("bucket (repo name) required")))
-		return
-	}
-
-	form, err := c.MultipartForm()
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
-	files := form.File["files"]
-	if len(files) == 0 {
-		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("no files (use form field 'files')")))
-		return
-	}
-
-	metas := make([]types.MemeMeta, 0, len(files))
-	for _, fh := range files {
-		if fh.Size == 0 {
-			c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("empty file: %s", fh.Filename)))
-			return
-		}
-		fr, err := fh.Open()
-		if err != nil {
-			c.JSON(599, lerror.ToAPIError("hub", err))
-			return
-		}
-		mm, err := s.logFSWriteEx(addr, bucket, fh.Filename, kind, true, fr)
-		fr.Close()
-		if err != nil {
-			c.JSON(599, lerror.ToAPIError("hub", err))
-			return
-		}
-		metas = append(metas, mm)
-	}
-
-	c.JSON(http.StatusOK, metas)
-}
-
-func (s *Server) uploadData(c *gin.Context) {
-	addr := c.PostForm("owner")
-	if !RequireOwnerMatch(c, addr) {
-		return
-	}
-	bucket := c.PostForm("bucket")
-	if bucket == "" {
-		bucket = addr
-	}
-	file, err := c.FormFile("file")
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
-
-	if file == nil {
-		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("file is nil")))
-		return
-	}
-
-	fr, err := file.Open()
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
-
-	if file.Size == 0 {
-		c.JSON(599, lerror.ToAPIError("hub", fmt.Errorf("empty file")))
-		return
-	}
-	// kind: memory (default) or knowledgebase — small-object/coalesce path either way.
-	mm, err := s.logFSWriteEx(addr, bucket, file.Filename, memKind(c.PostForm("kind")), false, fr)
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
-
-	c.JSON(http.StatusOK, mm)
-}
-
-func (s *Server) upload(c *gin.Context) {
-	var mjson types.MemeStruct
-
-	err := c.ShouldBindJSON(&mjson)
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
-
-	if !RequireOwnerMatch(c, mjson.Owner) {
-		return
-	}
-
-	if mjson.Bucket == "" {
-		var meta map[string]interface{}
-		err = json.Unmarshal([]byte(mjson.Message), &meta)
-		if err != nil {
-			c.JSON(599, lerror.ToAPIError("hub", err))
-			return
-		}
-		bucketName, ok := meta["name"].(string)
-		if ok {
-			mjson.Bucket = bucketName
-		} else {
-			mjson.Bucket = mjson.Owner
-		}
-	}
-
-	var buf bytes.Buffer
-	buf.WriteString(mjson.Message)
-
-	mm, err := s.logFSWriteEx(mjson.Owner, mjson.Bucket, mjson.ID, memKind(mjson.Kind), false, &buf)
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
-
-	c.JSON(http.StatusOK, mm)
-}
-
-// memKind normalizes the kind for the small-object (coalesce) upload path:
-// only "memory" (default) and "knowledgebase" (RAG chunk) belong here; empty or
-// a large-file kind (model/dataset — those use /uploadDir) falls back to memory.
-func memKind(k string) string {
-	if k == "knowledgebase" {
-		return k
-	}
-	return "memory"
-}
 
 // logFSWriteEx writes one object to the owner's logfs + indexes it.
 //   - kind:  bucket scenario ("memory"/"model"/"dataset").
@@ -277,7 +109,6 @@ func (s *Server) logFSWriteData(addr string, bucket string, key string, kind str
 
 	// Drop any stale "missing" marker + cached value so this key reflects the
 	// new write immediately.
-	s.missCache.del(addr, key)
 	s.readCache.del(addr, key)
 
 	lm, err := fs.GetMeta([]byte(key))
@@ -302,40 +133,6 @@ func (s *Server) logFSWriteData(addr string, bucket string, key string, kind str
 	}
 
 	return mm, nil
-}
-
-// logFSRead reads the object bytes into w and also returns the owner it resolved
-// the object under. For an empty addr this is the needle's owner (from the shared
-// PG index) and is returned even when the local blob read fails — so a caller can
-// route a shard read-fallback by that owner without re-querying the needle.
-func (s *Server) logFSRead(addr string, key string, w io.Writer) (int64, string, error) {
-	if addr == "" {
-		ns, err := s.getNeedleByName(key)
-		if err != nil || len(ns) == 0 {
-			return 0, "", fmt.Errorf("no such needle %s", key)
-		}
-		// Found the exact owner the needle was stored under — read it directly.
-		// Return that owner even on a read error: the blob may be staged on
-		// another shard, and the caller routes the fallback by this owner.
-		n, err := s.logFSReadOne(ns[0].Owner, key, w)
-		return n, ns[0].Owner, err
-	}
-
-	// Client-supplied owner: try the canonical lowercase form first, then the
-	// EIP-55 checksum form (legacy data was stored under the mixed-case
-	// address). logFSReadOne only writes to w on success, so failed candidates
-	// leave w untouched.
-	var firstErr error
-	for _, cand := range ownerCandidates(addr) {
-		n, err := s.logFSReadOne(cand, key, w)
-		if err == nil {
-			return n, cand, nil
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
-	}
-	return 0, addr, firstErr
 }
 
 // logFSReadAt reads one object by the location its index row records
@@ -371,40 +168,6 @@ func (s *Server) logFSReadAt(owner, key string, file, start, size uint64, w io.W
 // LogFS (volume, start, size) — unique per owner, unlike the key.
 func locKey(file, start, size uint64) string {
 	return fmt.Sprintf("@%d/%d/%d", file, start, size)
-}
-
-func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, error) {
-	// read-through hot-object cache (small objects; immutable content)
-	if wbytes, ok := s.readCache.get(addr, key); ok {
-		n, err := w.Write(wbytes)
-		if err != nil {
-			return 0, err
-		}
-		return int64(n), nil
-	}
-
-	fs, err := s.getFS(addr, false)
-	if err != nil {
-		return 0, err
-	}
-
-	lm, err := fs.GetMeta([]byte(key))
-	if err != nil {
-		return 0, err
-	}
-
-	wbytes, err := fs.GetData(lm)
-	if err != nil {
-		// todo: get from remote
-		return 0, err
-	}
-	s.readCache.put(addr, key, wbytes) // caches only if it fits the per-item cap
-	n, err := w.Write(wbytes)
-	if err != nil {
-		return 0, err
-	}
-
-	return int64(n), nil
 }
 
 func (s *Server) load() error {

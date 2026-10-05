@@ -23,7 +23,7 @@ const shardFetchTimeout = 15 * time.Second
 
 // readNeedleFallback reads an index row's object when this hub's LogFS doesn't
 // have it, bound to that row's owner throughout (review 2026-10-04 M). It
-// replaces the by-name download() fallback, which on a non-home shard ran the
+// replaced the by-name download() fallback (since removed), which on a non-home shard ran the
 // owner-less piece/replica lookups and cached whatever came back under the
 // owner's key — in the shared L2 too.
 //
@@ -43,7 +43,8 @@ func (s *Server) readNeedleFallback(ctx context.Context, n types.Needle, w io.Wr
 	if !common.IsHexAddress(n.Owner) {
 		return err
 	}
-	v, ferr, _ := s.dlSF.Do("file:"+missKey(n.Owner, n.Name), func() (interface{}, error) {
+	s.dlTotal.Add(1)
+	v, ferr, shared := s.dlSF.Do("file:"+cacheKey(n.Owner, n.Name), func() (interface{}, error) {
 		if s.dlSem != nil {
 			select {
 			case s.dlSem <- struct{}{}:
@@ -58,6 +59,9 @@ func (s *Server) readNeedleFallback(ctx context.Context, n types.Needle, w io.Wr
 		}
 		return buf.Bytes(), nil
 	})
+	if shared {
+		s.dlShared.Add(1)
+	}
 	if ferr != nil {
 		return ferr
 	}
