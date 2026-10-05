@@ -198,6 +198,39 @@ func memKind(k string) string {
 //     first, then seal this object into its own volume (isolated, uploads
 //     promptly). large=false keeps the memory coalescing behavior.
 func (s *Server) logFSWriteEx(addr string, bucket string, key string, kind string, large bool, r io.Reader) (types.MemeMeta, error) {
+	size := int64(-1)
+	if sz, ok := r.(interface{ Size() int64 }); ok { // multipart file parts
+		size = sz.Size()
+	}
+	rbytes, err := readAllSized(r, size)
+	if err != nil {
+		return types.MemeMeta{}, err
+	}
+	return s.logFSWriteData(addr, bucket, key, kind, large, rbytes)
+}
+
+// readAllSized reads r to EOF into a buffer preallocated from a known size
+// (Content-Length, multipart part size; <=0 = unknown), so a large body is not
+// re-copied while the buffer grows. size is only a hint: a short or long read
+// is still read exactly. The preallocation is capped at the multipart body cap.
+func readAllSized(r io.Reader, size int64) ([]byte, error) {
+	if size <= 0 {
+		return io.ReadAll(r)
+	}
+	if lim := env.Int64("HUB_MAX_MULTIPART_BYTES", defaultMaxMultipartBytes); size > lim {
+		size = lim
+	}
+	// +MinRead: bytes.Buffer.ReadFrom wants that much free room per read, so an
+	// exact-size buffer would still regrow (copy) at the end
+	buf := bytes.NewBuffer(make([]byte, 0, size+bytes.MinRead))
+	if _, err := buf.ReadFrom(r); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// logFSWriteData is logFSWriteEx for bytes already in memory (no extra copy).
+func (s *Server) logFSWriteData(addr string, bucket string, key string, kind string, large bool, rbytes []byte) (types.MemeMeta, error) {
 	var err error
 	if addr == "" {
 		addr = s.local.String()
@@ -218,10 +251,6 @@ func (s *Server) logFSWriteEx(addr string, bucket string, key string, kind strin
 	}
 
 	fs, err := s.getFS(addr, true)
-	if err != nil {
-		return types.MemeMeta{}, err
-	}
-	rbytes, err := io.ReadAll(r)
 	if err != nil {
 		return types.MemeMeta{}, err
 	}

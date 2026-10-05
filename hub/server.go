@@ -100,6 +100,19 @@ type Server struct {
 	dlTotal  atomic.Int64
 	dlShared atomic.Int64
 
+	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads (each may hold
+	// a reconstructed piece of up to ~1 GB in memory). HUB_PIECE_DOWNLOAD_CONCURRENCY.
+	pieceSem chan struct{}
+
+	// quota is the per-signer budget for hub-paid writes (nil = off); sealSem
+	// bounds concurrent seals (HUB_SEAL_CONCURRENCY). See quota.go / seal.go.
+	quota   *writeQuota
+	sealSem chan struct{}
+
+	// cached Piece-contract store-duration bounds (minStore/maxStore) for seal
+	storeDurMu sync.Mutex
+	storeDur   storeDuration
+
 	// P3-S: shared S3/MinIO backend for sealed volumes (nil = local-only buffer,
 	// the default). Bound per-owner and passed to logfs.New via getFS/load.
 	volStore *s3vol.Store
@@ -192,6 +205,15 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	// same-key floods, this bounds distinct-key fan-out under a read storm.
 	if n := env.Int("HUB_DOWNLOAD_CONCURRENCY", 0); n > 0 {
 		s.dlSem = make(chan struct{}, n)
+	}
+	// Public piece reads rebuild up to ~1 GB each, so unlike the object path
+	// they are bounded by default.
+	if n := env.Int("HUB_PIECE_DOWNLOAD_CONCURRENCY", defaultPieceDownloadConcurrency); n > 0 {
+		s.pieceSem = make(chan struct{}, n)
+	}
+	s.quota = newWriteQuota()
+	if n := env.Int("HUB_SEAL_CONCURRENCY", defaultSealConcurrency); n > 0 {
+		s.sealSem = make(chan struct{}, n)
 	}
 
 	// P3-S: optional durable/shared sealed-volume backend (HUB_BUFFER=s3). Default

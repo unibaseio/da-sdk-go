@@ -13,8 +13,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -378,7 +378,13 @@ func (s *Server) v1PutObject(c *gin.Context) {
 		return
 	}
 
-	data, err := io.ReadAll(c.Request.Body)
+	// a declared length lets an over-quota write fail before its body is read
+	if c.Request.ContentLength > 0 && !s.chargeWrite(c, c.Request.ContentLength) {
+		return
+	}
+	// one copy of the body: read into a buffer sized from Content-Length and
+	// hand that slice to LogFS (it used to be copied twice more on the way)
+	data, err := readAllSized(c.Request.Body, c.Request.ContentLength)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
@@ -387,9 +393,12 @@ func (s *Server) v1PutObject(c *gin.Context) {
 		abortWithBadRequest(c, fmt.Errorf("empty body"))
 		return
 	}
+	if c.Request.ContentLength <= 0 && !s.chargeWrite(c, int64(len(data))) {
+		return
+	}
 
 	large := v1KindProfileLarge(b.Kind, int64(len(data)))
-	if _, err := s.logFSWriteEx(owner, bucket, key, b.Kind, large, strings.NewReader(string(data))); err != nil {
+	if _, err := s.logFSWriteData(owner, bucket, key, b.Kind, large, data); err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
 	}
@@ -434,12 +443,20 @@ func (s *Server) v1PostObjects(c *gin.Context) {
 		abortWithBadRequest(c, fmt.Errorf("no files (use form field 'files')"))
 		return
 	}
-	receipts := make([]v1Receipt, 0, len(files))
+	var total int64
 	for _, fh := range files {
 		if fh.Size == 0 {
 			abortWithBadRequest(c, fmt.Errorf("empty file: %s", fh.Filename))
 			return
 		}
+		total += fh.Size
+	}
+	// the whole batch counts against the signer's quota, all or nothing
+	if !s.chargeWrite(c, total) {
+		return
+	}
+	receipts := make([]v1Receipt, 0, len(files))
+	for _, fh := range files {
 		fr, err := fh.Open()
 		if err != nil {
 			c.JSON(599, lerror.ToAPIError("hub", err))
@@ -673,12 +690,16 @@ func (s *Server) v1GetPieceContent(c *gin.Context) {
 	if _, ok := ResolveOwnerForList(c, c.Query("owner")); !ok {
 		return
 	}
-	var w bytes.Buffer
-	if err := s.downloadPiece(c.Request.Context(), c.Param("name"), &w); err != nil {
-		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", err))
+	data, err := s.downloadPiece(c.Request.Context(), c.Param("name"))
+	if err != nil {
+		code := http.StatusNotFound
+		if errors.Is(err, errBusy) {
+			code = http.StatusServiceUnavailable
+		}
+		c.JSON(code, lerror.ToAPIError("hub", err))
 		return
 	}
-	c.Data(http.StatusOK, "application/octet-stream", w.Bytes())
+	c.Data(http.StatusOK, "application/octet-stream", data)
 }
 
 // ---- Aggregates ------------------------------------------------------------
