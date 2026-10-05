@@ -173,9 +173,14 @@ func BuildAuth(sk *ecdsa.PrivateKey, hash []byte) (types.Auth, error) {
 	return res, nil
 }
 
+// BuildAuthLocal signs with a throwaway in-memory key, for requests that need a
+// signature but no identity. (It used to create a keystore file with a fixed
+// password in /tmp/.dimo on every call.)
 func BuildAuthLocal(hash []byte) types.Auth {
-	ks := keystore.NewKeyStore("/tmp/.dimo", keystore.StandardScryptN, keystore.StandardScryptP)
-	laccount, _ := ks.NewAccount("test")
+	sk, err := crypto.GenerateKey()
+	if err != nil {
+		panic(err)
+	}
 
 	h := sha256.New()
 	ts := time.Now().Unix()
@@ -184,16 +189,13 @@ func BuildAuthLocal(hash []byte) types.Auth {
 	binary.BigEndian.PutUint64(b, uint64(ts))
 	h.Write(b)
 
-	sum := h.Sum(nil)
-
-	ks.Unlock(laccount, "test")
-	sign, err := ks.SignHash(laccount, sum[:])
+	sign, err := crypto.Sign(h.Sum(nil), sk)
 	if err != nil {
 		panic(err)
 	}
 
 	return types.Auth{
-		Addr: laccount.Address,
+		Addr: crypto.PubkeyToAddress(sk.PublicKey),
 		Time: ts,
 		Hash: hash,
 		Sign: sign,
