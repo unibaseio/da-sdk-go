@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/mitchellh/go-homedir"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
@@ -225,7 +226,7 @@ func uploadOne(cm *contract.ContractManage, sign sdk.Signer, policy types.Policy
 	if err != nil {
 		return err
 	}
-	pcs, err := sdk.CheckFileFull(ff, streamer, fp) // trustless: verify streamer encoded the real bytes
+	pcs, err := sdk.CheckFileFullPolicy(ff, streamer, fp, policy) // trustless: verify streamer encoded the real bytes
 	if err != nil {
 		return err
 	}
@@ -256,6 +257,7 @@ func daDownloadCmd() *cli.Command {
 		Usage: "download a file by name (reconstructed from DA pieces); public, no key needed",
 		Flags: commonFlags(
 			&cli.StringFlag{Name: "name", Required: true, Usage: "file name (as registered on upload)"},
+			&cli.StringFlag{Name: "owner", Usage: "uploader address; names are only unique per owner"},
 			&cli.StringFlag{Name: "out", Usage: "output file; '-' or empty writes stdout"},
 		),
 		Action: func(c *cli.Context) error {
@@ -277,10 +279,19 @@ func daDownloadCmd() *cli.Command {
 				return err
 			}
 			name := c.String("name")
+			owner := types.EmptyAddr
+			if o := c.String("owner"); o != "" {
+				if !common.IsHexAddress(o) {
+					return fmt.Errorf("--owner %q is not an address", o)
+				}
+				owner = common.HexToAddress(o)
+			} else {
+				fmt.Fprintf(os.Stderr, "WARNING: no --owner: %q resolves to whichever uploader registered that name first, not necessarily the file you mean\n", name)
+			}
 			out := c.String("out")
 			if out == "" || out == "-" {
 				// stdout: single attempt (can't retry a consumed pipe)
-				return sdk.Download(gw, au, name, nil, os.Stdout)
+				return sdk.DownloadOf(gw, au, name, owner, nil, os.Stdout)
 			}
 			// file: retry to ride out the gateway's post-AddPiece piece-index sync
 			// lag ("record not found" right after upload). Re-create (truncate)
@@ -292,7 +303,7 @@ func daDownloadCmd() *cli.Command {
 				if err != nil {
 					return err
 				}
-				lastErr = sdk.Download(gw, au, name, nil, f)
+				lastErr = sdk.DownloadOf(gw, au, name, owner, nil, f)
 				f.Close()
 				if lastErr == nil {
 					if c.Bool("json") {

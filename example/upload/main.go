@@ -92,7 +92,7 @@ func uploadOne(cm *contract.ContractManage, sign sdk.Signer, policy types.Policy
 	if err != nil {
 		return err
 	}
-	pcs, err := sdk.CheckFileFull(ff, streamer, fp) // trustless: verify the streamer encoded the real bytes
+	pcs, err := sdk.CheckFileFullPolicy(ff, streamer, fp, policy) // trustless: verify the streamer encoded the real bytes
 	if err != nil {
 		return err
 	}
