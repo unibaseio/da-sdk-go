@@ -90,8 +90,9 @@ type Server struct {
 	dlTotal  atomic.Int64
 	dlShared atomic.Int64
 
-	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads (each may hold
-	// a reconstructed piece of up to ~1 GB in memory). HUB_PIECE_DOWNLOAD_CONCURRENCY.
+	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads and rebuilds
+	// (a piece may be ~1 GB); slow clients still hold the bytes while they
+	// are written. HUB_PIECE_DOWNLOAD_CONCURRENCY.
 	pieceSem chan struct{}
 
 	// quota is the per-signer budget for hub-paid writes (nil = off); sealSem
@@ -365,7 +366,8 @@ func (s *Server) shutdown(ctx context.Context) {
 	if s.checkpointStop != nil {
 		close(s.checkpointStop)
 	}
-	// stop the drain loop before its LogFS instances are closed below
+	// signal the drain loop to stop (an in-flight drain is not waited for)
+	// before its LogFS instances are closed below
 	if s.shutdownChan != nil {
 		close(s.shutdownChan)
 	}

@@ -113,8 +113,9 @@ func newShardRouter() (*shardRouter, error) {
 }
 
 // shardTransport is the peer-to-peer transport for forwarded requests. The
-// default transport has no dial or response-header timeout, so one hung peer
-// would pin every forwarded request (and its client) indefinitely. The header
+// default transport has no response-header timeout, so one peer that accepts
+// the connection and never answers would pin every forwarded request (and its
+// client) indefinitely. The header
 // timeout must cover the slowest forwarded handler — a seal encodes, stages and
 // waits for its AddPiece (HUB_SEAL_CHAIN_TIMEOUT_SEC) before answering — so it
 // defaults to 5 min (HUB_SHARD_PROXY_HEADER_TIMEOUT_SEC). Bodies stream with no

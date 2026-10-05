@@ -7,8 +7,8 @@ import (
 )
 
 // The signal handler and the daemon both call Shutdown on SIGINT/SIGTERM. It
-// must run once (a second close of checkpointStop used to panic) and stop the
-// drain loop.
+// must run once (closing its stop channels twice would panic) and signal the
+// drain loop to stop.
 func TestShutdownRunsOnce(t *testing.T) {
 	s := &Server{
 		shutdownChan:   make(chan struct{}),

@@ -45,12 +45,21 @@ func (s *Server) logFSWriteEx(addr string, bucket string, key string, kind strin
 // (Content-Length, multipart part size; <=0 = unknown), so a large body is not
 // re-copied while the buffer grows. size is only a hint: a short or long read
 // is still read exactly. The preallocation is capped at the multipart body cap.
+// maxPrealloc bounds readAllSized's up-front allocation.
+const maxPrealloc = 1 << 20
+
 func readAllSized(r io.Reader, size int64) ([]byte, error) {
 	if size <= 0 {
 		return io.ReadAll(r)
 	}
 	if lim := env.Int64("HUB_MAX_MULTIPART_BYTES", defaultMaxMultipartBytes); size > lim {
 		size = lim
+	}
+	// The size is the client's claim: preallocate only a bounded part of it,
+	// so a declared length with no body behind it cannot reserve the whole
+	// cap per connection. Larger bodies grow as their bytes actually arrive.
+	if size > maxPrealloc {
+		size = maxPrealloc
 	}
 	// +MinRead: bytes.Buffer.ReadFrom wants that much free room per read, so an
 	// exact-size buffer would still regrow (copy) at the end

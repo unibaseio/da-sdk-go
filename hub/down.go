@@ -11,8 +11,9 @@ import (
 	"github.com/unibaseio/da-sdk-go/sdk"
 )
 
-// defaultPieceDownloadConcurrency bounds concurrent public piece reads
-// (HUB_PIECE_DOWNLOAD_CONCURRENCY): each may hold a piece of up to ~1 GB.
+// defaultPieceDownloadConcurrency bounds concurrent public piece reads and
+// rebuilds (HUB_PIECE_DOWNLOAD_CONCURRENCY). It does not bound memory held
+// while responses are written: the slot is released before the bytes go out.
 const defaultPieceDownloadConcurrency = 4
 
 // errBusy is returned when a read gave up waiting for a download slot.
@@ -40,8 +41,8 @@ func acquireSem(ctx context.Context, sem chan struct{}) (func(), error) {
 }
 
 // downloadPiece returns a committed piece by its DA commitment: from the local
-// piece store, else rebuilt from store nodes (then kept locally). The whole read
-// holds a pieceSem slot (the endpoint is public and a piece may be ~1 GB), a
+// piece store, else rebuilt from store nodes (then kept locally). The read (not
+// the response write) holds a pieceSem slot (the endpoint is public and a piece may be ~1 GB), a
 // rebuild also a dlSem slot like other DA reconstructs, and concurrent requests
 // for one piece share a single rebuild. The bytes are returned, not copied into
 // a writer, so a piece is held once per flight.

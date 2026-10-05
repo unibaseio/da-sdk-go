@@ -363,7 +363,8 @@ func (d storeDuration) check(start, expire uint64) error {
 	if expire < start+d.min {
 		return fmt.Errorf("expire %d is shorter than the minimum storage term (epoch %d + %d)", expire, start, d.min)
 	}
-	if d.max > 0 && expire > start+d.max {
+	// as Piece.addPiece: expire <= current+maxStore, with no exception for 0
+	if expire > start+d.max {
 		return fmt.Errorf("expire %d exceeds the maximum storage term (epoch %d + %d)", expire, start, d.max)
 	}
 	return nil

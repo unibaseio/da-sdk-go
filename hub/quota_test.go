@@ -157,8 +157,9 @@ func TestStoreDurationCheck(t *testing.T) {
 	if err := d.check(100, 5101); err == nil {
 		t.Fatal("term above maxStore accepted")
 	}
-	if err := (storeDuration{min: 10}).check(100, 1<<40); err != nil {
-		t.Fatal("max 0 means unbounded")
+	// the contract has no "0 = unbounded" case: maxStore 0 rejects every term
+	if err := (storeDuration{min: 10}).check(100, 1<<40); err == nil {
+		t.Fatal("term accepted with maxStore 0, which the contract rejects")
 	}
 }
 
@@ -187,5 +188,21 @@ func TestReadAllSized(t *testing.T) {
 		if err != nil || string(b) != "hello" {
 			t.Fatalf("hint %d: %q %v", hint, b, err)
 		}
+	}
+}
+
+// A declared length is not trusted for the allocation: claiming the full cap
+// with a tiny body must not reserve the cap.
+func TestReadAllSizedBoundsPrealloc(t *testing.T) {
+	b, err := readAllSized(strings.NewReader("hello"), 64<<20)
+	if err != nil || string(b) != "hello" {
+		t.Fatalf("%q %v", b, err)
+	}
+	if cap(b) > maxPrealloc+bytes.MinRead {
+		t.Fatalf("preallocated %d bytes for a 5-byte body", cap(b))
+	}
+	big := strings.Repeat("x", 3<<20) // larger than the prealloc: still read whole
+	if b, err := readAllSized(strings.NewReader(big), int64(len(big))); err != nil || len(b) != len(big) {
+		t.Fatalf("large body: %d %v", len(b), err)
 	}
 }
