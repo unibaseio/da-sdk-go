@@ -78,10 +78,12 @@ func TarGz(dir string) (io.ReadCloser, error) {
 
 var errUnsafePath = errors.New("archive entry escapes the target directory")
 
-// UntarGz extracts a gzip-compressed tar into dst. Only directories and
-// regular files are created; links, devices and other special entries are
-// skipped. An entry whose path would land outside dst (absolute, or
-// climbing with ..) aborts the extraction.
+// UntarGz extracts a gzip-compressed tar into dst. Directories and regular
+// files are created; a hard link to a file extracted earlier from the same
+// archive is materialised as a copy. Symbolic links, devices and other
+// special entries are skipped. An entry whose path would land outside dst
+// (absolute, climbing with .., or through a symlink already present in
+// dst) aborts the extraction.
 func UntarGz(r io.Reader, dst string) error {
 	gr, err := gzip.NewReader(r)
 	if err != nil {
@@ -112,29 +114,94 @@ func UntarGz(r io.Reader, dst string) error {
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			if err := noSymlinks(root, target, false); err != nil {
+				return fmt.Errorf("%q: %w", hdr.Name, err)
+			}
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+			if err := writeFile(root, target, hdr.FileInfo().Mode(), tr); err != nil {
+				return fmt.Errorf("%q: %w", hdr.Name, err)
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, hdr.FileInfo().Mode().Perm()&0o755|0o600)
+		case tar.TypeLink:
+			// docker's Tar stores a second path of a hard-linked file this
+			// way; it must name a regular file already extracted here
+			src, err := containedPath(root, hdr.Linkname)
+			if err != nil {
+				return fmt.Errorf("%q -> %q: %w", hdr.Name, hdr.Linkname, err)
+			}
+			if err := noSymlinks(root, src, false); err != nil {
+				return fmt.Errorf("%q -> %q: %w", hdr.Name, hdr.Linkname, err)
+			}
+			fi, err := os.Lstat(src)
+			if err != nil || !fi.Mode().IsRegular() {
+				return fmt.Errorf("%q: hard link to %q, which is not an extracted file", hdr.Name, hdr.Linkname)
+			}
+			f, err := os.Open(src)
 			if err != nil {
 				return err
 			}
-			_, err = io.Copy(f, tr)
-			if cerr := f.Close(); err == nil {
-				err = cerr
-			}
+			err = writeFile(root, target, fi.Mode(), f)
+			f.Close()
 			if err != nil {
-				return err
+				return fmt.Errorf("%q: %w", hdr.Name, err)
 			}
 		default:
-			// links (which could point outside dst), devices, fifos, pax
-			// globals: never created
+			// symbolic links (which could point anywhere), devices, fifos,
+			// pax globals: never created
 		}
 	}
+}
+
+// writeFile creates (or replaces) the regular file target with r's bytes.
+func writeFile(root, target string, mode os.FileMode, r io.Reader) error {
+	if err := noSymlinks(root, target, true); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm()&0o755|0o600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, r)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// noSymlinks makes sure writing target does not go through a symlink already
+// in dst: a symlinked parent directory is refused (it could lead outside
+// dst); with replace, a symlink at target itself is removed so the file
+// replaces it instead of being written through it.
+func noSymlinks(root, target string, replace bool) error {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return err
+	}
+	p := root
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		p = filepath.Join(p, part)
+		fi, err := os.Lstat(p)
+		if os.IsNotExist(err) {
+			return nil // the rest is created fresh
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		if i == len(parts)-1 && replace {
+			return os.Remove(p)
+		}
+		return errUnsafePath
+	}
+	return nil
 }
 
 func containedPath(root, name string) (string, error) {

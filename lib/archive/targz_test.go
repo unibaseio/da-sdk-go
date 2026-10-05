@@ -79,23 +79,79 @@ func TestUntarGzRefusesEscapes(t *testing.T) {
 	}
 }
 
-// Links are skipped, never created (they could point outside the target).
-func TestUntarGzSkipsLinks(t *testing.T) {
+// Symbolic links are skipped, never created (they could point anywhere).
+func TestUntarGzSkipsSymlinks(t *testing.T) {
 	dst := t.TempDir()
 	err := UntarGz(archiveOf(t,
 		&tar.Header{Name: "l", Typeflag: tar.TypeSymlink, Linkname: "/etc"},
-		&tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "../x"},
 		&tar.Header{Name: "ok", Typeflag: tar.TypeReg, Mode: 0o644},
 	), dst)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"l", "h"} {
+	for _, n := range []string{"l"} {
 		if _, err := os.Lstat(filepath.Join(dst, n)); !os.IsNotExist(err) {
 			t.Errorf("link %s created", n)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(dst, "ok")); err != nil {
 		t.Errorf("regular file not extracted: %v", err)
+	}
+}
+
+// An existing symlink at an entry's path is replaced, not written through.
+func TestUntarGzReplacesSymlinkAtTarget(t *testing.T) {
+	dst := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dst, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := UntarGz(archiveOf(t, &tar.Header{Name: "a.txt", Typeflag: tar.TypeReg, Mode: 0o644}), dst); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("written through the symlink: victim now %q", b)
+	}
+	if fi, err := os.Lstat(filepath.Join(dst, "a.txt")); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("a.txt not replaced by a regular file: %v %v", fi, err)
+	}
+}
+
+// A symlinked directory already in dst must not lead extraction outside.
+func TestUntarGzRefusesSymlinkedParent(t *testing.T) {
+	dst := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dst, "d")); err != nil {
+		t.Fatal(err)
+	}
+	if err := UntarGz(archiveOf(t, &tar.Header{Name: "d/evil", Typeflag: tar.TypeReg, Mode: 0o644}), dst); err == nil {
+		t.Fatal("extracted through a symlinked directory")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "evil")); err == nil {
+		t.Fatal("wrote outside the target")
+	}
+}
+
+// docker's Tar stores the second path of a hard-linked file as a link; it
+// is materialised as a copy. A link to anything outside is refused.
+func TestUntarGzHardLinks(t *testing.T) {
+	dst := t.TempDir()
+	err := UntarGz(archiveOf(t,
+		&tar.Header{Name: "a.txt", Typeflag: tar.TypeReg, Mode: 0o644},
+		&tar.Header{Name: "sub/b.txt", Typeflag: tar.TypeLink, Linkname: "a.txt"},
+	), dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dst, "sub", "b.txt")); err != nil || string(b) != "x" {
+		t.Fatalf("hard link not materialised: %q %v", b, err)
+	}
+	for _, link := range []string{"../outside", "/etc/passwd", "missing"} {
+		if err := UntarGz(archiveOf(t, &tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: link}), t.TempDir()); err == nil {
+			t.Errorf("hard link to %q accepted", link)
+		}
 	}
 }
