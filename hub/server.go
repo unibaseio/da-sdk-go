@@ -126,6 +126,9 @@ type Server struct {
 	// Add channels for graceful shutdown
 	shutdownChan   chan struct{}
 	checkpointStop chan struct{}
+	// shutdownOnce serializes Shutdown: the signal handler and the daemon both
+	// call it on SIGINT/SIGTERM, and the second caller must wait, not re-close.
+	shutdownOnce sync.Once
 
 	// uploadNotify wakes the uploadTo drain loop when new data is written
 	// (event-driven), so a write isn't stuck behind the periodic tick. Buffered
@@ -211,7 +214,10 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	}
 
 	// P4-Route: owner-sharded sticky write routing (nil unless HUB_SHARD_TOTAL>1).
-	s.shard = newShardRouter()
+	s.shard, err = newShardRouter()
+	if err != nil {
+		return nil, err
+	}
 
 	// P4: shared L2 read cache (Redis). Fail-open — an unreachable Redis degrades
 	// to L1-only, so a bad ping is a warning, not a startup failure.
@@ -345,12 +351,25 @@ func (s *Server) ListenAndServe() error {
 	return s.httpServer.ListenAndServe()
 }
 
-// Shutdown gracefully shuts down both the HTTP server and persists data
+// Shutdown gracefully shuts down both the HTTP server and persists data. It is
+// safe to call more than once and concurrently: the work runs once, and later
+// callers block until it has finished.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() { s.shutdown(ctx) })
+	return nil
+}
+
+func (s *Server) shutdown(ctx context.Context) {
 	logger.Info("starting server shutdown...")
 
 	// Signal checkpoint routine to stop and perform final checkpoint
-	close(s.checkpointStop)
+	if s.checkpointStop != nil {
+		close(s.checkpointStop)
+	}
+	// stop the drain loop before its LogFS instances are closed below
+	if s.shutdownChan != nil {
+		close(s.shutdownChan)
+	}
 
 	// First shutdown the HTTP server
 	if s.httpServer != nil {
@@ -429,7 +448,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	logger.Info("server shutdown completed")
-	return nil
 }
 
 // login re-announces this node to the gateway hourly, signing each time: the

@@ -3,6 +3,7 @@ package hub
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"testing"
 
@@ -14,7 +15,33 @@ func testShardRouter(t *testing.T, index, total int, peers string) *shardRouter 
 	t.Setenv("HUB_SHARD_TOTAL", strconv.Itoa(total))
 	t.Setenv("HUB_SHARD_INDEX", strconv.Itoa(index))
 	t.Setenv("HUB_SHARD_PEERS", peers)
-	return newShardRouter()
+	if os.Getenv("HUB_SHARD_FWD_SECRET") == "" {
+		t.Setenv("HUB_SHARD_FWD_SECRET", testFwdSecret)
+	}
+	sr, err := newShardRouter()
+	if err != nil {
+		t.Fatalf("newShardRouter: %v", err)
+	}
+	return sr
+}
+
+const testFwdSecret = "test-fwd-secret-0123456789"
+
+// Sharding without HUB_SHARD_FWD_SECRET refuses to start rather than accept a
+// forgeable forwarded marker (or silently run unsharded on a sharded fleet).
+func TestShardRouterRequiresSecret(t *testing.T) {
+	t.Setenv("HUB_SHARD_TOTAL", "2")
+	t.Setenv("HUB_SHARD_INDEX", "0")
+	t.Setenv("HUB_SHARD_PEERS", "http://a,http://b")
+	t.Setenv("HUB_SHARD_FWD_SECRET", "")
+	if sr, err := newShardRouter(); err == nil || sr != nil {
+		t.Fatalf("want a startup error without the secret, got sr=%v err=%v", sr, err)
+	}
+	// single-node needs no secret
+	t.Setenv("HUB_SHARD_TOTAL", "1")
+	if sr, err := newShardRouter(); err != nil || sr != nil {
+		t.Fatalf("single-node: sr=%v err=%v", sr, err)
+	}
 }
 
 // TestShardRouterDisabledByDefault: TOTAL<=1 or misconfig => nil (single-node).
@@ -231,7 +258,7 @@ func TestShardReadProxyNonHome(t *testing.T) {
 
 	// already-forwarded request → NEVER re-proxied, even for an away owner
 	peerHit = false
-	resp = get(awayOwner, "1")
+	resp = get(awayOwner, testFwdSecret)
 	resp.Body.Close()
 	if peerHit || resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("forwarded read must answer locally (hit=%v code=%d)", peerHit, resp.StatusCode)
@@ -282,7 +309,7 @@ func TestShardWriteGuardNoLoop(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodPost, local.URL+"/v1/x", nil)
 	req.Header.Set("X-Test-Owner", awayOwner)
-	req.Header.Set(shardFwdHeader, "1") // simulates the second hop
+	req.Header.Set(shardFwdHeader, testFwdSecret) // simulates the second hop
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("post: %v", err)
