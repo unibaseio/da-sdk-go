@@ -2,6 +2,8 @@ module github.com/unibaseio/da-sdk-go
 
 go 1.26.0
 
+toolchain go1.26.8
+
 require (
 	github.com/alecthomas/units v0.0.0-20240927000941-0f3dac36c52b
 	github.com/consensys/gnark-crypto v0.14.0

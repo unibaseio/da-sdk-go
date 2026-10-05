@@ -18,7 +18,7 @@ const (
 
 // InputPassWord prompts for the keystore password on the terminal. There is
 // no built-in default: a node without a TTY (systemd) must get it from
-// NODE_PASSWORD or --password.
+// --password.
 func InputPassWord() (string, error) {
 	type result struct {
 		pw  string
@@ -34,13 +34,13 @@ func InputPassWord() (string, error) {
 	select {
 	case r := <-ch:
 		if r.err != nil {
-			return "", fmt.Errorf("read password: %w (set NODE_PASSWORD or --password)", r.err)
+			return "", fmt.Errorf("read password: %w (pass --password)", r.err)
 		}
 		if len(r.pw) < 8 {
 			return "", fmt.Errorf("password length should be at least 8")
 		}
 		return r.pw, nil
 	case <-time.After(10 * time.Second):
-		return "", fmt.Errorf("no keystore password: set NODE_PASSWORD or --password")
+		return "", fmt.Errorf("no keystore password: pass --password")
 	}
 }
