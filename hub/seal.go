@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	com "github.com/unibaseio/da-sdk-go/contract/common"
@@ -27,6 +28,18 @@ import (
 // /api/seal register=hub path. On expiry the blob is already erasure-staged; the
 // client retries seal (idempotent) to confirm the on-chain serial.
 const defaultSealChainTimeoutSec int64 = 90
+
+// Seal concurrency: each seal holds a temp copy of its blob, an encode/stage on
+// a stream and possibly an on-chain wait. At most HUB_SEAL_CONCURRENCY run at
+// once; the rest queue up to HUB_SEAL_QUEUE_SEC, then get 503 + Retry-After.
+const (
+	defaultSealConcurrency = 8
+	defaultSealQueueSec    = 120
+)
+
+// storeDurationTTL is how long the Piece contract's minStore/maxStore are
+// cached (governance can change them, rarely).
+const storeDurationTTL = 10 * time.Minute
 
 func (s *Server) addSeal(g *gin.RouterGroup) {
 	g.Group("/").POST("/seal", s.seal)
@@ -79,6 +92,28 @@ func (s *Server) seal(c *gin.Context) {
 		return
 	}
 
+	// every mode but client is paid by the hub: count it against the signer
+	if register != "client" && !s.chargeWrite(c, fh.Size) {
+		return
+	}
+
+	release, ok := s.acquireSeal(c)
+	if !ok {
+		return
+	}
+	defer release()
+
+	cm, err := s.chainManager()
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	// a storage term the Piece contract would refuse ("short dur" / "exceed
+	// dur") is rejected now, before the upload and the token approve tx
+	if _, _, _, ok := s.sealTermsChecked(c, cm, register); !ok {
+		return
+	}
+
 	// persist the ciphertext to a temp file — sdk.Upload is file-based, and the
 	// hub never inspects the bytes (client-side encrypted).
 	src, err := fh.Open()
@@ -108,11 +143,6 @@ func (s *Server) seal(c *gin.Context) {
 	name := sealFileName(owner, c.PostForm("name"))
 
 	sk := s.rp.Key().Export().PrivateKey
-	cm, err := s.chainManager()
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
-		return
-	}
 
 	// 1. erasure-encode + stream-stage + KZG commit.
 	res, streamer, err := sdk.UploadWith(sdk.ServerURL, sdk.KeySigner(sk), policy, tmpPath, name)
@@ -133,14 +163,12 @@ func (s *Server) seal(c *gin.Context) {
 	pc := pcs[0] // a seal segment (<= ~1GB/piece) is a single piece
 
 	// resolve start/expire/price so the response (and v2 cost) are exact and
-	// match what AddPiece locks.
-	start, err := cm.GetEpoch()
-	if err != nil {
-		c.JSON(599, lerror.ToAPIError("hub", err))
+	// match what AddPiece locks; re-checked against the current epoch (the
+	// upload took a while), still before any transaction.
+	start, expire, price, ok := s.sealTermsChecked(c, cm, register)
+	if !ok {
 		return
 	}
-	expire, price := sealTerms(register, start, c.PostForm("expire"), c.PostForm("price"),
-		uint64(env.Int64("HUB_SEAL_MAX_EPOCHS", int64(com.DefaultStoreEpoch))))
 	pc.Start = start
 	pc.Expire = expire
 	pc.Price = price
@@ -284,4 +312,90 @@ func sealFileName(owner, name string) string {
 		return ""
 	}
 	return "seal/" + strings.ToLower(owner) + "/" + name
+}
+
+// acquireSeal takes a seal slot, waiting up to HUB_SEAL_QUEUE_SEC or until the
+// client goes away. On failure it has written a 503 and returns ok=false.
+func (s *Server) acquireSeal(c *gin.Context) (release func(), ok bool) {
+	if s.sealSem == nil {
+		return func() {}, true
+	}
+	wait := time.NewTimer(time.Duration(env.Int64("HUB_SEAL_QUEUE_SEC", defaultSealQueueSec)) * time.Second)
+	defer wait.Stop()
+	select {
+	case s.sealSem <- struct{}{}:
+		return func() { <-s.sealSem }, true
+	case <-wait.C:
+	case <-c.Request.Context().Done():
+	}
+	c.Header("Retry-After", "10")
+	c.AbortWithStatusJSON(http.StatusServiceUnavailable, lerror.ToAPIError("hub", fmt.Errorf("too many seals in progress; retry later")))
+	return nil, false
+}
+
+// sealTermsChecked reads the current epoch, picks the seal's terms (sealTerms)
+// and checks the duration against the Piece contract's bounds. On failure it
+// has written the response and returns ok=false.
+func (s *Server) sealTermsChecked(c *gin.Context, cm *contract.ContractManage, register string) (start, expire uint64, price *big.Int, ok bool) {
+	start, err := cm.GetEpoch()
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return 0, 0, nil, false
+	}
+	expire, price = sealTerms(register, start, c.PostForm("expire"), c.PostForm("price"),
+		uint64(env.Int64("HUB_SEAL_MAX_EPOCHS", int64(com.DefaultStoreEpoch))))
+	d, err := s.storeDurations(cm)
+	if err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return 0, 0, nil, false
+	}
+	if err := d.check(start, expire); err != nil {
+		c.JSON(http.StatusBadRequest, lerror.ToAPIError("hub", err))
+		return 0, 0, nil, false
+	}
+	return start, expire, price, true
+}
+
+// storeDuration is the Piece contract's allowed storage term, in epochs from the
+// current one: addPiece requires current+min <= expire <= current+max.
+type storeDuration struct {
+	min, max uint64
+	at       time.Time
+}
+
+func (d storeDuration) check(start, expire uint64) error {
+	if expire < start+d.min {
+		return fmt.Errorf("expire %d is shorter than the minimum storage term (epoch %d + %d)", expire, start, d.min)
+	}
+	if d.max > 0 && expire > start+d.max {
+		return fmt.Errorf("expire %d exceeds the maximum storage term (epoch %d + %d)", expire, start, d.max)
+	}
+	return nil
+}
+
+// storeDurations returns the contract's minStore/maxStore, cached for
+// storeDurationTTL.
+func (s *Server) storeDurations(cm *contract.ContractManage) (storeDuration, error) {
+	s.storeDurMu.Lock()
+	defer s.storeDurMu.Unlock()
+	if !s.storeDur.at.IsZero() && time.Since(s.storeDur.at) < storeDurationTTL {
+		return s.storeDur, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pi, err := cm.NewPiece(ctx)
+	if err != nil {
+		return storeDuration{}, err
+	}
+	opts := &bind.CallOpts{Context: ctx}
+	minS, err := pi.MinStore(opts)
+	if err != nil {
+		return storeDuration{}, fmt.Errorf("read minStore: %w", err)
+	}
+	maxS, err := pi.MaxStore(opts)
+	if err != nil {
+		return storeDuration{}, fmt.Errorf("read maxStore: %w", err)
+	}
+	s.storeDur = storeDuration{min: minS, max: maxS, at: time.Now()}
+	return s.storeDur, nil
 }

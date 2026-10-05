@@ -8,7 +8,19 @@ import (
 	"time"
 )
 
-// SetupSignalHandler sets up signal handling for graceful shutdown
+// signalShutdownTimeout bounds the graceful shutdown a signal triggers.
+const signalShutdownTimeout = 10 * time.Second
+
+// SetupSignalHandler shuts the server down gracefully on a termination signal
+// and exits.
+//
+// It used to run a separate "emergency" path (close DB + repo, os.Exit(1)) in
+// parallel with the daemon's own SIGINT/SIGTERM handler calling Shutdown: both
+// fired on the same signal, so the repo could be closed under the LogFS
+// instances Shutdown was still flushing, or the process exited mid-flush. Both
+// now go through Shutdown, which runs exactly once (shutdownOnce) — a second
+// caller waits for the first to finish — so the order (HTTP → stats → LogFS →
+// DB → repo) always holds.
 func (s *Server) SetupSignalHandler() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan,
@@ -20,44 +32,14 @@ func (s *Server) SetupSignalHandler() {
 
 	go func() {
 		sig := <-sigChan
-		logger.Warnf("received signal: %v, initiating emergency shutdown...", sig)
+		logger.Warnf("received signal: %v, shutting down...", sig)
 
-		// Create a context with timeout for emergency shutdown
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), signalShutdownTimeout)
 		defer cancel()
-
-		// Perform emergency data persistence
-		s.emergencyShutdown(ctx)
-
-		// Exit the process
-		os.Exit(1)
+		if err := s.Shutdown(ctx); err != nil {
+			logger.Errorf("shutdown: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}()
-}
-
-// emergencyShutdown performs critical data persistence operations quickly
-func (s *Server) emergencyShutdown(ctx context.Context) {
-	logger.Warn("performing emergency data persistence...")
-
-	// Force database checkpoint (SQLite WAL only; Postgres self-manages)
-	if s.gdb != nil {
-		if s.isSQLite() {
-			logger.Info("emergency: forcing database checkpoint...")
-			if err := s.gdb.Exec("PRAGMA wal_checkpoint(FULL);").Error; err != nil {
-				logger.Errorf("emergency checkpoint failed: %v", err)
-			}
-		}
-
-		// Get underlying SQL database and close it
-		if sqlDB, err := s.gdb.DB(); err == nil {
-			sqlDB.Close()
-		}
-	}
-
-	// Close repository
-	if s.rp != nil {
-		logger.Info("emergency: closing repository...")
-		s.rp.Close()
-	}
-
-	logger.Warn("emergency shutdown completed")
 }

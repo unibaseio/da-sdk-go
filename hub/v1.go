@@ -11,9 +11,10 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -131,7 +132,8 @@ func maxBodyV1() gin.HandlerFunc {
 // mirroring the /api group split; same Server/gdb/logfs underneath.
 func (s *Server) registV1() {
 	pub := s.Router.Group("/v1")
-	pub.Use(RateLimit())
+	// public reads carry no signer at middleware time: per-IP tier only
+	pub.Use(IPRateLimit())
 	pub.GET("/info", s.v1Info)
 	pub.GET("/buckets", s.v1ListBuckets)
 	pub.GET("/buckets/:bucket", s.v1GetBucket)
@@ -150,11 +152,14 @@ func (s *Server) registV1() {
 
 	w := s.Router.Group("/v1")
 	w.Use(maxBodyV1())
+	// per-IP limit BEFORE signature verification (the expensive step), per-owner
+	// limit after it (needs the recovered signer)
+	w.Use(IPRateLimit())
 	w.Use(AuthMiddleware())
 	// P4-Route: after auth (owner = signer), forward a non-home owner's write to
 	// its shard. No-op unless HUB_SHARD_TOTAL>1. Reads are never sharded.
 	w.Use(s.shardWrite())
-	w.Use(RateLimit())
+	w.Use(OwnerRateLimit())
 	if s.readonly {
 		reject := func(c *gin.Context) {
 			c.JSON(http.StatusServiceUnavailable, lerror.ToAPIError("hub", fmt.Errorf("this node is read-only; route writes to the primary")))
@@ -373,7 +378,13 @@ func (s *Server) v1PutObject(c *gin.Context) {
 		return
 	}
 
-	data, err := io.ReadAll(c.Request.Body)
+	// a declared length lets an over-quota write fail before its body is read
+	if c.Request.ContentLength > 0 && !s.chargeWrite(c, c.Request.ContentLength) {
+		return
+	}
+	// one copy of the body: read into a buffer sized from Content-Length and
+	// hand that slice to LogFS (it used to be copied twice more on the way)
+	data, err := readAllSized(c.Request.Body, c.Request.ContentLength)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
@@ -382,9 +393,12 @@ func (s *Server) v1PutObject(c *gin.Context) {
 		abortWithBadRequest(c, fmt.Errorf("empty body"))
 		return
 	}
+	if c.Request.ContentLength <= 0 && !s.chargeWrite(c, int64(len(data))) {
+		return
+	}
 
 	large := v1KindProfileLarge(b.Kind, int64(len(data)))
-	if _, err := s.logFSWriteEx(owner, bucket, key, b.Kind, large, strings.NewReader(string(data))); err != nil {
+	if _, err := s.logFSWriteData(owner, bucket, key, b.Kind, large, data); err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
 	}
@@ -429,12 +443,20 @@ func (s *Server) v1PostObjects(c *gin.Context) {
 		abortWithBadRequest(c, fmt.Errorf("no files (use form field 'files')"))
 		return
 	}
-	receipts := make([]v1Receipt, 0, len(files))
+	var total int64
 	for _, fh := range files {
 		if fh.Size == 0 {
 			abortWithBadRequest(c, fmt.Errorf("empty file: %s", fh.Filename))
 			return
 		}
+		total += fh.Size
+	}
+	// the whole batch counts against the signer's quota, all or nothing
+	if !s.chargeWrite(c, total) {
+		return
+	}
+	receipts := make([]v1Receipt, 0, len(files))
+	for _, fh := range files {
 		fr, err := fh.Open()
 		if err != nil {
 			c.JSON(599, lerror.ToAPIError("hub", err))
@@ -617,7 +639,7 @@ func (s *Server) v1GetObject(c *gin.Context) {
 		return
 	}
 	rc := receiptFromNeedle(bucket, nds[0])
-	rc.Sha256 = s.objectSha256(nds[0].Owner, key) // best-effort
+	rc.Sha256 = s.objectSha256At(nds[0]) // best-effort, this row's object only
 	c.JSON(http.StatusOK, rc)
 }
 
@@ -668,12 +690,16 @@ func (s *Server) v1GetPieceContent(c *gin.Context) {
 	if _, ok := ResolveOwnerForList(c, c.Query("owner")); !ok {
 		return
 	}
-	var w bytes.Buffer
-	if err := s.downloadPiece(c.Request.Context(), c.Param("name"), &w); err != nil {
-		c.JSON(http.StatusNotFound, lerror.ToAPIError("hub", err))
+	data, err := s.downloadPiece(c.Request.Context(), c.Param("name"))
+	if err != nil {
+		code := http.StatusNotFound
+		if errors.Is(err, errBusy) {
+			code = http.StatusServiceUnavailable
+		}
+		c.JSON(code, lerror.ToAPIError("hub", err))
 		return
 	}
-	c.Data(http.StatusOK, "application/octet-stream", w.Bytes())
+	c.Data(http.StatusOK, "application/octet-stream", data)
 }
 
 // ---- Aggregates ------------------------------------------------------------
@@ -726,8 +752,16 @@ func (s *Server) v1DeleteBucket(c *gin.Context) {
 		c.JSON(http.StatusForbidden, lerror.ToAPIError("hub", fmt.Errorf("bucket %s owned by another account", bucket)))
 		return
 	}
-	s.gdb.Where("name = ?", bucket).Delete(&types.Bucket{})
-	s.gdb.Where("bucket = ?", bucket).Delete(&types.Needle{})
+	// scoped to the owner, not the bare name: legacy data can hold another
+	// owner's bucket or objects under the same name
+	if err := s.gdb.Where("name = ? AND LOWER(owner) = ?", bucket, strings.ToLower(owner)).Delete(&types.Bucket{}).Error; err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
+	if err := s.gdb.Where("bucket = ? AND LOWER(owner) = ?", bucket, strings.ToLower(owner)).Delete(&types.Needle{}).Error; err != nil {
+		c.JSON(599, lerror.ToAPIError("hub", err))
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"bucket": bucket, "deleted": true,
 		"note": "removed from index; on-chain DA data is immutable and persists"})
 }
@@ -773,15 +807,18 @@ func (s *Server) v1GetObjectProof(c *gin.Context) {
 		c.JSON(http.StatusTooEarly, lerror.ToAPIError("hub", fmt.Errorf("object not yet committed on-chain (status=staged)")))
 		return
 	}
+	// hashes of exactly this row's object (owner, bucket, key → volume/start/
+	// size), like /content — never of a same-key object in another bucket
+	sh, kh := s.objectHashesAt(n)
 	resp := gin.H{
 		"bucket":     bucket,
 		"key":        key,
 		"commitment": n.Piece, // DA piece (content-addressed id)
-		"sha256":     s.objectSha256(n.Owner, key),
+		"sha256":     sh,
 		"chain":      v1Chain{TxHash: n.TxHash, ChainType: n.ChainType},
 		"verify":     "hash the content and compare; confirm the piece is registered and unexpired on the Piece contract; optionally rebuild the piece from store nodes and hash range.start..start+size",
 	}
-	if kh := s.objectKeccak(n.Owner, key, n.Size); kh != "" {
+	if kh != "" {
 		resp["keccak256"] = kh
 	}
 	vols, err := s.volumesOf(n.Owner, n.File)
@@ -801,52 +838,63 @@ func (s *Server) v1GetObjectProof(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// objectKeccak returns the content keccak256 (0x-hex) for a small object,
-// best-effort: empty when there is no repo, the object is larger than
-// maxProofHashBytes, or the read fails.
-func (s *Server) objectKeccak(owner, key string, size uint64) string {
-	if owner == "" || s.rp == nil || size == 0 || size > maxProofHashBytes {
-		return ""
+// objectHashesAt returns the content sha256 (hex) and keccak256 (0x-hex) of
+// the object an index row points at, best-effort (empty on failure). Objects up
+// to maxProofHashBytes are read by the row's location and hashed; larger ones
+// get only the sha256 recorded in the LogFS meta, and only while that meta
+// still describes this row's location. The LogFS key index is per owner, not
+// per bucket, so a lookup by key alone could describe a same-key object in
+// another bucket.
+func (s *Server) objectHashesAt(n types.NeedleDisplay) (sha, keccak string) {
+	if n.Owner == "" || n.Size == 0 {
+		return "", ""
 	}
-	for _, cand := range ownerCandidates(owner) {
-		var buf bytes.Buffer
-		if _, err := s.logFSReadOne(cand, key, &buf); err == nil && uint64(buf.Len()) == size {
-			return keccakHex(buf.Bytes())
+	if _, err := s.readFS(n.Owner); err != nil {
+		return "", ""
+	}
+	if n.Size > maxProofHashBytes {
+		return s.objectSha256At(n), ""
+	}
+	var buf bytes.Buffer
+	if _, err := s.logFSReadAt(n.Owner, n.Name, n.File, n.Start, n.Size, &buf); err != nil || uint64(buf.Len()) != n.Size {
+		return "", ""
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	return hex.EncodeToString(sum[:]), keccakHex(buf.Bytes())
+}
+
+// readFS resolves an owner's LogFS for a best-effort read: the loaded instance,
+// else (with a repo) a registered owner's on-demand load. Never creates one.
+func (s *Server) readFS(owner string) (*logfs.LogFS, error) {
+	if s.rp == nil {
+		if v, ok := s.lfs.Load(owner); ok {
+			return v.(*logfs.LogFS), nil
 		}
+		return nil, fmt.Errorf("no repo")
 	}
-	return ""
+	return s.getFS(owner, false)
 }
 
 func keccakHex(b []byte) string {
 	return "0x" + hex.EncodeToString(crypto.Keccak256(b))
 }
 
-// objectMeta resolves the logfs LogMeta for (owner,key) — loading the owner's
-// log instance if needed. Mirrors logFSReadOne's lfs resolution. Best-effort:
-// returns an error (never panics) when there's no repo/owner/key.
-func (s *Server) objectMeta(addr, key string) (*logfs.LogMeta, error) {
-	if s.rp == nil {
-		return nil, fmt.Errorf("no repo")
-	}
-	fs, err := s.getFS(addr, false)
-	if err != nil {
-		return nil, err
-	}
-	return fs.GetMeta([]byte(key))
-}
-
-// objectSha256 returns the content sha256 (hex) for an object, best-effort
-// (empty on any failure). Tries owner candidates (lowercase + legacy checksum).
-func (s *Server) objectSha256(owner, key string) string {
-	if owner == "" {
+// objectSha256At returns the sha256 (hex) the LogFS meta records for the row's
+// key, only if that meta is this row's object (same volume, start and size) —
+// cheap, no content read. Empty otherwise.
+func (s *Server) objectSha256At(n types.NeedleDisplay) string {
+	if n.Owner == "" {
 		return ""
 	}
-	for _, cand := range ownerCandidates(owner) {
-		if m, err := s.objectMeta(cand, key); err == nil && len(m.Hash) > 0 {
-			return hex.EncodeToString(m.Hash)
-		}
+	fs, err := s.readFS(n.Owner)
+	if err != nil {
+		return ""
 	}
-	return ""
+	m, err := fs.GetMeta([]byte(n.Name))
+	if err != nil || len(m.Hash) == 0 || m.Index != n.File || m.Start != n.Start || m.Size != n.Size {
+		return ""
+	}
+	return hex.EncodeToString(m.Hash)
 }
 
 // v1WaitCommitted polls until the object's volume lands on-chain (Piece set) or

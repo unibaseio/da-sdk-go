@@ -14,10 +14,10 @@ import (
 	"github.com/unibaseio/da-sdk-go/docs"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
-	"github.com/unibaseio/da-sdk-go/lib/s3vol"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/piece"
 	"github.com/unibaseio/da-sdk-go/lib/repo"
+	"github.com/unibaseio/da-sdk-go/lib/s3vol"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
 	"github.com/unibaseio/da-sdk-go/sdk"
@@ -100,6 +100,19 @@ type Server struct {
 	dlTotal  atomic.Int64
 	dlShared atomic.Int64
 
+	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads (each may hold
+	// a reconstructed piece of up to ~1 GB in memory). HUB_PIECE_DOWNLOAD_CONCURRENCY.
+	pieceSem chan struct{}
+
+	// quota is the per-signer budget for hub-paid writes (nil = off); sealSem
+	// bounds concurrent seals (HUB_SEAL_CONCURRENCY). See quota.go / seal.go.
+	quota   *writeQuota
+	sealSem chan struct{}
+
+	// cached Piece-contract store-duration bounds (minStore/maxStore) for seal
+	storeDurMu sync.Mutex
+	storeDur   storeDuration
+
 	// P3-S: shared S3/MinIO backend for sealed volumes (nil = local-only buffer,
 	// the default). Bound per-owner and passed to logfs.New via getFS/load.
 	volStore *s3vol.Store
@@ -126,6 +139,9 @@ type Server struct {
 	// Add channels for graceful shutdown
 	shutdownChan   chan struct{}
 	checkpointStop chan struct{}
+	// shutdownOnce serializes Shutdown: the signal handler and the daemon both
+	// call it on SIGINT/SIGTERM, and the second caller must wait, not re-close.
+	shutdownOnce sync.Once
 
 	// uploadNotify wakes the uploadTo drain loop when new data is written
 	// (event-driven), so a write isn't stuck behind the periodic tick. Buffered
@@ -150,6 +166,11 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	// can contain "/"). Match on the raw path, decode the param value back.
 	router.UseRawPath = true
 	router.UnescapePathValues = true
+	// client IP for the per-IP limiter: honor X-Forwarded-For only from trusted
+	// proxies (HUB_TRUSTED_PROXIES, default private+loopback — see ratelimit.go)
+	if err := configureClientIP(router); err != nil {
+		return nil, err
+	}
 
 	auth, err := rp.Key().BuildAuth([]byte("hub"))
 	if err != nil {
@@ -185,6 +206,15 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	if n := env.Int("HUB_DOWNLOAD_CONCURRENCY", 0); n > 0 {
 		s.dlSem = make(chan struct{}, n)
 	}
+	// Public piece reads rebuild up to ~1 GB each, so unlike the object path
+	// they are bounded by default.
+	if n := env.Int("HUB_PIECE_DOWNLOAD_CONCURRENCY", defaultPieceDownloadConcurrency); n > 0 {
+		s.pieceSem = make(chan struct{}, n)
+	}
+	s.quota = newWriteQuota()
+	if n := env.Int("HUB_SEAL_CONCURRENCY", defaultSealConcurrency); n > 0 {
+		s.sealSem = make(chan struct{}, n)
+	}
 
 	// P3-S: optional durable/shared sealed-volume backend (HUB_BUFFER=s3). Default
 	// "local" keeps volumes on local disk only (unchanged). When s3, each owner's
@@ -206,7 +236,10 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	}
 
 	// P4-Route: owner-sharded sticky write routing (nil unless HUB_SHARD_TOTAL>1).
-	s.shard = newShardRouter()
+	s.shard, err = newShardRouter()
+	if err != nil {
+		return nil, err
+	}
 
 	// P4: shared L2 read cache (Redis). Fail-open — an unreachable Redis degrades
 	// to L1-only, so a bad ping is a warning, not a startup failure.
@@ -263,10 +296,7 @@ func NewServer(rp repo.Repo) (*Server, error) {
 
 	s.registRoute()
 
-	s.httpServer = &http.Server{
-		Addr:    rp.Config().API.Endpoint,
-		Handler: s.Router,
-	}
+	s.httpServer = newHTTPServer(rp.Config().API.Endpoint, s.Router)
 
 	// Setup signal handler for emergency shutdown
 	s.SetupSignalHandler()
@@ -303,17 +333,65 @@ func (s *Server) isSQLite() bool {
 
 }
 
+// HTTP server timeouts (env-tunable, seconds; 0 disables one):
+//   - HUB_HTTP_READ_HEADER_TIMEOUT_SEC (10): slowloris guard on the request line and
+//     headers.
+//   - HUB_HTTP_IDLE_TIMEOUT_SEC (120): keep-alive idle; above the ALB's default
+//     60s idle timeout so the ALB, not the hub, closes idle connections (the
+//     other way round yields sporadic 502s).
+//   - HUB_HTTP_READ_TIMEOUT_SEC (600): whole request including the body. Uploads
+//     are capped at HUB_MAX_MULTIPART_BYTES (64 MiB), so 10 min still admits a
+//     ~110 KB/s client.
+//   - HUB_HTTP_WRITE_TIMEOUT_SEC (0 = none): a write deadline would cut off
+//     legitimate long responses — piece downloads up to ~1 GB, seal (encode +
+//     on-chain wait) and ?wait=1 commits — so it stays off by default; those
+//     handlers are bounded by their own contexts and semaphores instead.
+const (
+	defaultHTTPReadHeaderTimeoutSec = 10
+	defaultHTTPIdleTimeoutSec       = 120
+	defaultHTTPReadTimeoutSec       = 600
+	defaultHTTPWriteTimeoutSec      = 0
+)
+
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	sec := func(k string, def int) time.Duration {
+		return time.Duration(env.Int(k, def)) * time.Second
+	}
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: sec("HUB_HTTP_READ_HEADER_TIMEOUT_SEC", defaultHTTPReadHeaderTimeoutSec),
+		ReadTimeout:       sec("HUB_HTTP_READ_TIMEOUT_SEC", defaultHTTPReadTimeoutSec),
+		WriteTimeout:      sec("HUB_HTTP_WRITE_TIMEOUT_SEC", defaultHTTPWriteTimeoutSec),
+		IdleTimeout:       sec("HUB_HTTP_IDLE_TIMEOUT_SEC", defaultHTTPIdleTimeoutSec),
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
 // ListenAndServe starts the HTTP server
 func (s *Server) ListenAndServe() error {
 	return s.httpServer.ListenAndServe()
 }
 
-// Shutdown gracefully shuts down both the HTTP server and persists data
+// Shutdown gracefully shuts down both the HTTP server and persists data. It is
+// safe to call more than once and concurrently: the work runs once, and later
+// callers block until it has finished.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() { s.shutdown(ctx) })
+	return nil
+}
+
+func (s *Server) shutdown(ctx context.Context) {
 	logger.Info("starting server shutdown...")
 
 	// Signal checkpoint routine to stop and perform final checkpoint
-	close(s.checkpointStop)
+	if s.checkpointStop != nil {
+		close(s.checkpointStop)
+	}
+	// stop the drain loop before its LogFS instances are closed below
+	if s.shutdownChan != nil {
+		close(s.shutdownChan)
+	}
 
 	// First shutdown the HTTP server
 	if s.httpServer != nil {
@@ -392,7 +470,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	logger.Info("server shutdown completed")
-	return nil
 }
 
 // login re-announces this node to the gateway hourly, signing each time: the

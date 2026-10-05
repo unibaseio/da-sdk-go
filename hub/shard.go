@@ -2,12 +2,15 @@ package hub
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"hash/crc32"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -23,7 +26,8 @@ import (
 //
 // Disabled (nil) unless HUB_SHARD_TOTAL>1 with a valid HUB_SHARD_INDEX and a
 // HUB_SHARD_PEERS list of exactly TOTAL comma-separated base URLs (index-order).
-// Default single-node behavior is unchanged.
+// Sharding also requires HUB_SHARD_FWD_SECRET: without it the hub refuses to
+// start (see newShardRouter). Default single-node behavior is unchanged.
 type shardRouter struct {
 	index   int
 	total   int
@@ -35,11 +39,15 @@ type shardRouter struct {
 	readProxied atomic.Int64 // reads forwarded to the owner's home shard
 
 	// fwdSecret is the shared value a peer stamps on shardFwdHeader when it
-	// forwards. When set (HUB_SHARD_FWD_SECRET), the receiver honors the
+	// forwards (HUB_SHARD_FWD_SECRET, required). The receiver honors the
 	// forwarded-once marker ONLY if it matches — so an external client can't
 	// forge the header to misroute its own writes or suppress the read
-	// fallback. Empty = legacy behavior (any non-empty value counts).
+	// fallback.
 	fwdSecret string
+
+	// client fetches single objects from a peer (conversation read fallback);
+	// same transport as the proxies.
+	client *http.Client
 }
 
 // shardFwdHeader marks a request already forwarded once by a shard peer. The
@@ -50,68 +58,96 @@ type shardRouter struct {
 // secret (fwdSecret) so the marker cannot be forged from outside the fleet.
 const shardFwdHeader = "X-Hub-Shard-Fwd"
 
-func newShardRouter() *shardRouter {
+// newShardRouter builds the router from env. Topology errors (index/peers) log
+// and fall back to single-node, as before. A missing HUB_SHARD_FWD_SECRET is a
+// startup error instead: running sharded would accept a forwarded-once marker
+// any client can forge, and silently running unsharded on a sharded fleet would
+// let two hubs write the same owner and fork its volumes — so neither is safe.
+func newShardRouter() (*shardRouter, error) {
 	total := env.Int("HUB_SHARD_TOTAL", 1)
 	if total <= 1 {
-		return nil // single-node = unchanged
+		return nil, nil // single-node = unchanged
+	}
+	secret := strings.TrimSpace(env.Str("HUB_SHARD_FWD_SECRET", ""))
+	if secret == "" {
+		return nil, fmt.Errorf("HUB_SHARD_TOTAL=%d requires HUB_SHARD_FWD_SECRET (a secret shared by all shards); refusing to start", total)
+	}
+	if len(secret) < 16 {
+		logger.Warnf("HUB_SHARD_FWD_SECRET is short (%d chars); use a long random value (e.g. 32 bytes hex)", len(secret))
 	}
 	index := env.Int("HUB_SHARD_INDEX", -1)
 	if index < 0 || index >= total {
 		logger.Errorf("HUB_SHARD_TOTAL=%d but HUB_SHARD_INDEX=%d is out of range; sharding disabled", total, index)
-		return nil
+		return nil, nil
 	}
 	parts := strings.Split(env.Str("HUB_SHARD_PEERS", ""), ",")
 	if len(parts) != total {
 		logger.Errorf("HUB_SHARD_PEERS must list %d urls (got %d); sharding disabled", total, len(parts))
-		return nil
+		return nil, nil
 	}
 
+	tr := shardTransport()
 	sr := &shardRouter{
 		index:   index,
 		total:   total,
 		peers:   make([]*url.URL, total),
+		client:  &http.Client{Transport: tr},
 		proxies: make([]*httputil.ReverseProxy, total),
 	}
 	for i, p := range parts {
 		u, err := url.Parse(strings.TrimSpace(p))
 		if err != nil || u.Host == "" || u.Scheme == "" {
 			logger.Errorf("HUB_SHARD_PEERS[%d]=%q invalid; sharding disabled", i, p)
-			return nil
+			return nil, nil
 		}
 		sr.peers[i] = u
 		if i != index {
-			sr.proxies[i] = httputil.NewSingleHostReverseProxy(u)
+			rp := httputil.NewSingleHostReverseProxy(u)
+			rp.Transport = tr
+			sr.proxies[i] = rp
 		}
 	}
-	sr.fwdSecret = strings.TrimSpace(env.Str("HUB_SHARD_FWD_SECRET", ""))
-	if sr.fwdSecret == "" {
-		logger.Warnf("HUB_SHARD_FWD_SECRET unset: the X-Hub-Shard-Fwd loop/fallback marker is forgeable by external clients (can misroute their own writes or suppress the read fallback). Set a shared secret across all shards.")
-	}
+	sr.fwdSecret = secret
 	logger.Infof("owner sharding enabled: index=%d/%d peers=%v", index, total, parts)
-	return sr
+	return sr, nil
 }
 
-// markForwarded stamps the forwarded-once marker on a request about to be
-// reverse-proxied to a peer (the shared secret when configured, else "1").
-func (sr *shardRouter) markForwarded(req *http.Request) {
-	v := sr.fwdSecret
-	if v == "" {
-		v = "1"
+// shardTransport is the peer-to-peer transport for forwarded requests. The
+// default transport has no dial or response-header timeout, so one hung peer
+// would pin every forwarded request (and its client) indefinitely. The header
+// timeout must cover the slowest forwarded handler — a seal encodes, stages and
+// waits for its AddPiece (HUB_SEAL_CHAIN_TIMEOUT_SEC) before answering — so it
+// defaults to 5 min (HUB_SHARD_PROXY_HEADER_TIMEOUT_SEC). Bodies stream with no
+// overall deadline (large reads), bounded by the client's own connection.
+func shardTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: nil, // peers are addressed directly, never via an env proxy
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: time.Duration(env.Int("HUB_SHARD_PROXY_HEADER_TIMEOUT_SEC", 300)) * time.Second,
+		ExpectContinueTimeout: time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   32,
+		ForceAttemptHTTP2:     true,
 	}
-	req.Header.Set(shardFwdHeader, v)
+}
+
+// markForwarded stamps the forwarded-once marker (the shared secret) on a
+// request about to be reverse-proxied to a peer.
+func (sr *shardRouter) markForwarded(req *http.Request) {
+	req.Header.Set(shardFwdHeader, sr.fwdSecret)
 }
 
 // isForwarded reports whether this request was already forwarded once by a peer.
-// With a secret configured the marker must match it (constant-time) — a forged
-// or absent header is treated as not-forwarded, so the request routes normally.
-// Without a secret, any non-empty value counts (legacy, forgeable).
+// The marker must match the shared secret (constant-time) — a forged or absent
+// header is treated as not-forwarded, so the request routes normally.
 func (sr *shardRouter) isForwarded(c *gin.Context) bool {
 	got := c.GetHeader(shardFwdHeader)
-	if got == "" {
+	if got == "" || sr.fwdSecret == "" {
 		return false
-	}
-	if sr.fwdSecret == "" {
-		return true
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(sr.fwdSecret)) == 1
 }
