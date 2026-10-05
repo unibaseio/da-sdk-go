@@ -95,13 +95,17 @@ func TestKeysCannotLeaveBaseDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"", ".", "..", "DsFile/..", "/"} {
+	// names ending in ".." pick their shard directory from those dots
+	for _, k := range []string{"", ".", "..", "DsFile/..", "/", "DsFile/ab..", "DsFile/x..", "a.."} {
 		if err := sf.Put([]byte(k), []byte("x")); err == nil {
 			t.Errorf("Put(%q) accepted", k)
 		}
 		if _, err := sf.Get([]byte(k)); err == nil {
 			t.Errorf("Get(%q) accepted", k)
 		}
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(sf.basedir)); len(entries) != 1 {
+		t.Errorf("directories created next to the store: %v", entries)
 	}
 	if _, err := sf.Get([]byte("abcd1234"), -1, 4); err == nil {
 		t.Error("negative range accepted")

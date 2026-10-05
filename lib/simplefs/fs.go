@@ -87,8 +87,9 @@ func (sf *SimpleFs) walk(baseDir string) {
 var errBadKey = errors.New("simplefs: key has no usable file name")
 
 // getPath maps a key to its file: the key's last path element, sharded by its
-// last 4 characters. A key whose last element could leave the base directory
-// ("", ".", "..") is refused.
+// last 4 characters. A key whose file would land outside the base directory
+// is refused: besides "." and "..", the shard directories come from the
+// name's own characters, so a name ending in ".." would climb out of it.
 func (sf *SimpleFs) getPath(key []byte) (string, error) {
 	pbase := path.Base(string(key))
 	if pbase == "." || pbase == ".." || pbase == "/" || strings.ContainsRune(pbase, 0) {
@@ -104,9 +105,13 @@ func (sf *SimpleFs) getPath(key []byte) (string, error) {
 		}
 	}
 	dir = path.Join(sf.basedir, dir)
+	fn := path.Join(dir, pbase)
+	if rel, err := filepath.Rel(sf.basedir, fn); err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", errBadKey
+	}
 
 	os.MkdirAll(dir, 0755)
-	return path.Join(dir, pbase), nil
+	return fn, nil
 }
 
 func (sf *SimpleFs) Put(key, val []byte) error {
