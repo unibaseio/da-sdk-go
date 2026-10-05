@@ -131,7 +131,8 @@ func maxBodyV1() gin.HandlerFunc {
 // mirroring the /api group split; same Server/gdb/logfs underneath.
 func (s *Server) registV1() {
 	pub := s.Router.Group("/v1")
-	pub.Use(RateLimit())
+	// public reads carry no signer at middleware time: per-IP tier only
+	pub.Use(IPRateLimit())
 	pub.GET("/info", s.v1Info)
 	pub.GET("/buckets", s.v1ListBuckets)
 	pub.GET("/buckets/:bucket", s.v1GetBucket)
@@ -150,11 +151,14 @@ func (s *Server) registV1() {
 
 	w := s.Router.Group("/v1")
 	w.Use(maxBodyV1())
+	// per-IP limit BEFORE signature verification (the expensive step), per-owner
+	// limit after it (needs the recovered signer)
+	w.Use(IPRateLimit())
 	w.Use(AuthMiddleware())
 	// P4-Route: after auth (owner = signer), forward a non-home owner's write to
 	// its shard. No-op unless HUB_SHARD_TOTAL>1. Reads are never sharded.
 	w.Use(s.shardWrite())
-	w.Use(RateLimit())
+	w.Use(OwnerRateLimit())
 	if s.readonly {
 		reject := func(c *gin.Context) {
 			c.JSON(http.StatusServiceUnavailable, lerror.ToAPIError("hub", fmt.Errorf("this node is read-only; route writes to the primary")))

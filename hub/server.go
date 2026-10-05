@@ -14,10 +14,10 @@ import (
 	"github.com/unibaseio/da-sdk-go/docs"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/log"
-	"github.com/unibaseio/da-sdk-go/lib/s3vol"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
 	"github.com/unibaseio/da-sdk-go/lib/piece"
 	"github.com/unibaseio/da-sdk-go/lib/repo"
+	"github.com/unibaseio/da-sdk-go/lib/s3vol"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/lib/utils"
 	"github.com/unibaseio/da-sdk-go/sdk"
@@ -150,6 +150,11 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	// can contain "/"). Match on the raw path, decode the param value back.
 	router.UseRawPath = true
 	router.UnescapePathValues = true
+	// client IP for the per-IP limiter: honor X-Forwarded-For only from trusted
+	// proxies (HUB_TRUSTED_PROXIES, default private+loopback — see ratelimit.go)
+	if err := configureClientIP(router); err != nil {
+		return nil, err
+	}
 
 	auth, err := rp.Key().BuildAuth([]byte("hub"))
 	if err != nil {
