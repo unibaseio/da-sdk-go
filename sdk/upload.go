@@ -21,7 +21,6 @@ import (
 	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 
-	darchive "github.com/docker/docker/pkg/archive"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/mitchellh/go-homedir"
 	"github.com/schollz/progressbar/v3"
@@ -243,7 +242,7 @@ func writeUploadBody(mw *multipart.Writer, p string, policy types.Policy, bar *p
 	}
 	var src io.ReadCloser
 	if fi.IsDir() {
-		src, err = darchive.Tar(p, darchive.Gzip)
+		src, err = archive.TarGz(p)
 	} else {
 		src, err = os.Open(p)
 	}
