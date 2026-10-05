@@ -414,14 +414,14 @@ func checkTx(endPoint string, txHash common.Hash) error {
 		for _, elog := range receipt.Logs {
 			log.Printf("Log: %v\n", elog) // 打印日志信息
 		}
+		tx, terr := GetTransaction(endPoint, txHash)
+		if terr == nil && receipt.GasUsed >= tx.Gas() {
+			return fmt.Errorf("%s ran out of gas (used all %d)", txHash, tx.Gas())
+		}
 		err = AnalyzeTransactionFailure(endPoint, txHash)
 		if err != nil {
 			Logger.Warn("tx revert: ", err)
 			return err
-		}
-
-		if receipt.GasUsed != receipt.CumulativeGasUsed {
-			return fmt.Errorf("%s transaction exceed gas limit", txHash)
 		}
 		return fmt.Errorf("%s transaction mined but execution failed, check your input", txHash)
 	}
@@ -454,54 +454,38 @@ func AnalyzeTransactionFailure(endPoint string, txHash common.Hash) error {
 		return fmt.Errorf("failed to get transaction receipt: %v", err)
 	}
 
-	// 获取失败的合约调用信息
+	// replay the call as its sender on the state it ran against (the parent
+	// block; earlier txs of the same block are not replayed)
 	callMsg := ethereum.CallMsg{
-		From:     getFrom(tx),
-		To:       tx.To(),
-		Gas:      tx.Gas(),
-		GasPrice: tx.GasPrice(),
-		Value:    tx.Value(),
-		Data:     tx.Data(),
+		From:  getFrom(tx),
+		To:    tx.To(),
+		Gas:   tx.Gas(),
+		Value: tx.Value(),
+		Data:  tx.Data(),
+	}
+	if tx.Type() == types.LegacyTxType || tx.Type() == types.AccessListTxType {
+		callMsg.GasPrice = tx.GasPrice()
+	} else {
+		callMsg.GasFeeCap = tx.GasFeeCap()
+		callMsg.GasTipCap = tx.GasTipCap()
+	}
+	at := receipt.BlockNumber
+	if at != nil && at.Sign() > 0 {
+		at = new(big.Int).Sub(at, big.NewInt(1))
 	}
 
-	_, err = client.CallContract(ctx, callMsg, receipt.BlockNumber)
+	_, err = client.CallContract(ctx, callMsg, at)
 	return err
 }
 
+// getFrom recovers a tx's sender for every tx type (legacy, EIP-155,
+// access-list, EIP-1559); the zero address if it cannot.
 func getFrom(tx *types.Transaction) common.Address {
-	getSigner := func(trans *types.Transaction) types.Signer {
-		v, _, _ := trans.RawSignatureValues()
-		var isProtectedV bool
-		for loop := true; loop; loop = false {
-			if v.BitLen() <= 8 {
-				vv := v.Uint64()
-				isProtectedV = vv != 27 && vv != 28
-				break
-			}
-			isProtectedV = true
-		}
-		if v.Sign() != 0 && isProtectedV {
-			var chainId *big.Int
-			for loop := true; loop; loop = false {
-				if v.BitLen() <= 64 {
-					vv := v.Uint64()
-					if vv == 27 || vv == 28 {
-						chainId = new(big.Int)
-						break
-					}
-					chainId = new(big.Int).SetUint64((vv - 35) / 2)
-					break
-				}
-				nv := new(big.Int).Sub(v, big.NewInt(35))
-				chainId = nv.Div(nv, big.NewInt(2))
-			}
-			return types.NewEIP155Signer(chainId)
-		} else {
-			return types.HomesteadSigner{}
-		}
+	id := tx.ChainId()
+	if id != nil && id.Sign() == 0 {
+		id = nil // unprotected legacy tx
 	}
-	signer := getSigner(tx)
-	from, err := types.Sender(signer, tx)
+	from, err := types.Sender(types.LatestSignerForChainID(id), tx)
 	if err != nil {
 		return common.Address{}
 	}
