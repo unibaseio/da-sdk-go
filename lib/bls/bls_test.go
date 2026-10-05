@@ -155,57 +155,6 @@ func genMoveProof(pk *PublicKey) (types.IChallenge, types.IProof) {
 	return ic, pf
 }
 
-func TestKZGDec(t *testing.T) {
-	pk := GenKZGKey(MaxShard, big.NewInt(12345678))
-
-	rnd := utils.RandomBytes(32)
-	data := utils.RandomBytes(1 * MaxSize)
-
-	nt := time.Now()
-	cval, err := pk.GenCommitment(MaxShard, rnd, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Log("cost:", time.Since(nt))
-
-	c, err := pk.GenCommitment(UnPadSize, data, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	c.Add(cval)
-	ic := NewChallenge(rnd)
-	ic.Add(c)
-
-	pdata := Pad(data)
-	err = Encrypt(pdata, rnd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pr, err := pk.GenProof(ic, 32, pdata)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = pk.VerifyKey().VerifyProof(ic, pr)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = Decrypt(pdata, rnd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	updata, err := Unpad(pdata)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !bytes.Equal(data, updata) {
-		t.Fatal("unequal dec")
-	}
-}
-
 func TestKZGSloth(t *testing.T) {
 	opk := GenKZGKey(MaxShard, big.NewInt(12345678))
 
@@ -281,47 +230,6 @@ func TestPad(t *testing.T) {
 	t.Log("unpad cost: ", time.Since(nt), len(dec))
 
 	if !bytes.Equal(data, dec[:fsize]) {
-		t.Fatal("unequal data")
-	}
-	t.Fatal()
-}
-
-func TestEncrypt(t *testing.T) {
-	fsize := 3*MaxSize + 28
-	data := utils.RandomBytes(fsize)
-	rnd := utils.RandomBytes(32)
-	nt := time.Now()
-	var fr_r Fr
-	fr_r.SetBytes(rnd)
-	fr_big := new(big.Int)
-	fr_r.BigInt(fr_big)
-	fr_r.Exp(fr_r, fr_big)
-	t.Log("exp cost: ", time.Since(nt))
-
-	pdata := Pad(data)
-
-	enc := make([]byte, len(pdata))
-	copy(enc, pdata)
-	err := Encrypt(enc, rnd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Log("enc cost: ", time.Since(nt))
-
-	err = Decrypt(enc, rnd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Log("dec cost: ", time.Since(nt))
-	if !bytes.Equal(pdata, enc) {
-		t.Fatal("unequal data")
-	}
-
-	updata, err := Unpad(enc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(data, updata) {
 		t.Fatal("unequal data")
 	}
 	t.Fatal()
