@@ -315,12 +315,12 @@ func (s *Server) logFSRead(addr string, key string, w io.Writer) (int64, string,
 // key in any bucket wins. When the key's meta still points at this row (the
 // usual case) the read is hash-checked through it.
 func (s *Server) logFSReadAt(owner, key string, file, start, size uint64, w io.Writer) (int64, error) {
-	ck := fmt.Sprintf("@%d/%d/%d", file, start, size) // location, not key
+	ck := locKey(file, start, size) // location, not key
 	if wbytes, ok := s.readCache.get(owner, ck); ok {
 		n, err := w.Write(wbytes)
 		return int64(n), err
 	}
-	fs, err := s.getFS(owner, false)
+	fs, err := s.readFS(owner)
 	if err != nil {
 		return 0, err
 	}
@@ -336,6 +336,12 @@ func (s *Server) logFSReadAt(owner, key string, file, start, size uint64, w io.W
 	s.readCache.put(owner, ck, wbytes)
 	n, err := w.Write(wbytes)
 	return int64(n), err
+}
+
+// locKey is the read-cache name of an object by its location in the owner's
+// LogFS (volume, start, size) — unique per owner, unlike the key.
+func locKey(file, start, size uint64) string {
+	return fmt.Sprintf("@%d/%d/%d", file, start, size)
 }
 
 func (s *Server) logFSReadOne(addr string, key string, w io.Writer) (int64, error) {

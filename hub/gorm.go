@@ -950,11 +950,10 @@ func (s *Server) getConversation(ctx context.Context, conversation, addr, bucket
 	conversations := make([]string, 0, len(needles))
 	for _, needle := range needles {
 		var w bytes.Buffer
-		// by the row's own location (the same key may exist in another bucket);
-		// the by-name path stays as the fallback for remote-only data
+		// by the row's own location (the same key may exist in another bucket)
 		if _, err := s.logFSReadAt(needle.Owner, needle.Name, needle.File, needle.Start, needle.Size, &w); err != nil {
 			w.Reset()
-			if _, err := s.download(ctx, needle.Name, needle.Owner, &w); err != nil {
+			if err := s.readNeedleFallback(ctx, needle, &w); err != nil {
 				continue
 			}
 		}

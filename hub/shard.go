@@ -44,6 +44,10 @@ type shardRouter struct {
 	// forge the header to misroute its own writes or suppress the read
 	// fallback.
 	fwdSecret string
+
+	// client fetches single objects from a peer (conversation read fallback);
+	// same transport as the proxies.
+	client *http.Client
 }
 
 // shardFwdHeader marks a request already forwarded once by a shard peer. The
@@ -87,6 +91,7 @@ func newShardRouter() (*shardRouter, error) {
 		index:   index,
 		total:   total,
 		peers:   make([]*url.URL, total),
+		client:  &http.Client{Transport: tr},
 		proxies: make([]*httputil.ReverseProxy, total),
 	}
 	for i, p := range parts {
