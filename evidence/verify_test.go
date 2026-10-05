@@ -111,6 +111,19 @@ func TestVerifyHealthy(t *testing.T) {
 	if r.PieceIndex != 7 || r.N != 6 || r.K != 4 {
 		t.Fatalf("piece details wrong: %+v", r)
 	}
+	// without --trustless nothing ties the piece to the content: say so
+	if r.PieceBound || !hasNote(r, NotPieceBoundNote) {
+		t.Fatalf("non-trustless result must not claim the piece holds the content: %+v", r)
+	}
+}
+
+func hasNote(r Result, note string) bool {
+	for _, n := range r.Notes {
+		if n == note {
+			return true
+		}
+	}
+	return false
 }
 
 func TestVerifyTamperedContent(t *testing.T) {
@@ -210,12 +223,18 @@ func TestVerifyTrustless(t *testing.T) {
 	if r.Trustless == nil || !r.Trustless.OK {
 		t.Fatalf("rebuilt piece holds the evidence at range: %+v", r.Trustless)
 	}
+	if !r.PieceBound || hasNote(r, NotPieceBoundNote) {
+		t.Fatalf("trustless pass binds the piece: %+v", r)
+	}
 
 	// the hub served the right bytes, but the piece on store nodes differs
 	bad := make([]byte, 8192)
 	r, _ = Verify(objURL(srv.URL), keccakHex(content), healthyChain(), Options{FetchPiece: func(string) ([]byte, error) { return bad, nil }})
 	if r.Trustless == nil || r.Trustless.OK {
 		t.Fatalf("mismatching piece must fail the trustless check: %+v", r.Trustless)
+	}
+	if r.PieceBound {
+		t.Fatal("failed trustless check reported as piece-bound")
 	}
 
 	// range past the end of the piece is reported, not a panic

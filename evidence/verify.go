@@ -103,8 +103,18 @@ type Result struct {
 	LiveReplicas int             `json:"liveReplicas"`
 	Available    bool            `json:"available"`
 	Trustless    *TrustlessCheck `json:"trustless,omitempty"`
-	Notes        []string        `json:"notes,omitempty"`
+	// PieceBound is true only when the content was found at its range in the
+	// piece rebuilt from store nodes (Options.FetchPiece / --trustless). When
+	// false, ContentOK is about the bytes the URI served and Registered /
+	// Available are about the piece the hub named for them: nothing checked
+	// that this piece actually holds this content.
+	PieceBound bool     `json:"pieceBound"`
+	Notes      []string `json:"notes,omitempty"`
 }
+
+// NotPieceBoundNote is added to Result.Notes when a committed object's
+// content was not checked against its piece.
+const NotPieceBoundNote = "content not verified against the piece: the hub reported which piece holds it; use --trustless (Options.FetchPiece) to rebuild the piece from store nodes and check"
 
 // Options tunes Verify. The zero value is usable.
 type Options struct {
@@ -124,7 +134,19 @@ var hubObjectPath = regexp.MustCompile(`^/v1/buckets/[^/]+/objects/[^/]+$`)
 // (expectedHash, 0x-hex). It returns an error only when the evidence cannot be
 // fetched or the hub answers unexpectedly; failed checks are reported in the
 // Result, not as errors.
+//
+// Without opt.FetchPiece the piece checks are about the piece the hub names
+// for the object, not proven to hold it; Result.PieceBound says which.
 func Verify(uri, expectedHash string, chain Chain, opt Options) (Result, error) {
+	res, err := verify(uri, expectedHash, chain, opt)
+	res.PieceBound = res.Trustless != nil && res.Trustless.OK
+	if res.Committed && !res.PieceBound && res.Trustless == nil {
+		res.Notes = append(res.Notes, NotPieceBoundNote)
+	}
+	return res, err
+}
+
+func verify(uri, expectedHash string, chain Chain, opt Options) (Result, error) {
 	res := Result{URI: uri}
 	want, err := normHash(expectedHash)
 	if err != nil {

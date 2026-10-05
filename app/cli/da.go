@@ -132,8 +132,13 @@ func printEvidence(r evidence.Result) {
 	}
 	if r.Trustless != nil {
 		fmt.Printf("trustless  %s rebuilt from store nodes, keccak256 %s\n", mark(r.Trustless.OK), r.Trustless.Hash)
+	} else if r.Committed {
+		fmt.Println("binding    ? piece NOT checked to hold this content (hub-reported); rerun with --trustless")
 	}
 	for _, n := range r.Notes {
+		if n == evidence.NotPieceBoundNote {
+			continue // shown as the binding line
+		}
 		fmt.Printf("note       %s\n", n)
 	}
 }
