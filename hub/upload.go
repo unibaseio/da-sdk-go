@@ -41,13 +41,14 @@ func (s *Server) logFSWriteEx(addr string, bucket string, key string, kind strin
 	return s.logFSWriteData(addr, bucket, key, kind, large, rbytes)
 }
 
-// readAllSized reads r to EOF into a buffer preallocated from a known size
-// (Content-Length, multipart part size; <=0 = unknown), so a large body is not
-// re-copied while the buffer grows. size is only a hint: a short or long read
-// is still read exactly. The preallocation is capped at the multipart body cap.
 // maxPrealloc bounds readAllSized's up-front allocation.
 const maxPrealloc = 1 << 20
 
+// readAllSized reads r to EOF into a buffer preallocated from a size hint
+// (Content-Length, multipart part size; <=0 = unknown), so a body is not
+// re-copied while the buffer grows. size is only a hint: a short or long read
+// is still read exactly. At most maxPrealloc is allocated up front; a larger
+// body grows as its bytes arrive.
 func readAllSized(r io.Reader, size int64) ([]byte, error) {
 	if size <= 0 {
 		return io.ReadAll(r)

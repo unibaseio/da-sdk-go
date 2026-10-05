@@ -380,8 +380,8 @@ func (s *Server) v1PutObject(c *gin.Context) {
 	if c.Request.ContentLength > 0 && !s.chargeWrite(c, c.Request.ContentLength) {
 		return
 	}
-	// one copy of the body: read into a buffer sized from Content-Length and
-	// hand that slice to LogFS (it used to be copied twice more on the way)
+	// one copy of the body: read it (preallocating from Content-Length up to
+	// maxPrealloc) and hand that slice to LogFS (it used to be copied twice more)
 	data, err := readAllSized(c.Request.Body, c.Request.ContentLength)
 	if err != nil {
 		c.JSON(599, lerror.ToAPIError("hub", err))
