@@ -126,53 +126,23 @@ func UploadData(baseUrl string, auth types.Auth, policy types.Policy, filePath s
 
 	bar := progressbar.DefaultBytes(-1, "upload:")
 
+	// The body is streamed from a goroutine. Any failure there (stat, open,
+	// tar, read) aborts the request through CloseWithError and is returned —
+	// it used to end the body early, so the stream encoded a truncated file
+	// and the upload reported success. The bytes sent are hashed so the
+	// stream's receipt can be checked against them.
+	sent := sha256.New()
+	var sentN int64
 	ipr, ipw := io.Pipe()
 	mwriter := multipart.NewWriter(ipw)
+	done := make(chan error, 1)
 	go func() {
-		defer ipw.Close()
-		defer mwriter.Close()
-
-		err = mwriter.WriteField("rsn", strconv.Itoa(int(policy.N)))
-		if err != nil {
-			return
+		err := writeUploadBody(mwriter, p, policy, bar, sent, &sentN)
+		if err == nil {
+			err = mwriter.Close()
 		}
-
-		err = mwriter.WriteField("rsk", strconv.Itoa(int(policy.K)))
-		if err != nil {
-			return
-		}
-
-		part, err := mwriter.CreateFormFile("file", p)
-		if err != nil {
-			return
-		}
-
-		fi, err := os.Stat(p)
-		if err != nil {
-			return
-		}
-
-		if fi.IsDir() {
-			pf, err := darchive.Tar(p, darchive.Gzip)
-			if err != nil {
-				return
-			}
-			defer pf.Close()
-
-			pr := progressbar.NewReader(pf, bar)
-
-			io.Copy(part, &pr)
-		} else {
-			pf, err := os.Open(p)
-			if err != nil {
-				return
-			}
-			defer pf.Close()
-
-			pr := progressbar.NewReader(pf, bar)
-
-			io.Copy(part, &pr)
-		}
+		ipw.CloseWithError(err) // nil → EOF
+		done <- err
 	}()
 
 	haddr := baseUrl + "/v1/upload"
@@ -210,17 +180,26 @@ func UploadData(baseUrl string, auth types.Auth, policy types.Policy, filePath s
 
 	resp, err := defaultHTTPClient.Do(hreq)
 	if err != nil {
+		ipr.CloseWithError(err)
+		if berr := <-done; berr != nil && berr != io.ErrClosedPipe {
+			return res, fmt.Errorf("upload %s: %w", filePath, berr)
+		}
 		return res, err
 	}
 	defer resp.Body.Close()
 
 	resByte, err := io.ReadAll(resp.Body)
+	ipr.CloseWithError(io.ErrClosedPipe) // unblock the writer if the server answered early
+	berr := <-done
 	if err != nil {
 		return res, err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return res, fmt.Errorf("response: %s, msg: %s", resp.Status, resByte)
+	}
+	if berr != nil {
+		return res, fmt.Errorf("upload %s: %w", filePath, berr)
 	}
 
 	err = json.Unmarshal(resByte, &res)
@@ -230,7 +209,53 @@ func UploadData(baseUrl string, auth types.Auth, policy types.Policy, filePath s
 
 	bar.Finish()
 
+	// the stream's answer must describe exactly the bytes sent, encoded under
+	// the requested policy
+	if err := CheckFileFullShape(res, policy); err != nil {
+		return res, fmt.Errorf("stream answer: %w", err)
+	}
+	if res.Size != sentN {
+		return res, fmt.Errorf("stream answer: size %d, sent %d bytes", res.Size, sentN)
+	}
+	if got := hex.EncodeToString(sent.Sum(nil)); !strings.EqualFold(res.Hash, got) {
+		return res, fmt.Errorf("stream answer: hash %s, sent data hashes to %s", res.Hash, got)
+	}
+
 	return res, nil
+}
+
+// writeUploadBody writes the multipart upload form for the file or directory
+// (as tar.gz) at p, hashing and counting the file bytes into sent / n.
+func writeUploadBody(mw *multipart.Writer, p string, policy types.Policy, bar *progressbar.ProgressBar, sent io.Writer, n *int64) error {
+	if err := mw.WriteField("rsn", strconv.Itoa(int(policy.N))); err != nil {
+		return err
+	}
+	if err := mw.WriteField("rsk", strconv.Itoa(int(policy.K))); err != nil {
+		return err
+	}
+	part, err := mw.CreateFormFile("file", p)
+	if err != nil {
+		return err
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return err
+	}
+	var src io.ReadCloser
+	if fi.IsDir() {
+		src, err = darchive.Tar(p, darchive.Gzip)
+	} else {
+		src, err = os.Open(p)
+	}
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	pr := progressbar.NewReader(src, bar)
+	c, err := io.Copy(io.MultiWriter(part, sent), &pr)
+	*n = c
+	return err
 }
 
 func walk(baseDir, curdir string) (map[string]string, uint64, error) {
