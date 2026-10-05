@@ -3,16 +3,11 @@ package utils
 import (
 	"crypto/ecdsa"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"math/big"
-	mrand "math/rand"
-	"net"
 	"os/exec"
+	"runtime"
 	"strconv"
-	"strings"
-	"time"
 
 	"github.com/unibaseio/da-sdk-go/lib/types"
 
@@ -32,15 +27,6 @@ func ECDSAToAddr(sk *ecdsa.PrivateKey) common.Address {
 	}
 
 	return crypto.PubkeyToAddress(*publicKeyECDSA)
-}
-
-func HexToAddr(sk string) common.Address {
-	privateKey, err := crypto.HexToECDSA(sk)
-	if err != nil {
-		return common.Address{}
-	}
-
-	return ECDSAToAddr(privateKey)
 }
 
 func ToEthAddress(pubkey []byte) []byte {
@@ -70,11 +56,6 @@ func GetDiskStatus(path string) (types.DiskStats, error) {
 	return m, nil
 }
 
-func DataToName(d []byte) string {
-	dsum := sha256.Sum256(d)
-	return hex.EncodeToString(dsum[:])
-}
-
 func HexToAddress(addr string) common.Address {
 	return common.HexToAddress(addr)
 }
@@ -84,60 +65,6 @@ func RandomBytes(length int) []byte {
 	rand.Read(randomBytes)
 
 	return randomBytes
-}
-
-func ShuffleString(array []string) {
-	var temp string
-	r := mrand.New(mrand.NewSource(time.Now().UnixNano()))
-	for i := len(array) - 1; i >= 0; i-- {
-		num := r.Intn(i + 1)
-		temp = array[i]
-		array[i] = array[num]
-		array[num] = temp
-	}
-}
-
-func LocalIp() string {
-	address, _ := net.InterfaceAddrs()
-	var ip = "localhost"
-	for _, address := range address {
-		if ipAddress, ok := address.(*net.IPNet); ok && !ipAddress.IP.IsLoopback() {
-			if ipAddress.IP.To4() != nil {
-				ip = ipAddress.IP.String()
-			}
-		}
-	}
-	return ip
-}
-
-func Disorder(array []interface{}) {
-	var temp interface{}
-	r := mrand.New(mrand.NewSource(time.Now().UnixNano()))
-	for i := len(array) - 1; i >= 0; i-- {
-		num := r.Intn(i + 1)
-		temp = array[i]
-		array[i] = array[num]
-		array[num] = temp
-	}
-}
-
-func GetGPUInfo(id string) (types.GPUCore, error) {
-	res := types.GPUCore{}
-	cmd := exec.Command("nvidia-smi", "--query-gpu=name,uuid,memory.total", "--format=csv,noheader", "--id="+id)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return res, err
-	}
-
-	outs := strings.Trim(string(out), "\n")
-	slice := strings.Split(outs, ", ")
-	if len(slice) != 3 {
-		return res, fmt.Errorf("wrong gpu detail")
-	}
-	res.Type = slice[0]
-	res.Name = slice[1]
-	res.Memory = slice[2]
-	return res, nil
 }
 
 const (
@@ -196,4 +123,15 @@ func GetHardwareInfo() types.HardwareInfo {
 		res.Memory = FormatBytes(int64(vms.Total))
 	}
 	return res
+}
+
+func KillProcess(pid string) error {
+	switch runtime.GOOS {
+	case "linux":
+		return exec.Command("kill", "-15", pid).Run()
+	case "windows":
+		return exec.Command("taskkill", "/F", "/T", "/PID", pid).Run()
+	default:
+		return fmt.Errorf("unsupported platform %s", runtime.GOOS)
+	}
 }
