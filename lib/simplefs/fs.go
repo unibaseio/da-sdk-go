@@ -3,6 +3,7 @@ package simplefs
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -68,7 +69,9 @@ func (sf *SimpleFs) walk(baseDir string) {
 		}
 
 		if strings.HasSuffix(fi.Name(), ".tmp") {
-			os.Remove(fi.Name())
+			// a write interrupted before its rename; the name is relative to
+			// this directory, not to the process's working directory
+			os.Remove(path.Join(baseDir, fi.Name()))
 			continue
 		}
 
@@ -81,8 +84,16 @@ func (sf *SimpleFs) walk(baseDir string) {
 	}
 }
 
-func (sf *SimpleFs) getPath(key []byte) string {
+var errBadKey = errors.New("simplefs: key has no usable file name")
+
+// getPath maps a key to its file: the key's last path element, sharded by its
+// last 4 characters. A key whose last element could leave the base directory
+// ("", ".", "..") is refused.
+func (sf *SimpleFs) getPath(key []byte) (string, error) {
 	pbase := path.Base(string(key))
+	if pbase == "." || pbase == ".." || pbase == "/" || strings.ContainsRune(pbase, 0) {
+		return "", errBadKey
+	}
 	dir := "mo/ck"
 	plen := len(pbase)
 	if plen >= 2 {
@@ -95,24 +106,21 @@ func (sf *SimpleFs) getPath(key []byte) string {
 	dir = path.Join(sf.basedir, dir)
 
 	os.MkdirAll(dir, 0755)
-	return path.Join(dir, pbase)
+	return path.Join(dir, pbase), nil
 }
 
 func (sf *SimpleFs) Put(key, val []byte) error {
-	fn := sf.getPath(key)
-	info, err := os.Stat(fn)
-	if err == nil && !info.IsDir() {
-		err := os.Remove(fn)
-		if err != nil {
-			return err
-		}
-
-		sf.Lock()
-		sf.size -= info.Size()
-		sf.Unlock()
+	fn, err := sf.getPath(key)
+	if err != nil {
+		return err
+	}
+	var old int64
+	if info, err := os.Stat(fn); err == nil && !info.IsDir() {
+		old = info.Size()
 	}
 
-	// write then rename
+	// write then rename: the rename replaces an existing file atomically, so
+	// a crash never leaves the key without data
 	tmpfn := fn + ".tmp"
 	err = os.WriteFile(tmpfn, val, 0644)
 	if err != nil {
@@ -120,8 +128,13 @@ func (sf *SimpleFs) Put(key, val []byte) error {
 	}
 	err = os.Rename(tmpfn, fn)
 	if err != nil {
+		os.Remove(tmpfn)
 		return err
 	}
+
+	sf.Lock()
+	sf.size -= old
+	sf.Unlock()
 
 	sf.Lock()
 	sf.size += int64(len(val))
@@ -132,11 +145,17 @@ func (sf *SimpleFs) Put(key, val []byte) error {
 }
 
 func (sf *SimpleFs) Get(key []byte, opts ...int) ([]byte, error) {
-	fn := sf.getPath(key)
+	fn, err := sf.getPath(key)
+	if err != nil {
+		return nil, err
+	}
 
 	if len(opts) == 2 {
 		start := opts[0]
 		length := opts[1]
+		if start < 0 || length < 0 {
+			return nil, fmt.Errorf("simplefs: bad range %d+%d", start, length)
+		}
 		osf, err := os.OpenFile(fn, os.O_RDONLY, os.ModePerm)
 		if err != nil {
 			return nil, err
@@ -161,7 +180,10 @@ func (sf *SimpleFs) Get(key []byte, opts ...int) ([]byte, error) {
 }
 
 func (sf *SimpleFs) Has(key []byte) (bool, error) {
-	fn := sf.getPath(key)
+	fn, err := sf.getPath(key)
+	if err != nil {
+		return false, err
+	}
 	info, err := os.Stat(fn)
 	if err != nil || os.IsNotExist(err) {
 		return false, err
@@ -175,7 +197,10 @@ func (sf *SimpleFs) Has(key []byte) (bool, error) {
 }
 
 func (sf *SimpleFs) Delete(key []byte) error {
-	fn := sf.getPath(key)
+	fn, err := sf.getPath(key)
+	if err != nil {
+		return err
+	}
 	fi, err := os.Stat(fn)
 	if err != nil {
 		return err
