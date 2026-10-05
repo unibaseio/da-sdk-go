@@ -3,11 +3,13 @@ package hub
 import (
 	"crypto/subtle"
 	"hash/crc32"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -66,6 +68,7 @@ func newShardRouter() *shardRouter {
 		return nil
 	}
 
+	tr := shardTransport()
 	sr := &shardRouter{
 		index:   index,
 		total:   total,
@@ -80,7 +83,9 @@ func newShardRouter() *shardRouter {
 		}
 		sr.peers[i] = u
 		if i != index {
-			sr.proxies[i] = httputil.NewSingleHostReverseProxy(u)
+			rp := httputil.NewSingleHostReverseProxy(u)
+			rp.Transport = tr
+			sr.proxies[i] = rp
 		}
 	}
 	sr.fwdSecret = strings.TrimSpace(env.Str("HUB_SHARD_FWD_SECRET", ""))
@@ -89,6 +94,29 @@ func newShardRouter() *shardRouter {
 	}
 	logger.Infof("owner sharding enabled: index=%d/%d peers=%v", index, total, parts)
 	return sr
+}
+
+// shardTransport is the peer-to-peer transport for forwarded requests. The
+// default transport has no dial or response-header timeout, so one hung peer
+// would pin every forwarded request (and its client) indefinitely. The header
+// timeout must cover the slowest forwarded handler — a seal encodes, stages and
+// waits for its AddPiece (HUB_SEAL_CHAIN_TIMEOUT_SEC) before answering — so it
+// defaults to 5 min (HUB_SHARD_PROXY_HEADER_TIMEOUT_SEC). Bodies stream with no
+// overall deadline (large reads), bounded by the client's own connection.
+func shardTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: nil, // peers are addressed directly, never via an env proxy
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: time.Duration(env.Int("HUB_SHARD_PROXY_HEADER_TIMEOUT_SEC", 300)) * time.Second,
+		ExpectContinueTimeout: time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   32,
+		ForceAttemptHTTP2:     true,
+	}
 }
 
 // markForwarded stamps the forwarded-once marker on a request about to be

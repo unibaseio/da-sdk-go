@@ -268,10 +268,7 @@ func NewServer(rp repo.Repo) (*Server, error) {
 
 	s.registRoute()
 
-	s.httpServer = &http.Server{
-		Addr:    rp.Config().API.Endpoint,
-		Handler: s.Router,
-	}
+	s.httpServer = newHTTPServer(rp.Config().API.Endpoint, s.Router)
 
 	// Setup signal handler for emergency shutdown
 	s.SetupSignalHandler()
@@ -306,6 +303,41 @@ func (s *Server) registRoute() {
 func (s *Server) isSQLite() bool {
 	return s.gdb != nil && s.gdb.Dialector.Name() == "sqlite"
 
+}
+
+// HTTP server timeouts (env-tunable, seconds; 0 disables one):
+//   - HUB_HTTP_READ_HEADER_TIMEOUT_SEC (10): slowloris guard on the request line and
+//     headers.
+//   - HUB_HTTP_IDLE_TIMEOUT_SEC (120): keep-alive idle; above the ALB's default
+//     60s idle timeout so the ALB, not the hub, closes idle connections (the
+//     other way round yields sporadic 502s).
+//   - HUB_HTTP_READ_TIMEOUT_SEC (600): whole request including the body. Uploads
+//     are capped at HUB_MAX_MULTIPART_BYTES (64 MiB), so 10 min still admits a
+//     ~110 KB/s client.
+//   - HUB_HTTP_WRITE_TIMEOUT_SEC (0 = none): a write deadline would cut off
+//     legitimate long responses — piece downloads up to ~1 GB, seal (encode +
+//     on-chain wait) and ?wait=1 commits — so it stays off by default; those
+//     handlers are bounded by their own contexts and semaphores instead.
+const (
+	defaultHTTPReadHeaderTimeoutSec = 10
+	defaultHTTPIdleTimeoutSec       = 120
+	defaultHTTPReadTimeoutSec       = 600
+	defaultHTTPWriteTimeoutSec      = 0
+)
+
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	sec := func(k string, def int) time.Duration {
+		return time.Duration(env.Int(k, def)) * time.Second
+	}
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: sec("HUB_HTTP_READ_HEADER_TIMEOUT_SEC", defaultHTTPReadHeaderTimeoutSec),
+		ReadTimeout:       sec("HUB_HTTP_READ_TIMEOUT_SEC", defaultHTTPReadTimeoutSec),
+		WriteTimeout:      sec("HUB_HTTP_WRITE_TIMEOUT_SEC", defaultHTTPWriteTimeoutSec),
+		IdleTimeout:       sec("HUB_HTTP_IDLE_TIMEOUT_SEC", defaultHTTPIdleTimeoutSec),
+		MaxHeaderBytes:    1 << 20,
+	}
 }
 
 // ListenAndServe starts the HTTP server
