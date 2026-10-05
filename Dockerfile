@@ -32,6 +32,5 @@ WORKDIR /app
 ENTRYPOINT ["/app/start"]
 COPY --from=server_builder /app/start /app/start
 COPY --from=server_builder /app/hub /app/dimo
-COPY --from=server_builder /opt/dimo/app/hub/assets /app/assets
 #RUN apk add --no-cache --upgrade bc ca-certificates openssl
 #CMD ["--bind", "0.0.0.0:8080"]
