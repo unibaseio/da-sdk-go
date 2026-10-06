@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/key"
@@ -339,18 +340,61 @@ func (s *Server) pieceOfReplica(au types.Auth, rn string) string {
 // of being stuck "staged" forever. Mirrors the path-1 (GetFileReceipt) recovery,
 // but keyed by the piece name from the "already has piece" error. Returns true when
 // the vol is committed (or already on-chain) so the caller advances the offset.
-func (s *Server) recoverStagedPiece(cm *contract.ContractManage, au types.Auth, key string, i uint64, pn string) bool {
+// stagedPieceCore is what the hub registers on chain for a piece it staged
+// earlier, from a stream's receipt for it. Only what the hub can check is
+// kept: the drain's own policy, the piece name it asked for, the stream that
+// holds the piece, and the size of the local volume (a volume, at most 31 MiB,
+// is always a single piece). Price and expiry are left to AddPiece's defaults,
+// exactly as on the normal path: the receipt's would decide the bond the hub
+// locks, and a stream could inflate them (2026-10-06 audit, N10).
+func stagedPieceCore(pr types.PieceReceipt, stream common.Address, pn string, policy types.Policy, volSize int64) (types.PieceCore, error) {
+	switch {
+	case !strings.EqualFold(pr.Name, pn):
+		return types.PieceCore{}, fmt.Errorf("receipt is for piece %s, not %s", pr.Name, pn)
+	case pr.Streamer != stream:
+		return types.PieceCore{}, fmt.Errorf("piece %s is streamed by %s, receipt came from %s", pn, pr.Streamer, stream)
+	case pr.Policy != policy:
+		return types.PieceCore{}, fmt.Errorf("piece %s has policy %d/%d, the drain uses %d/%d", pn, pr.Policy.N, pr.Policy.K, policy.N, policy.K)
+	case volSize <= 0 || pr.Size != volSize:
+		return types.PieceCore{}, fmt.Errorf("piece %s has size %d, the volume is %d bytes", pn, pr.Size, volSize)
+	}
+	return types.PieceCore{Policy: policy, Name: pr.Name, Size: volSize, Streamer: stream}, nil
+}
+
+// trustedStreams lists the streams the hub takes staged-piece receipts from:
+// active on chain and on the hub's chain (anyone can register an edge).
+func (s *Server) trustedStreams(au types.Auth) ([]types.EdgeReceipt, error) {
 	er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
+	if err != nil {
+		return nil, err
+	}
+	chain := s.rp.Repo().Config().Chain.Type
+	out := make([]types.EdgeReceipt, 0, len(er.Edges))
+	for _, st := range er.Edges {
+		if st.OnChain && st.ChainType == chain {
+			out = append(out, st)
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) recoverStagedPiece(cm *contract.ContractManage, au types.Auth, key string, i uint64, pn string, policy types.Policy, volSize int64) bool {
+	streams, err := s.trustedStreams(au)
 	if err != nil {
 		return false
 	}
-	for _, st := range er.Edges {
+	for _, st := range streams {
 		pr, err := sdk.GetPieceReceipt(st.ExposeURL, au, pn)
 		if err != nil || pr.Name == "" {
 			continue
 		}
 		if pr.Serial == 0 {
-			txn, err := cm.AddPiece(pr.PieceCore)
+			pc, err := stagedPieceCore(pr, st.Name, pn, policy, volSize)
+			if err != nil {
+				logger.Warnf("recover staged piece %s: %v", pn, err)
+				continue
+			}
+			txn, err := cm.AddPiece(pc)
 			if err != nil {
 				logger.Warnf("recover staged piece %s: AddPiece failed: %v", pn, err)
 				return false
@@ -418,13 +462,15 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 
 		// only the hub's own record counts: anyone can register a file under
 		// this (predictable) volume name, and trusting it would skip the volume
-		if _, serr := os.Stat(fp); serr != nil {
+		vi, serr := os.Stat(fp)
+		if serr != nil {
 			// volumes the drain has not committed are kept on disk (the
 			// reclaim gate); one missing here predates that gate or was
 			// removed by hand, and nothing below can work without it
 			logger.Errorf("drain %s vol %d: local volume unavailable (%v); restore %s to continue", key, i, serr, fp)
 			break
 		}
+		volSize := vi.Size()
 		fr, err := sdk.GetFileReceiptOf(sdk.ServerURL, fname, au.Addr)
 		if err == nil && !volumeMatches(fp, fr.Hash) {
 			// a record of ours under this name that is not this volume's bytes
@@ -441,24 +487,32 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 				logger.Warnf("new chain type detected, ignore previous one")
 				continue
 			}
-			er, err := sdk.ListEdge(sdk.ServerURL, au, types.StreamType)
+			streams, err := s.trustedStreams(au)
 			if err != nil {
 				break
 			}
 			suc := 0
 			for _, pn := range fr.Pieces {
-				for _, st := range er.Edges {
+				// one registration per piece, from the first stream that holds it
+				for _, st := range streams {
 					pr, err := sdk.GetPieceReceipt(st.ExposeURL, au, pn)
+					if err != nil {
+						continue
+					}
+					if pr.Serial > 0 {
+						suc++
+						break
+					}
+					pc, err := stagedPieceCore(pr, st.Name, pn, policy, volSize)
+					if err != nil {
+						logger.Warnf("%s/%d.vol: %v", key, i, err)
+						continue
+					}
+					txn, err := cm.AddPiece(pc)
 					if err == nil {
-						if pr.Serial > 0 {
-							suc++
-						} else {
-							txn, err := cm.AddPiece(pr.PieceCore)
-							if err == nil {
-								s.addVolume(key, i, pr.Name, txn)
-								suc++
-							}
-						}
+						s.addVolume(key, i, pc.Name, txn)
+						suc++
+						break
 					}
 				}
 			}
@@ -488,7 +542,7 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 					pn = s.pieceOfReplica(au, rn)
 				}
 			}
-			if pn != "" && s.recoverStagedPiece(cm, au, key, i, pn) {
+			if pn != "" && s.recoverStagedPiece(cm, au, key, i, pn, policy, volSize) {
 				buf := make([]byte, 8)
 				binary.BigEndian.PutUint64(buf, i+1)
 				s.rp.MetaStore().Put(dsKey, buf)
