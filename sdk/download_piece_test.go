@@ -155,3 +155,61 @@ func TestDownloadPieceRejectsBadSize(t *testing.T) {
 		}
 	}
 }
+
+// withStreamerFallback makes the gateway know only slots 1..3 (on chain), so
+// DownloadPiece has fewer than K stored replicas and takes the rest of the
+// replica list from the streamer's receipt.
+func withStreamerFallback(n *rsNet) {
+	for _, i := range []int{0, 4, 5} {
+		n.gwRec.Replicas[i], n.gwRec.StoredOn[i] = "", common.Address{}
+	}
+}
+
+func TestDownloadPieceStreamerFallback(t *testing.T) {
+	n := newRSNet(t)
+	n.set(withStreamerFallback)
+	_, data, err := DownloadPiece(n.gw.URL, types.Auth{}, "p")
+	if err != nil || !bytes.Equal(data, n.data) {
+		t.Fatalf("honest streamer: err=%v", err)
+	}
+}
+
+// S4(c): a replica the chain record already names cannot be swapped by the
+// streamer's receipt for one of the streamer's choosing.
+func TestDownloadPieceStreamerCannotRenameOnChainSlot(t *testing.T) {
+	n := newRSNet(t)
+	evil := rsName(40)
+	n.set(func(n *rsNet) {
+		withStreamerFallback(n)
+		n.shards[evil] = bls.Pad(bytes.Repeat([]byte{0x42}, 62))
+		n.stRec.Replicas[1] = evil
+	})
+	_, data, err := DownloadPiece(n.gw.URL, types.Auth{}, "p")
+	if err == nil {
+		t.Fatalf("streamer replaced an on-chain replica (rebuilt piece equal to the original: %v)", bytes.Equal(data, n.data))
+	}
+}
+
+// S4(c): nor list one shard under two slots.
+func TestDownloadPieceStreamerDuplicateName(t *testing.T) {
+	n := newRSNet(t)
+	n.set(func(n *rsNet) {
+		withStreamerFallback(n)
+		n.stRec.Replicas[0] = n.names[1]
+	})
+	if _, _, err := DownloadPiece(n.gw.URL, types.Auth{}, "p"); err == nil {
+		t.Fatal("streamer listed one replica for two slots")
+	}
+}
+
+func TestDownloadPieceStreamerMalformedName(t *testing.T) {
+	n := newRSNet(t)
+	n.set(func(n *rsNet) {
+		withStreamerFallback(n)
+		n.stRec.Replicas[0] = "zz"
+		n.shards["zz"] = n.shards[n.names[0]]
+	})
+	if _, _, err := DownloadPiece(n.gw.URL, types.Auth{}, "p"); err == nil {
+		t.Fatal("streamer named a non-commitment replica")
+	}
+}

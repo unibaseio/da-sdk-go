@@ -41,11 +41,21 @@ func acquireSem(ctx context.Context, sem chan struct{}) (func(), error) {
 }
 
 // downloadPiece returns a committed piece by its DA commitment: from the local
-// piece store, else rebuilt from store nodes (then kept locally). The read (not
-// the response write) holds a pieceSem slot (the endpoint is public and a piece may be ~1 GB), a
-// rebuild also a dlSem slot like other DA reconstructs, and concurrent requests
-// for one piece share a single rebuild. The bytes are returned, not copied into
-// a writer, so a piece is held once per flight.
+// piece store when it holds it, else rebuilt from store nodes. The read (not
+// the response write) holds a pieceSem slot (the endpoint is public and a
+// piece may be ~1 GB), a rebuild also a dlSem slot
+// like other DA reconstructs, and concurrent requests for one piece share a
+// single rebuild.
+//
+// A rebuilt piece is NOT put into the piece store. A bare piece has nothing
+// the hub can check it against (its name is a KZG commitment; checking bytes
+// against it needs the full SRS), so caching it would let one lying store or
+// stream plant bytes that every later reader of the store gets, including
+// file reads (sdk.DownloadOf), which would then fail their hash. Cost: each
+// cold read of a piece the hub has not checked rebuilds it (K replica fetches
+// plus RS repair) instead of hitting local disk. That is bounded by pieceSem,
+// dlSem and singleflight, and pieces the hub did check (fetched for a file
+// whose hash matched) are still served from the store.
 func (s *Server) downloadPiece(ctx context.Context, cid string) ([]byte, error) {
 	release, err := acquireSem(ctx, s.pieceSem)
 	if err != nil {
@@ -63,17 +73,11 @@ func (s *Server) downloadPiece(ctx context.Context, cid string) ([]byte, error) 
 			return nil, err
 		}
 		defer release()
-		if _, err := sdk.GetPieceReceipt(build.ServerURL, s.auth, cid); err != nil {
+		_, data, err := sdk.DownloadPiece(build.ServerURL, s.auth, cid)
+		if err != nil {
 			return nil, err
 		}
-		if err := sdk.DownloadPieceAndSave(build.ServerURL, s.auth, cid, s.ps); err != nil {
-			return nil, err
-		}
-		var buf bytes.Buffer
-		if _, err := s.ps.GetPiece(ctx, cid, &buf, types.Options{}); err != nil {
-			return nil, err
-		}
-		return buf.Bytes(), nil
+		return data, nil
 	})
 	if err != nil {
 		return nil, err
