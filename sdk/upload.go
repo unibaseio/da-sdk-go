@@ -115,6 +115,24 @@ func UploadWith(baseUrl string, sign Signer, policy types.Policy, filePath strin
 	return res, common.Address{}, fmt.Errorf("no avail streamer")
 }
 
+// uploadAnswerLimit bounds what UploadData reads of a stream's answer (it
+// used to read without limit, 2026-10-06 audit N11): per piece, one witness —
+// 13.5 KB raw for 64/32, ~18 KB as JSON — and a few names, so 64 KiB each, plus
+// 64 KiB. A directory's tar size is not known up front: 64 MiB.
+func uploadAnswerLimit(p string, policy types.Policy) int64 {
+	const perPiece, base, unknown = 64 << 10, 64 << 10, 64 << 20
+	fi, err := os.Stat(p)
+	max := MaxPieceSize(policy)
+	if err != nil || fi.IsDir() || max <= 0 {
+		return unknown
+	}
+	pieces := int64(1)
+	if fi.Size() > 0 {
+		pieces = 1 + (fi.Size()-1)/max
+	}
+	return base + pieces*perPiece
+}
+
 func UploadData(baseUrl string, auth types.Auth, policy types.Policy, filePath string) (types.FileFull, error) {
 	logger.Debug("upload: ", filePath, " to: ", baseUrl)
 	var res types.FileFull
@@ -187,11 +205,15 @@ func UploadData(baseUrl string, auth types.Auth, policy types.Policy, filePath s
 	}
 	defer resp.Body.Close()
 
-	resByte, err := io.ReadAll(resp.Body)
+	limit := uploadAnswerLimit(p, policy)
+	resByte, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	ipr.CloseWithError(io.ErrClosedPipe) // unblock the writer if the server answered early
 	berr := <-done
 	if err != nil {
 		return res, err
+	}
+	if int64(len(resByte)) > limit {
+		return res, fmt.Errorf("upload %s: the stream's answer exceeds %d bytes", filePath, limit)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

@@ -3,11 +3,14 @@ package hub
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 
+	com "github.com/unibaseio/da-sdk-go/contract/common"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	lerror "github.com/unibaseio/da-sdk-go/lib/error"
 	"github.com/unibaseio/da-sdk-go/sdk"
@@ -60,11 +63,64 @@ func recoverSigner(authStr string, drift int64) (string, error) {
 	}
 
 	// signature + freshness against the timestamp bound into the signature,
-	// and a SIWE message only if it was issued for this hub's domain
-	if err := sdk.VerifyAuthFreshDomains(au, drift, siweDomains()); err != nil {
+	// and a sign-in message only if it is for this hub's chain and (when
+	// HUB_SIWE_DOMAINS is set) issued for, and pointing at, an allowed
+	// domain. Its Nonce is not checked: see sdk.SIWEPolicy (deferred, needs
+	// a client protocol change).
+	if err := sdk.VerifyAuthFreshPolicy(au, drift, sdk.SIWEPolicy{Domains: siweDomains(), ChainIDs: siweChainIDs()}); err != nil {
 		return "", err
 	}
 	return strings.ToLower(au.Addr.Hex()), nil
+}
+
+// hubChainID is the EIP-155 id of the chain this hub is configured for (set
+// by NewServer; 0 = unknown).
+var hubChainID atomic.Int64
+
+// siweChainIDs lists the chains a sign-in message may name: HUB_SIWE_CHAIN_IDS
+// (comma-separated, for frontends whose wallets sign on another chain), else
+// the hub's own chain. An unparsable entry is ignored with a warning; if none
+// is left, the hub's chain applies.
+func siweChainIDs() []int64 {
+	var ids []int64
+	for _, f := range strings.Split(env.Str("HUB_SIWE_CHAIN_IDS", ""), ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(f, 10, 64)
+		if err != nil || id <= 0 {
+			logger.Warnf("HUB_SIWE_CHAIN_IDS: ignoring %q", f)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		if id := hubChainID.Load(); id != 0 {
+			ids = []int64{id}
+		}
+	}
+	return ids
+}
+
+// chainIDOf maps a configured chain type to its EIP-155 id (0 if unknown).
+func chainIDOf(chainType string) int64 {
+	switch chainType {
+	case com.BaseSepolia:
+		return com.BaseSepoliaChainID
+	case com.BaseMainnet:
+		return com.BaseMainnetChainID
+	case com.BSCMainnet:
+		return com.BSCMainnetChainID
+	case com.ETHMainnet:
+		return com.ETHMainnetChainID
+	case com.BNBTestnetV2:
+		return int64(com.BNBTestnetChainID)
+	case com.BNBTestnetDAO:
+		return int64(com.BNBTestnetDAOChainID)
+	case com.LocalAnvil:
+		return int64(com.LocalAnvilChainID)
+	}
+	return 0
 }
 
 // siweDomains lists the domains a SIWE sign-in must be issued for to be

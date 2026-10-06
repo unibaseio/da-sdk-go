@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -394,6 +395,8 @@ var (
 	siweExpRe    = regexp.MustCompile(`(?mi)^Expiration Time:[ \t]*(.+?)[ \t]*$`)
 	siweNbfRe    = regexp.MustCompile(`(?mi)^Not Before:[ \t]*(.+?)[ \t]*$`)
 	siweDomainRe = regexp.MustCompile(`^(\S+) wants you to sign in with your Ethereum account:`)
+	siweChainRe  = regexp.MustCompile(`(?mi)^Chain ID:[ \t]*(.*?)[ \t]*$`)
+	siweURIRe    = regexp.MustCompile(`(?mi)^URI:[ \t]*(.*?)[ \t]*$`)
 )
 
 // siweTime parses an optional RFC3339 field; ok=false when it is absent.
@@ -520,23 +523,102 @@ func VerifySIWE(au types.Auth) (int64, error) {
 }
 
 // VerifyAuthFreshDomains is VerifyAuthFresh that, for a SIWE message, also
-// requires the domain it was issued for to be one of domains. Without this a
-// sign-in message any other site obtained from the user would be accepted
-// here. An empty domains list skips the domain check.
+// requires the domain it was issued for to be one of domains (and its URI to
+// point at one of them). Without this a sign-in message any other site
+// obtained from the user would be accepted here. An empty domains list skips
+// the domain check. See VerifyAuthFreshPolicy for the full set of checks.
 func VerifyAuthFreshDomains(au types.Auth, drift int64, domains []string) error {
+	return VerifyAuthFreshPolicy(au, drift, SIWEPolicy{Domains: domains})
+}
+
+// SIWEPolicy is what a service requires of a sign-in message (au.Msg) on top
+// of a valid signature and a fresh "Issued At".
+type SIWEPolicy struct {
+	// Domains the message must be issued for ("<domain> wants you to sign
+	// in ..."); its "URI:" must then also be an http(s) URI on one of them.
+	// Empty: no domain or URI check (unless RequireDomains).
+	Domains []string
+	// RequireDomains refuses every sign-in message while Domains is empty:
+	// for services that are not signed in to from a website (the DA gateway
+	// and stream) a message bound to no site must not be accepted.
+	RequireDomains bool
+	// ChainIDs, when set, are the chains a message may name: a SIWE message
+	// must carry exactly one "Chain ID:" among them; any other message that
+	// carries one must also match.
+	ChainIDs []int64
+}
+
+// The SIWE "Nonce:" is not checked. A nonce only stops a replay if the
+// service issued it and accepts it once, which needs a challenge endpoint and
+// clients that fetch a nonce before signing: a protocol change for every
+// client, deferred. Until then a captured sign-in can be replayed for as long
+// as its "Issued At" is within the drift window (and its Expiration Time, if
+// any, has not passed).
+
+// VerifyAuthFreshPolicy is VerifyAuthFresh plus policy p for a sign-in
+// message. Envelopes without a message (the binary hash||time formats) are
+// not affected by p.
+func VerifyAuthFreshPolicy(au types.Auth, drift int64, p SIWEPolicy) error {
 	if err := VerifyAuthFresh(au, drift); err != nil {
 		return err
 	}
-	if len(au.Msg) == 0 || len(domains) == 0 {
+	if len(au.Msg) == 0 {
 		return nil
 	}
-	d := siweDomain(au.Msg)
-	for _, want := range domains {
-		if d != "" && d == strings.ToLower(strings.TrimSpace(want)) {
-			return nil
+	if err := checkSIWEPolicy(au.Msg, p); err != nil {
+		return fmt.Errorf("verify auth: %w", err)
+	}
+	return nil
+}
+
+func checkSIWEPolicy(msg string, p SIWEPolicy) error {
+	domains := make([]string, 0, len(p.Domains))
+	for _, d := range p.Domains {
+		if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+			domains = append(domains, d)
 		}
 	}
-	return fmt.Errorf("verify auth: siwe message issued for %q, not for this service", d)
+	if len(domains) == 0 && p.RequireDomains {
+		return fmt.Errorf("sign-in messages are not accepted by this service (no domain allowlist configured)")
+	}
+	domain := siweDomain(msg)
+
+	if len(p.ChainIDs) > 0 {
+		ids := siweChainRe.FindAllStringSubmatch(msg, -1)
+		switch {
+		case len(ids) > 1:
+			return fmt.Errorf("siwe message has %d 'Chain ID' lines", len(ids))
+		case len(ids) == 0 && domain != "":
+			return fmt.Errorf("siwe message has no 'Chain ID'")
+		case len(ids) == 1:
+			id, err := strconv.ParseInt(ids[0][1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("siwe: bad 'Chain ID' %q", ids[0][1])
+			}
+			if !slices.Contains(p.ChainIDs, id) {
+				return fmt.Errorf("siwe message is for chain %d, this service is on %v", id, p.ChainIDs)
+			}
+		}
+	}
+
+	if len(domains) == 0 {
+		return nil
+	}
+	if domain == "" || !slices.Contains(domains, domain) {
+		return fmt.Errorf("siwe message issued for %q, not for this service", domain)
+	}
+	uris := siweURIRe.FindAllStringSubmatch(msg, -1)
+	if len(uris) != 1 {
+		return fmt.Errorf("siwe message has %d 'URI' lines, want 1", len(uris))
+	}
+	u, err := url.Parse(uris[0][1])
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return fmt.Errorf("siwe: bad 'URI' %q", uris[0][1])
+	}
+	if !slices.Contains(domains, strings.ToLower(u.Host)) {
+		return fmt.Errorf("siwe message URI %q is not on an allowed domain", uris[0][1])
+	}
+	return nil
 }
 
 // hash is random byte now
@@ -564,6 +646,12 @@ func BuildAuth(addr, privk string, hash []byte) types.Auth {
 }
 
 func doRequest(ctx context.Context, baseUrl, method, ctype string, au types.Auth, r io.Reader) ([]byte, error) {
+	return doRequestLimit(ctx, baseUrl, method, ctype, au, r, -1)
+}
+
+// doRequestLimit is doRequest reading at most max bytes of the response body
+// (max < 0: unbounded). A longer body is an error.
+func doRequestLimit(ctx context.Context, baseUrl, method, ctype string, au types.Auth, r io.Reader, max int64) ([]byte, error) {
 	haddr := baseUrl + method
 	hreq, err := http.NewRequestWithContext(ctx, "POST", haddr, r)
 	if err != nil {
@@ -611,12 +699,19 @@ func doRequest(ctx context.Context, baseUrl, method, ctype string, au types.Auth
 	}
 	defer resp.Body.Close()
 
-	pr := progressbar.NewReader(resp.Body, bar)
+	var body io.Reader = resp.Body
+	if max >= 0 {
+		body = io.LimitReader(resp.Body, max+1)
+	}
+	pr := progressbar.NewReader(body, bar)
 	res, err := io.ReadAll(&pr)
 	if err != nil {
 		return nil, err
 	}
 	bar.Finish()
+	if max >= 0 && int64(len(res)) > max {
+		return nil, fmt.Errorf("response from %s exceeds %d bytes", haddr, max)
+	}
 
 	// Accept any 2xx — the clean /v1 writes use proper REST codes (POST /v1/files
 	// and /v1/edges return 201 Created), not just 200.

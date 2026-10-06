@@ -44,8 +44,17 @@ func RedactURL(raw string) string {
 	return s
 }
 
-// RegisterURL marks the credential-bearing parts of an endpoint URL (password,
-// path, query) as secrets: from now on they are replaced in all log output.
+// RegisterURL marks the credential-bearing parts of an endpoint URL as secrets:
+// from now on they are replaced in all log output. Registered are
+//   - the userinfo: username and password (providers put the key in either;
+//     net/http masks a password in its errors but not a username),
+//   - token-like host labels (`https://<key>.rpc.example.com`),
+//   - token-like path segments (`/v2/<key>`) — not the whole path, which
+//     would also scrub ordinary routes such as /v1/ethereum/stats,
+//   - the query string.
+//
+// "Token-like" is tokenLike: long, URL-safe, mixing letters and digits. A
+// shorter key, or one of digits only, in a path or host is not caught.
 func RegisterURL(raw string) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -53,13 +62,61 @@ func RegisterURL(raw string) {
 		register(raw)
 		return
 	}
-	if p, ok := u.User.Password(); ok {
-		register(p)
-		register(url.QueryEscape(p))
+	if u.User != nil {
+		name := u.User.Username()
+		register(name)
+		register(url.QueryEscape(name))
+		register(url.PathEscape(name))
+		if p, ok := u.User.Password(); ok {
+			register(p)
+			register(url.QueryEscape(p))
+			register(url.PathEscape(p))
+		}
 	}
-	register(u.EscapedPath())
-	register(u.Path)
+	for _, label := range strings.Split(u.Hostname(), ".") {
+		if tokenLike(label, minHostTokenLen) {
+			register(label)
+		}
+	}
+	for _, path := range []string{u.Path, u.EscapedPath()} {
+		for _, seg := range strings.Split(path, "/") {
+			if tokenLike(seg, minPathTokenLen) {
+				register(seg)
+			}
+		}
+	}
 	register(u.RawQuery)
+}
+
+// The shortest host label / path segment taken for a key. Provider keys are
+// 16+ characters (Alchemy/Infura 32, QuickNode 40, Ankr 64, UUIDs 36). Path
+// segments of an RPC URL are otherwise short version tags, so 16 is safe
+// there; host labels are often long descriptive names, so they need 20.
+const (
+	minPathTokenLen = 16
+	minHostTokenLen = 20
+)
+
+// tokenLike reports whether a host label or path segment looks like an API
+// key: at least min characters of [A-Za-z0-9_-], with both a letter and a
+// digit (so plain words such as "ethereum" or "base-sepolia-rpc" are not).
+func tokenLike(s string, min int) bool {
+	if len(s) < min {
+		return false
+	}
+	letter, digit := false, false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			letter = true
+		case r >= '0' && r <= '9':
+			digit = true
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return letter && digit
 }
 
 func register(s string) {
@@ -80,11 +137,7 @@ func register(s string) {
 	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
 	pairs := make([]string, 0, 2*len(keys))
 	for _, k := range keys {
-		rep := redacted
-		if strings.HasPrefix(k, "/") { // a path keeps its shape
-			rep = "/" + redacted
-		}
-		pairs = append(pairs, k, rep)
+		pairs = append(pairs, k, redacted)
 	}
 	replacer.Store(strings.NewReplacer(pairs...))
 }

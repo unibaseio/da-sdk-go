@@ -107,9 +107,12 @@ func (s *Server) logFSOptions(addr string) []logfs.Option {
 	}
 	opts := []logfs.Option{logfs.WithVolumeBackend(s.volStore.Bind(s.local.String(), addr))}
 	// HUB_BUFFER_LOCAL_TTL (seconds): reclaim local disk for volumes confirmed
-	// uploaded to S3, older than the TTL. 0 (default) = keep local forever.
+	// uploaded to S3, older than the TTL, and committed to DA by the drain
+	// (which reads the local file). 0 (default) = keep local forever.
 	if ttl := env.Int("HUB_BUFFER_LOCAL_TTL", 0); ttl > 0 {
-		opts = append(opts, logfs.WithLocalTTL(time.Duration(ttl)*time.Second))
+		local, ds := s.local.String(), s.rp.MetaStore()
+		opts = append(opts, logfs.WithLocalTTL(time.Duration(ttl)*time.Second),
+			logfs.WithReclaimGate(func(idx uint64) bool { return idx < drainNext(ds, local, addr) }))
 	}
 	return opts
 }

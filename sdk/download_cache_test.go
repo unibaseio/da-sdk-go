@@ -49,6 +49,13 @@ func (m *memPieces) PutPiece(_ context.Context, pc types.PieceCore, b []byte, _ 
 	return nil
 }
 
+func (m *memPieces) DeleteData(_ context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.data, name)
+	return nil
+}
+
 func (m *memPieces) len() int { m.mu.Lock(); defer m.mu.Unlock(); return len(m.data) }
 
 // fakeNet serves a gateway + stream for one file of two pieces. Each piece is
@@ -198,5 +205,64 @@ func TestDownloadPieceAndSaveVerified(t *testing.T) {
 	}
 	if err := DownloadPieceAndSaveVerified(n.srv.URL, types.Auth{}, "piece0", ks, nil); err != nil || ks.len() != 1 {
 		t.Fatalf("accepted piece: err=%v cached=%d", err, ks.len())
+	}
+}
+
+// S4: a bad piece in the cache must not fail every later read of the file:
+// on a hash mismatch the cached pieces are evicted and the file fetched again.
+func TestDownloadEvictsPoisonedCache(t *testing.T) {
+	for _, mode := range []string{"serial", "parallel"} {
+		n := newFakeNet(t, same)
+		ks := newMemPieces()
+		poisoned := bytes.Repeat([]byte{0xee}, 248)
+		ks.PutPiece(context.Background(), types.PieceCore{Name: "piece1"}, poisoned, true)
+
+		var out bytes.Buffer
+		var err error
+		if mode == "serial" {
+			err = DownloadOf(n.srv.URL, types.Auth{}, "f", types.EmptyAddr, ks, &out)
+		} else {
+			err = DownloadParallelOf(n.srv.URL, types.Auth{}, "f", types.EmptyAddr, 2, ks, &out)
+		}
+		if err != nil {
+			t.Fatalf("%s: poisoned cache entry failed the download: %v", mode, err)
+		}
+		if !bytes.Equal(out.Bytes(), n.file) {
+			t.Fatalf("%s: wrote %d bytes, not the file", mode, out.Len())
+		}
+		var b bytes.Buffer
+		if _, err := ks.GetPiece(context.Background(), "piece1", &b, types.Options{}); err != nil || bytes.Equal(b.Bytes(), poisoned) {
+			t.Fatalf("%s: poisoned piece still cached (err=%v)", mode, err)
+		}
+	}
+}
+
+// With a cache, a file that fails its hash is not written to w at all.
+func TestDownloadWithCacheWritesOnlyCheckedData(t *testing.T) {
+	n := newFakeNet(t, same)
+	n.corrupt = true
+	ks := newMemPieces()
+	var out bytes.Buffer
+	if err := DownloadOf(n.srv.URL, types.Auth{}, "f", types.EmptyAddr, ks, &out); !errors.Is(err, ErrFileHashMismatch) {
+		t.Fatalf("err=%v, want a hash mismatch", err)
+	}
+	if out.Len() != 0 || ks.len() != 0 {
+		t.Fatalf("wrote %d bytes / cached %d pieces of a file that failed its hash", out.Len(), ks.len())
+	}
+}
+
+// A range read cannot be checked, so it must not cache what it fetched.
+func TestDownloadWSizeDoesNotCache(t *testing.T) {
+	n := newFakeNet(t, same)
+	ks := newMemPieces()
+	var out bytes.Buffer
+	if err := DownloadWSize(n.srv.URL, types.Auth{}, "f", ks, &out, 250, 10); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out.Bytes(), n.file[250:260]) {
+		t.Fatalf("range read %x, want %x", out.Bytes(), n.file[250:260])
+	}
+	if ks.len() != 0 {
+		t.Fatalf("range read cached %d unchecked pieces", ks.len())
 	}
 }

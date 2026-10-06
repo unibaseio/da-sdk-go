@@ -90,9 +90,9 @@ type Server struct {
 	dlTotal  atomic.Int64
 	dlShared atomic.Int64
 
-	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads and rebuilds
-	// (a piece may be ~1 GB); slow clients still hold the bytes while they
-	// are written. HUB_PIECE_DOWNLOAD_CONCURRENCY.
+	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads, rebuilds and
+	// response writes (a piece may be ~1 GB); the write is time-bounded, see
+	// pieceWriteTimeout. HUB_PIECE_DOWNLOAD_CONCURRENCY.
 	pieceSem chan struct{}
 
 	// quota is the per-signer budget for hub-paid writes (nil = off); sealSem
@@ -143,6 +143,11 @@ type Server struct {
 func NewServer(rp repo.Repo) (*Server, error) {
 	if len(siweDomains()) == 0 {
 		logger.Warn("HUB_SIWE_DOMAINS is not set: SIWE sign-ins issued for any website are accepted")
+	}
+	if id := chainIDOf(rp.Config().Chain.Type); id != 0 {
+		hubChainID.Store(id)
+	} else {
+		logger.Warnf("chain %q has no known chain id: SIWE Chain ID is checked only against HUB_SIWE_CHAIN_IDS", rp.Config().Chain.Type)
 	}
 	log.SetLogLevel("DEBUG")
 
