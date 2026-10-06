@@ -72,6 +72,8 @@ func TestProbeAllowedMore(t *testing.T) {
 		{"fd12:3456::1", true}, // other unique-local (private) ranges stay allowed
 		{"2600:1f18::1", true},
 		{"64:ff9b::808:808", true},
+		{"64:ff9b:1::a00:1", false}, // local-use NAT64 (RFC 8215): embedding unknown
+		{"64:ff9b:1:ffff::1", false},
 	} {
 		if got := probeAllowed(net.ParseIP(c.ip)); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.ip, got, c.want)

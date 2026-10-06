@@ -51,6 +51,10 @@ func TestSIWEPolicy(t *testing.T) {
 		{"two URIs", siweLines("app.example.com", "URI: https://app.example.com", "URI: https://evil.example", "Chain ID: 84532"), ours, false},
 		{"URI not http", siweLines("app.example.com", "URI: ftp://app.example.com", "Chain ID: 84532"), ours, false},
 		{"foreign domain", siweLines("evil.example", "URI: https://app.example.com", "Chain ID: 84532"), ours, false},
+		// EIP-4361 allows an optional scheme before the domain
+		{"scheme", siweLines("https://app.example.com", "URI: https://app.example.com/login", "Chain ID: 84532"), ours, true},
+		{"scheme foreign", siweLines("https://evil.example", "URI: https://app.example.com", "Chain ID: 84532"), ours, false},
+		{"scheme userinfo", siweLines("https://app.example.com@evil.example", "URI: https://app.example.com", "Chain ID: 84532"), ours, false},
 		// no allowlist: only the chain is checked
 		{"no allowlist", siweLines("evil.example", "URI: https://evil.example", "Chain ID: 84532"), SIWEPolicy{ChainIDs: []int64{84532}}, true},
 		// services nobody signs in to: refused without an allowlist

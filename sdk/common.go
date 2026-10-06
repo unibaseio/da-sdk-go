@@ -394,7 +394,8 @@ var (
 	siweIssuedRe = regexp.MustCompile(`(?mi)^Issued At:[ \t]*(.+?)[ \t]*$`)
 	siweExpRe    = regexp.MustCompile(`(?mi)^Expiration Time:[ \t]*(.+?)[ \t]*$`)
 	siweNbfRe    = regexp.MustCompile(`(?mi)^Not Before:[ \t]*(.+?)[ \t]*$`)
-	siweDomainRe = regexp.MustCompile(`^(\S+) wants you to sign in with your Ethereum account:`)
+	// EIP-4361: "[scheme://]authority wants you to sign in ..."; the scheme is optional
+	siweDomainRe = regexp.MustCompile(`^(?:[A-Za-z][A-Za-z0-9+.-]*://)?(\S+) wants you to sign in with your Ethereum account:`)
 	siweChainRe  = regexp.MustCompile(`(?mi)^Chain ID:[ \t]*(.*?)[ \t]*$`)
 	siweURIRe    = regexp.MustCompile(`(?mi)^URI:[ \t]*(.*?)[ \t]*$`)
 )
@@ -410,7 +411,8 @@ func siweTime(re *regexp.Regexp, msg string) (t time.Time, ok bool, err error) {
 }
 
 // siweDomain returns the domain an EIP-4361 message was issued for (the
-// first line's "<domain> wants you to sign in ..."), "" if it has none.
+// first line's "[scheme://]<domain> wants you to sign in ..."; the optional
+// scheme is not part of it), "" if it has none.
 func siweDomain(msg string) string {
 	if m := siweDomainRe.FindStringSubmatch(msg); m != nil {
 		return strings.ToLower(m[1])

@@ -105,6 +105,9 @@ var (
 	awsIPv6Services = mustCIDR("fd00:ec2::/32")
 	// NAT64 (RFC 6052): an IPv4 address in IPv6 form, judged as that IPv4.
 	nat64 = mustCIDR("64:ff9b::/96")
+	// Local-use NAT64 (RFC 8215): the embedding is operator-chosen, so the
+	// IPv4 behind an address cannot be read off; refused outright.
+	nat64Local = mustCIDR("64:ff9b:1::/48")
 	// 0.0.0.0/8 "this network": 0.x.x.x reaches the local host on Linux.
 	thisNetwork = mustCIDR("0.0.0.0/8")
 )
@@ -123,7 +126,7 @@ func probeAllowed(ip net.IP) bool {
 	}
 	return !(ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() ||
-		awsIPv6Services.Contains(ip) || thisNetwork.Contains(ip))
+		awsIPv6Services.Contains(ip) || thisNetwork.Contains(ip) || nat64Local.Contains(ip))
 }
 
 func Login(baseUrl string, auth types.Auth) error {
