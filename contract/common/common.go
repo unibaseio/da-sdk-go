@@ -366,17 +366,21 @@ func GetTransactionReceipt(endPoint string, hash common.Hash) (*types.Receipt, e
 	return client.TransactionReceipt(ctx, hash)
 }
 
+// GetTransactionRetry fetches tx h, retrying for about a minute. The last
+// error is wrapped so callers can tell an RPC outage from other failures.
 func GetTransactionRetry(endpoint string, h common.Hash) (*types.Transaction, error) {
-	retry := 0
-	for retry < 10 {
+	var lastErr error
+	for retry := 1; retry <= 10; retry++ {
 		tx, err := GetTransaction(endpoint, h)
 		if err == nil {
 			return tx, nil
 		}
-		retry++
-		time.Sleep(time.Duration(retry) * time.Second)
+		lastErr = err
+		if retry < 10 {
+			time.Sleep(time.Duration(retry) * time.Second)
+		}
 	}
-	return nil, fmt.Errorf("fail to get tx")
+	return nil, fmt.Errorf("fail to get tx %s: %w", h.Hex(), lastErr)
 }
 
 func GetTransaction(endpoint string, h common.Hash) (*types.Transaction, error) {
@@ -415,8 +419,10 @@ func checkTx(endPoint string, txHash common.Hash) error {
 			log.Printf("Log: %v\n", elog) // 打印日志信息
 		}
 		tx, terr := GetTransaction(endPoint, txHash)
-		if terr == nil && receipt.GasUsed >= tx.Gas() {
-			return fmt.Errorf("%s ran out of gas (used all %d)", txHash, tx.Gas())
+		if terr == nil {
+			if err := UsedAllGas(txHash, receipt.GasUsed, tx.Gas()); err != nil {
+				return err
+			}
 		}
 		err = AnalyzeTransactionFailure(endPoint, txHash)
 		if err != nil {
@@ -427,6 +433,17 @@ func checkTx(endPoint string, txHash common.Hash) error {
 	}
 	Logger.Debugf("%s cost gas: %d, price: %d, blob gas: %d, price: %d", txHash.String(), receipt.GasUsed, receipt.EffectiveGasPrice, receipt.BlobGasUsed, receipt.BlobGasPrice)
 	return nil
+}
+
+// UsedAllGas reports a failed tx that consumed its whole gas limit. That is
+// not proof of running out of gas: an INVALID opcode (0xfe, e.g. a failed
+// assert in old Solidity) also consumes all remaining gas. Nil when the tx
+// used less than its limit.
+func UsedAllGas(txHash common.Hash, gasUsed, gasLimit uint64) error {
+	if gasLimit == 0 || gasUsed < gasLimit {
+		return nil
+	}
+	return fmt.Errorf("%s failed using all %d gas: out of gas, or an INVALID opcode (which also consumes all gas)", txHash, gasLimit)
 }
 
 func AnalyzeTransactionFailure(endPoint string, txHash common.Hash) error {
