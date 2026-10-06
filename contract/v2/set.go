@@ -1137,6 +1137,19 @@ func (c *ContractManage) RSOneVersionFor(rsn, rsk uint8) (uint8, error) {
 	return 2, nil
 }
 
+// RSOneRequiredVersion returns the lowest RSOne proof version RSProof
+// accepts for replica index ri (each version's cutoff counts, not only the
+// highest one's).
+func (c *ContractManage) RSOneRequiredVersion(ri uint64) (uint8, error) {
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancle()
+	rsp, err := c.NewRSProof(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return rsp.RequiredVersion(&bind.CallOpts{From: com.Base, Context: ctx}, ri)
+}
+
 // RSOneCutoff returns RSProof's version cutoff: replicas with index >= from
 // must be proven with version >= minVer (minVer 0: no cutoff).
 func (c *ContractManage) RSOneCutoff() (minVer uint8, from uint64, err error) {

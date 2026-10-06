@@ -875,12 +875,15 @@ func DeployRSOneV2(client *ethclient.Client, sk string, rsproofAddr common.Addre
 		log.Printf("set v2 vk root: %d %d %s\n", p.N, p.K, root)
 	}
 	if cutoff {
-		if err := send("setMinVersion(2,0)", func(au *bind.TransactOpts) (*etypes.Transaction, error) {
-			return rp.SetMinVersion(au, 2, 0)
+		// the cutoff is taken on chain when this executes: every replica added
+		// from now on must be proven with v2 (earlier ones keep v1). Run it
+		// only once streams encode FormatV2 and stores prove v2.
+		if err := send("setMinVersion(2)", func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+			return rp.SetMinVersion(au, 2)
 		}); err != nil {
 			return common.Address{}, err
 		}
-		log.Println("rsone: every replica must be proven with v2")
+		log.Println("rsone: replicas added from now on must be proven with v2")
 	}
 	return vAddr, nil
 }
