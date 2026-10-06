@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/unibaseio/da-sdk-go/build"
@@ -12,11 +13,21 @@ import (
 	"github.com/unibaseio/da-sdk-go/sdk"
 )
 
-// defaultPieceDownloadConcurrency bounds concurrent public piece reads,
-// rebuilds and response writes (HUB_PIECE_DOWNLOAD_CONCURRENCY): a slot is
-// held until the piece has been written out, so at most this many pieces are
-// in memory for the endpoint.
+// defaultPieceDownloadConcurrency bounds concurrent public piece reads and
+// rebuilds (HUB_PIECE_DOWNLOAD_CONCURRENCY). The slot is released before the
+// response is written: holding it through the write let a few clients that
+// stop reading block every other reader of the endpoint until their write
+// deadlines (audit 2026-10-06). Writes are bounded per client instead
+// (defaultPieceWritesPerClient) and in time (pieceWriteTimeout).
 const defaultPieceDownloadConcurrency = 4
+
+// defaultPieceWritesPerClient caps one client's (IP, or IPv6 /64) concurrent
+// piece requests (HUB_PIECE_WRITES_PER_CLIENT); more get 429. With the write
+// deadline this bounds what one client can pin to this many piece buffers for
+// at most pieceWriteTimeout each. Memory across many clients is not bounded
+// by a global budget: a global budget is exactly the slot that stalled
+// clients would fill.
+const defaultPieceWritesPerClient = 2
 
 // A piece response must be written within base + size/minRate
 // (HUB_PIECE_WRITE_BASE_SEC, HUB_PIECE_WRITE_MIN_BPS): the hub has no server
@@ -27,6 +38,42 @@ const (
 	defaultPieceWriteBaseSec = 30
 	defaultPieceWriteMinBPS  = 1 << 20
 )
+
+// clientSlots counts in-flight requests per client key, capped at max. An entry
+// is dropped when its count returns to zero, so the map holds only clients
+// with a request in flight.
+type clientSlots struct {
+	mu  sync.Mutex
+	n   map[string]int
+	max int
+}
+
+func newClientSlots(max int) *clientSlots {
+	return &clientSlots{n: make(map[string]int), max: max}
+}
+
+// acquire takes a slot for key; ok is false when key already holds max.
+func (cs *clientSlots) acquire(key string) (release func(), ok bool) {
+	if cs == nil || cs.max <= 0 {
+		return func() {}, true
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.n[key] >= cs.max {
+		return nil, false
+	}
+	cs.n[key]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cs.mu.Lock()
+			defer cs.mu.Unlock()
+			if cs.n[key]--; cs.n[key] <= 0 {
+				delete(cs.n, key)
+			}
+		})
+	}, true
+}
 
 // pieceWriteTimeout is how long writing n bytes of a piece may take.
 func pieceWriteTimeout(n int) time.Duration {
@@ -64,10 +111,9 @@ func acquireSem(ctx context.Context, sem chan struct{}) (func(), error) {
 
 // downloadPiece returns a committed piece by its DA commitment: from the local
 // piece store when it holds it, else rebuilt from store nodes. The caller
-// holds a pieceSem slot across the read and the response write (the endpoint
-// is public and a piece may be ~1 GB); a rebuild also takes a dlSem slot like
-// other DA reconstructs, and concurrent requests for one piece share a single
-// rebuild.
+// holds a pieceSem slot across the read (the endpoint is public and a piece
+// may be ~1 GB); a rebuild also takes a dlSem slot like other DA reconstructs,
+// and concurrent requests for one piece share a single rebuild.
 //
 // A rebuilt piece is NOT put into the piece store. A bare piece has nothing
 // the hub can check it against (its name is a KZG commitment; checking bytes

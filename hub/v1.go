@@ -707,14 +707,21 @@ func (s *Server) v1GetPieceContent(c *gin.Context) {
 	if _, ok := ResolveOwnerForList(c, c.Query("owner")); !ok {
 		return
 	}
-	// the slot covers the write too: the piece's buffer lives until then
+	// per client, the request holds a slot until its response is written
+	done, ok := s.pieceClients.acquire(ipKey(c.ClientIP()))
+	if !ok {
+		c.JSON(http.StatusTooManyRequests, lerror.ToAPIError("hub", errors.New("too many piece downloads from this client")))
+		return
+	}
+	defer done()
+	// the global slot covers only the read/rebuild (see defaultPieceDownloadConcurrency)
 	release, err := acquireSem(c.Request.Context(), s.pieceSem)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, lerror.ToAPIError("hub", err))
 		return
 	}
-	defer release()
 	data, err := s.downloadPiece(c.Request.Context(), c.Param("name"))
+	release()
 	if err != nil {
 		code := http.StatusNotFound
 		if errors.Is(err, errBusy) {
@@ -724,7 +731,7 @@ func (s *Server) v1GetPieceContent(c *gin.Context) {
 		return
 	}
 	// bounded write: a client that stops reading loses the connection rather
-	// than holding the slot (the hub runs without a server WriteTimeout)
+	// than holding its slot and the buffer (the hub has no server WriteTimeout)
 	if err := http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(pieceWriteTimeout(len(data)))); err != nil {
 		logger.Warnf("piece %s: cannot bound the response write: %v", c.Param("name"), err)
 	}

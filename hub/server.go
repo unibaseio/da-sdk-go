@@ -90,10 +90,12 @@ type Server struct {
 	dlTotal  atomic.Int64
 	dlShared atomic.Int64
 
-	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads, rebuilds and
-	// response writes (a piece may be ~1 GB); the write is time-bounded, see
-	// pieceWriteTimeout. HUB_PIECE_DOWNLOAD_CONCURRENCY.
+	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads and rebuilds
+	// (a piece may be ~1 GB), not the response write: see
+	// defaultPieceDownloadConcurrency. HUB_PIECE_DOWNLOAD_CONCURRENCY.
 	pieceSem chan struct{}
+	// pieceClients caps each client's concurrent piece requests, write included
+	pieceClients *clientSlots
 
 	// quota is the per-signer budget for hub-paid writes (nil = off); sealSem
 	// bounds concurrent seals (HUB_SEAL_CONCURRENCY). See quota.go / seal.go.
@@ -204,6 +206,7 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	if n := env.Int("HUB_PIECE_DOWNLOAD_CONCURRENCY", defaultPieceDownloadConcurrency); n > 0 {
 		s.pieceSem = make(chan struct{}, n)
 	}
+	s.pieceClients = newClientSlots(env.Int("HUB_PIECE_WRITES_PER_CLIENT", defaultPieceWritesPerClient))
 	s.quota = newWriteQuota()
 	if n := env.Int("HUB_SEAL_CONCURRENCY", defaultSealConcurrency); n > 0 {
 		s.sealSem = make(chan struct{}, n)
