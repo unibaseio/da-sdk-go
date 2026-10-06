@@ -3,12 +3,16 @@ package hub
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/unibaseio/da-sdk-go/lib/kv"
@@ -205,4 +209,142 @@ func TestReadAllSizedBoundsPrealloc(t *testing.T) {
 	if b, err := readAllSized(strings.NewReader(big), int64(len(big))); err != nil || len(b) != len(big) {
 		t.Fatalf("large body: %d %v", len(b), err)
 	}
+}
+
+// H-Q1: while the signer table is full of signers still using their quota, a
+// new signer is refused instead of sharing (and possibly draining) one
+// overflow bucket with every other newcomer.
+func TestWriteQuotaFullTableRefusesNewSigners(t *testing.T) {
+	t.Setenv("HUB_WRITE_QUOTA_BYTES", "1000")
+	t.Setenv("HUB_WRITE_QUOTA_WINDOW_SEC", "86400")
+	q := newWriteQuota()
+	for i := 0; i < 100_000; i++ {
+		if err := q.charge(fmt.Sprintf("0x%040x", i), 1000); err != nil {
+			t.Fatalf("signer %d: %v", i, err)
+		}
+	}
+	if err := q.charge("0xnew1", 1); err == nil {
+		t.Fatal("new signer admitted while every slot is a signer in debt")
+	}
+	// a signer that has a slot keeps its own budget
+	if err := q.charge(fmt.Sprintf("0x%040x", 7), 1); err == nil {
+		t.Fatal("a spent signer was given more")
+	}
+}
+
+// H-Q1: buckets that have refilled completely are dropped (losslessly), so a
+// table filled by tiny writes does not push new signers into a shared bucket:
+// each new signer still gets its own full quota.
+func TestWriteQuotaRefilledBucketsMakeRoom(t *testing.T) {
+	t.Setenv("HUB_WRITE_QUOTA_BYTES", "1000")
+	t.Setenv("HUB_WRITE_QUOTA_WINDOW_SEC", "1") // refills 1000 B/s
+	q := newWriteQuota()
+	for i := 0; i < 100_000; i++ {
+		if err := q.charge(fmt.Sprintf("0x%040x", i), 1); err != nil {
+			t.Fatalf("signer %d: %v", i, err)
+		}
+	}
+	time.Sleep(1100 * time.Millisecond) // every bucket full again
+	for _, s := range []string{"0xnewa", "0xnewb"} {
+		if err := q.charge(s, 1000); err != nil {
+			t.Fatalf("%s: %v (new signers share one bucket)", s, err)
+		}
+	}
+}
+
+// H-Q1: a write that fails before anything is stored gives its charge back.
+func TestV1PutRefundsFailedWrite(t *testing.T) {
+	t.Setenv("HUB_WRITE_QUOTA_BYTES", "10")
+	s := newV1TestServer(t)
+	s.quota = newWriteQuota()
+	addr, pk := testKey(t)
+	owner := strings.ToLower(addr)
+	auth := authHeader(addr, pk)
+	dir := t.TempDir()
+	ds, err := kv.NewBadgerStore(filepath.Join(dir, "kv"), &kv.DefaultOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ds.Close() })
+	fs, err := logfs.New(ds, filepath.Join(dir, "logfs"), "0xhub", owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.lfs.Store(owner, fs)
+	s.gdb.Create(&types.Bucket{Name: "b", Owner: owner, Kind: "memory"})
+
+	// declares 6 bytes, the connection breaks after 2
+	req := httptest.NewRequest("PUT", "/v1/buckets/b/objects/k1", nil)
+	req.Body = io.NopCloser(io.MultiReader(strings.NewReader("12"), iotest.ErrReader(errors.New("connection reset"))))
+	req.ContentLength = 6
+	req.Header.Set("Authorization", auth)
+	w := httptest.NewRecorder()
+	s.Router.ServeHTTP(w, req)
+	if w.Code < 400 {
+		t.Fatalf("broken upload: %d", w.Code)
+	}
+
+	req = httptest.NewRequest("PUT", "/v1/buckets/b/objects/k2", strings.NewReader("0123456789"))
+	req.Header.Set("Authorization", auth)
+	w = httptest.NewRecorder()
+	s.Router.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("full-quota write after a failed one: %d %s (the failed write kept its charge)", w.Code, w.Body.String())
+	}
+}
+
+// H-Q1: a hub-paid seal turned away before any work gives its charge back.
+func TestSealRefundsWhenBusy(t *testing.T) {
+	t.Setenv("HUB_WRITE_QUOTA_BYTES", "10")
+	t.Setenv("HUB_SEAL_QUEUE_SEC", "0")
+	s := newV1TestServer(t)
+	s.quota = newWriteQuota()
+	s.sealSem = make(chan struct{}, 1)
+	s.sealSem <- struct{}{}
+	addr, pk := testKey(t)
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	mw.WriteField("owner", addr)
+	mw.WriteField("register", "hub")
+	mw.WriteField("rsn", "6")
+	mw.WriteField("rsk", "4")
+	fw, _ := mw.CreateFormFile("file", "blob")
+	fw.Write([]byte("12345"))
+	mw.Close()
+	req := httptest.NewRequest("POST", "/v1/seal", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", authHeader(addr, pk))
+	w := httptest.NewRecorder()
+	s.Router.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("busy seal: %d %s", w.Code, w.Body.String())
+	}
+	if err := s.quota.charge(addr, 10); err != nil {
+		t.Fatalf("seal refused for being busy kept its charge: %v", err)
+	}
+}
+
+func TestWriteQuotaRefund(t *testing.T) {
+	t.Setenv("HUB_WRITE_QUOTA_BYTES", "1000")
+	t.Setenv("HUB_WRITE_QUOTA_WINDOW_SEC", "86400")
+	q := newWriteQuota()
+	if err := q.charge("0xa", 1000); err != nil {
+		t.Fatal(err)
+	}
+	q.refund("0xA", 400)
+	if err := q.charge("0xa", 400); err != nil {
+		t.Fatalf("refunded bytes not available: %v", err)
+	}
+	if err := q.charge("0xa", 1); err == nil {
+		t.Fatal("refund gave back more than it was given")
+	}
+	q.refund("0xa", 1<<40) // capped at the full quota
+	if err := q.charge("0xa", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.charge("0xa", 1); err == nil {
+		t.Fatal("refund overfilled the bucket")
+	}
+	var off *writeQuota
+	off.refund("0xa", 1) // disabled quota: no-op
 }

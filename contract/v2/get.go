@@ -386,6 +386,61 @@ func (c *ContractManage) GetEProofMinTime() (uint64, error) {
 	return t.Uint64(), nil
 }
 
+// EmergencyPause is the circuit-breaker state the fraud games consult
+// (Node.emergencyPaused / Node.emergencyLastPauseBlock; both read 0/false
+// when no breaker is wired).
+type EmergencyPause struct {
+	Paused    bool   // engaged now: fund-moving moves (prove/release/slash) revert
+	LastBlock uint64 // block of the most recent engagement, 0 if never
+}
+
+// GetEmergencyPause reads the breaker state from the Node contract, which
+// RSProof and EProof consult for every prove window (RSProof._proveOpen,
+// EProof._proveOpen) and settlement.
+func (c *ContractManage) GetEmergencyPause() (EmergencyPause, error) {
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancle()
+	ni, err := c.NewNode(ctx)
+	if err != nil {
+		return EmergencyPause{}, err
+	}
+	opts := &bind.CallOpts{From: com.Base, Context: ctx}
+	last, err := ni.EmergencyLastPauseBlock(opts)
+	if err != nil {
+		return EmergencyPause{}, err
+	}
+	paused, err := ni.EmergencyPaused(opts)
+	if err != nil {
+		return EmergencyPause{}, err
+	}
+	return EmergencyPause{Paused: paused, LastBlock: last}, nil
+}
+
+// GetEProofChallengeWindow reads EProof.challengeWindow: how many epochs after
+// an epoch a challenge against it may still be OPENED (games already open
+// stay open past it).
+func (c *ContractManage) GetEProofChallengeWindow() (uint64, error) {
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancle()
+	ep, err := c.NewEProof(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return ep.ChallengeWindow(&bind.CallOpts{From: com.Base, Context: ctx})
+}
+
+// GetPieceDelay reads Piece.delay: addReplica accepts replicas of a piece
+// while start + delay > current epoch.
+func (c *ContractManage) GetPieceDelay() (uint64, error) {
+	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancle()
+	p, err := c.NewPiece(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return p.Delay(&bind.CallOpts{From: com.Base, Context: ctx})
+}
+
 func (c *ContractManage) GetRevenue(addr common.Address, typ string) (*big.Int, error) {
 	res := big.NewInt(0)
 	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
@@ -488,35 +543,4 @@ func (c *ContractManage) GetEpochCommits(_a common.Address, _ep uint64) ([][]byt
 		out = append(out, b[:])
 	}
 	return out, nil
-}
-
-// checkReplicaFields confirms replica fields decoded from an addReplica call
-// against what the Piece contract recorded for replica ri: the name maps to ri,
-// slot pri of piece pi holds ri on store, and the proof hashes to ri's root.
-func (c *ContractManage) checkReplicaFields(ri uint64, store common.Address, name []byte, pi uint64, pri uint8, proof []byte) error {
-	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
-	defer cancle()
-	p, err := c.NewPiece(ctx)
-	if err != nil {
-		return err
-	}
-	opts := &bind.CallOpts{From: com.Base, Context: ctx}
-	if got, err := p.GetRIndex(opts, name); err != nil {
-		return err
-	} else if got != ri {
-		return fmt.Errorf("replica name maps to %d on chain, event says %d", got, ri)
-	}
-	if got, on, err := p.GetPRI(opts, pi, pri); err != nil {
-		return err
-	} else if got != ri || on != store {
-		return fmt.Errorf("piece %d slot %d holds replica %d on %s on chain, event says %d on %s", pi, pri, got, on.Hex(), ri, store.Hex())
-	}
-	info, err := p.GetReplica(opts, ri)
-	if err != nil {
-		return err
-	}
-	if crypto.Keccak256Hash(proof) != common.Hash(info.Root) {
-		return fmt.Errorf("replica %d proof does not hash to its on-chain root", ri)
-	}
-	return nil
 }

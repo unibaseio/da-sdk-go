@@ -88,10 +88,18 @@ func (s *Server) seal(c *gin.Context) {
 		return
 	}
 
-	// every mode but client is paid by the hub: count it against the signer
-	if register != "client" && !s.chargeWrite(c, fh.Size) {
-		return
+	// every mode but client is paid by the hub: count it against the signer.
+	// Given back if the seal fails before the hub starts on-chain registration
+	// (no tx sent, nothing paid); kept from then on, including a timeout whose
+	// tx may still land.
+	var charged int64
+	if register != "client" {
+		if !s.chargeWrite(c, fh.Size) {
+			return
+		}
+		charged = fh.Size
 	}
+	defer func() { s.refundWrite(c, charged) }()
 
 	release, ok := s.acquireSeal(c)
 	if !ok {
@@ -172,6 +180,9 @@ func (s *Server) seal(c *gin.Context) {
 	// idempotency: da_cid is content-addressed, so a retried seal of the same
 	// blob yields the same piece. If it is already on chain, don't re-register.
 	serial, _ := cm.GetPieceSerial(pc.Name)
+
+	// from here the hub registers (and pays for) the piece: the charge stays
+	charged = 0
 
 	if register == "hub" {
 		// v1: hub signs AddPiece + pays gas; client needs no chain interaction.

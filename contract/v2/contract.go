@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	com "github.com/unibaseio/da-sdk-go/contract/common"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/token"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	dlog "github.com/unibaseio/da-sdk-go/lib/log"
 
@@ -21,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // nonceStuckTimeout: if our locally-tracked nonce stays ahead of the chain's
@@ -94,6 +98,7 @@ type ContractManage struct {
 	nonceMu         sync.Mutex
 	localNonce      uint64    // next nonce to hand out
 	nonceReady      bool      // false = re-sync from chain on next allocation
+	freeNonces      []uint64  // released nonces below localNonce, handed out first
 	lastChainNonce  uint64    // last chain pending nonce observed (progress tracking)
 	nonceProgressAt time.Time // when the chain pending nonce last advanced
 }
@@ -131,6 +136,7 @@ func (c *ContractManage) nextNonce() (uint64, error) {
 		// first use, or the chain is ahead of our tracking (our in-flight txs
 		// all mined, or the key signed elsewhere): adopt the chain's view.
 		c.localNonce = chainNonce
+		c.freeNonces = nil // all below the chain's nonce: used
 		c.nonceReady = true
 		c.lastChainNonce = chainNonce
 		c.nonceProgressAt = now
@@ -144,31 +150,68 @@ func (c *ContractManage) nextNonce() (uint64, error) {
 		// nonce. Resync down to the chain to heal it.
 		com.Logger.Warnf("nonce gap suspected (local %d, chain %d), resync to chain", c.localNonce, chainNonce)
 		c.localNonce = chainNonce
+		c.freeNonces = nil
 		c.lastChainNonce = chainNonce
 		c.nonceProgressAt = now
 	}
 
+	// a released nonce fills its gap first; one the chain has passed was
+	// taken by a tx signed elsewhere
+	free := c.freeNonces[:0]
+	for _, f := range c.freeNonces {
+		if f >= chainNonce {
+			free = append(free, f)
+		}
+	}
+	c.freeNonces = free
+	if len(c.freeNonces) > 0 {
+		low := 0
+		for i, f := range c.freeNonces {
+			if f < c.freeNonces[low] {
+				low = i
+			}
+		}
+		n := c.freeNonces[low]
+		c.freeNonces = append(c.freeNonces[:low], c.freeNonces[low+1:]...)
+		return n, nil
+	}
 	n := c.localNonce
 	c.localNonce++
 	return n, nil
 }
 
-// releaseNonce hands back a nonce from MakeAuth whose tx was never broadcast
-// (the send failed, e.g. gas estimation reverted). Kept, it becomes a gap that
+// releaseNonce hands back a reserved nonce whose tx was never broadcast (the
+// send failed, e.g. gas estimation reverted). Kept, it becomes a gap that
 // stalls every later tx until the stuck-nonce heuristic resyncs minutes later.
+//
+// A released nonce below a later reservation goes on a free list that the
+// next reservation takes from first. Re-reading the chain instead (as the
+// first N5 fix did) handed out duplicates: the later nonces may still be in
+// flight (being built, or broadcast but queued behind the gap), and the
+// chain's pending nonce, stopping at the gap, would count up through them
+// again (audit 2026-10-06).
 func (c *ContractManage) releaseNonce(n uint64) {
 	c.nonceMu.Lock()
 	defer c.nonceMu.Unlock()
-	if !c.nonceReady {
+	if !c.nonceReady || n >= c.localNonce {
 		return
 	}
 	if c.localNonce == n+1 {
 		c.localNonce = n
+		// earlier released nonces now at the top go back the same way
+		for c.localNonce > 0 {
+			i := slices.Index(c.freeNonces, c.localNonce-1)
+			if i < 0 {
+				break
+			}
+			c.freeNonces = slices.Delete(c.freeNonces, i, i+1)
+			c.localNonce--
+		}
 		return
 	}
-	// a later nonce is already out: let the next allocation re-read the chain,
-	// whose pending nonce stops at the gap, so the gap gets filled first
-	c.nonceReady = false
+	if !slices.Contains(c.freeNonces, n) {
+		c.freeNonces = append(c.freeNonces, n)
+	}
 }
 
 // Client returns the shared ethclient for the active endpoint, dialing it on
@@ -421,21 +464,154 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 	return cm, nil
 }
 
-func (c *ContractManage) MakeAuth() (*bind.TransactOpts, error) {
-	au, err := com.MakeAuthBySk(c.RPC, c.ChainID, c.sk)
+// reserveAuth builds transact options carrying a freshly reserved nonce. It is
+// unexported on purpose: the only caller is sendTx, which hands the nonce back
+// when the transaction never leaves this process. A tx sent with an auth from
+// anywhere else would leak its nonce on failure and stall the key (N5).
+func (c *ContractManage) reserveAuth() (*bind.TransactOpts, error) {
+	au, err := com.MakeAuthBySk(c.activeRPC(), c.ChainID, c.sk)
 	if err != nil {
 		return nil, err
 	}
 	// Pin an explicit, serialized nonce instead of letting go-ethereum fetch
 	// PendingNonceAt at send time (which races across goroutines). Each send
-	// needs its OWN MakeAuth — reusing one auth for multiple sends would reuse
-	// this fixed nonce and self-collide.
+	// needs its OWN reservation — reusing one auth for multiple sends would
+	// reuse this fixed nonce and self-collide.
 	n, err := c.nextNonce()
 	if err != nil {
 		return nil, err
 	}
 	au.Nonce = new(big.Int).SetUint64(n)
 	return au, nil
+}
+
+// sendOutcome is what a failed broadcast says about the reserved nonce.
+type sendOutcome int
+
+const (
+	sendRejected  sendOutcome = iota // the node refused the tx: it is in no pool, the nonce is free
+	sendPooled                       // the node already holds this very tx: treat as sent
+	sendNonceUsed                    // another tx holds this nonce: no gap, nothing to hand back
+	sendUnknown                      // no answer (transport): it may have been accepted, keep the nonce
+)
+
+// classifySendErr maps an eth_sendRawTransaction error to what it says about
+// the tx. A JSON-RPC error (or an HTTP 4xx) is an answer from the node, so the
+// tx was not accepted — except the answers that mean it, or another tx with
+// its nonce, is already pooled. A transport failure, an HTTP 5xx, an internal
+// error or a timeout reported by a proxy leaves it open whether the node
+// accepted it. Pure.
+func classifySendErr(err error) sendOutcome {
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{"already known", "known transaction", "already imported", "already in mempool", "already exists"} {
+		if strings.Contains(msg, s) {
+			return sendPooled
+		}
+	}
+	for _, s := range []string{"nonce too low", "nonce has already been used", "replacement transaction underpriced", "replacement fee too low"} {
+		if strings.Contains(msg, s) {
+			return sendNonceUsed
+		}
+	}
+	var he rpc.HTTPError
+	if errors.As(err, &he) {
+		if he.StatusCode >= 400 && he.StatusCode < 500 && he.StatusCode != http.StatusRequestTimeout {
+			return sendRejected
+		}
+		return sendUnknown
+	}
+	var re rpc.Error
+	if errors.As(err, &re) {
+		if re.ErrorCode() == -32603 {
+			return sendUnknown
+		}
+		// A node that forwards txs (op-geth to its sequencer) answers a failed
+		// forward with a -32000 error carrying the transport failure; the
+		// sequencer may still have taken the tx, so these are not rejections.
+		for _, s := range forwardFailures {
+			if strings.Contains(msg, s) {
+				return sendUnknown
+			}
+		}
+		return sendRejected
+	}
+	return sendUnknown
+}
+
+// forwardFailures are transport-failure texts that, inside a JSON-RPC error,
+// mean a proxy or forwarding node lost the upstream answer.
+// (Bare status numbers are left out: a rejection such as "insufficient funds
+// ... have 5021..." would match them.)
+var forwardFailures = []string{
+	"timeout", "timed out", "deadline exceeded",
+	": eof", "unexpected eof", "connection reset", "broken pipe", "connection closed",
+	"bad gateway", "service unavailable", "gateway timeout",
+}
+
+// sendTx is the only way contract/v2 sends a transaction. It reserves a nonce,
+// lets build construct and sign the call without broadcasting it (build gets
+// NoSend opts; gas estimation happens inside build), and then broadcasts it
+// itself, so it knows whether the tx left this process:
+//   - build fails (gas estimation reverted, encoding, signing): the tx was never
+//     broadcast, so the nonce is handed back;
+//   - the node rejects the tx: likewise handed back;
+//   - the node already holds it ("already known"): sent;
+//   - the nonce is taken by another tx: the next reservation re-reads the chain;
+//   - no answer (transport failure): the node may have accepted it, so the nonce
+//     is kept; if it really is a gap, nextNonce resyncs after nonceStuckTimeout.
+//
+// Errors after a successful broadcast (CheckTx: mined-but-reverted, not mined)
+// are the caller's and never release the nonce: it was spent or is pending.
+func (c *ContractManage) sendTx(ctx context.Context, build func(*bind.TransactOpts) (*types.Transaction, error)) (*types.Transaction, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	au, err := c.reserveAuth()
+	if err != nil {
+		return nil, err // no nonce reserved
+	}
+	n := au.Nonce.Uint64()
+	au.Context = ctx
+	au.NoSend = true
+	tx, err := build(au)
+	if err != nil {
+		c.releaseNonce(n) // never broadcast
+		return nil, err
+	}
+	if tx == nil || tx.Nonce() != n {
+		c.releaseNonce(n)
+		return nil, fmt.Errorf("built tx does not carry the reserved nonce %d", n)
+	}
+	cl, err := c.Client(ctx)
+	if err != nil {
+		c.releaseNonce(n) // not broadcast: no client to send with
+		return nil, err
+	}
+	err = cl.SendTransaction(ctx, tx)
+	if err == nil {
+		return tx, nil
+	}
+	switch classifySendErr(err) {
+	case sendPooled:
+		return tx, nil
+	case sendRejected:
+		c.releaseNonce(n)
+		return nil, err
+	case sendNonceUsed:
+		// another tx holds n, so it is no gap; if the chain is ahead of our
+		// tracking, the next reservation adopts its nonce (nextNonce)
+		return nil, err
+	default:
+		// No answer. If the node has the tx after all, carry on as sent.
+		qctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _, qerr := cl.TransactionByHash(qctx, tx.Hash())
+		cancel()
+		if qerr == nil {
+			return tx, nil
+		}
+		com.Logger.Warnf("send tx %s (nonce %d): no answer (%v); nonce kept in case it was accepted", tx.Hash().Hex(), n, err)
+		return nil, err
+	}
 }
 
 func (c *ContractManage) GetTransactionReceipt(hash common.Hash) (*types.Receipt, error) {
@@ -502,8 +678,17 @@ func (c *ContractManage) CheckTxCtx(ctx context.Context, txHash common.Hash) err
 			com.Logger.Warn("tx revert: ", err)
 			return err
 		}
-		if receipt.GasUsed != receipt.CumulativeGasUsed {
-			return fmt.Errorf("%s transaction exceed gas limit", txHash)
+		// (GasUsed != CumulativeGasUsed, tested here before, only means the tx
+		// was not first in its block; it says nothing about the gas limit.)
+		if cl, cerr := c.Client(ctx); cerr == nil {
+			qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			tx, _, terr := cl.TransactionByHash(qctx, txHash)
+			cancel()
+			if terr == nil {
+				if err := com.UsedAllGas(txHash, receipt.GasUsed, tx.Gas()); err != nil {
+					return err
+				}
+			}
 		}
 		return fmt.Errorf("%s transaction mined but execution failed, check your input", txHash)
 	}
@@ -621,12 +806,52 @@ func splitEndpoints(s string) []string {
 	return out
 }
 
+// Transfer sends value (native coin) to toAddr. Like every tx of this
+// manager it goes through sendTx, so it shares the nonce tracker.
 func (c *ContractManage) Transfer(toAddr common.Address, value *big.Int) error {
-	return com.Transfer(c.RPC, c.sk, toAddr, value)
+	tx, err := c.sendTx(context.Background(), func(au *bind.TransactOpts) (*types.Transaction, error) {
+		const gas = 23000        // as com.Transfer
+		if au.GasFeeCap != nil { // 1559 chain: the fees reserveAuth priced
+			return au.Signer(au.From, types.NewTx(&types.DynamicFeeTx{
+				ChainID: c.ChainID, Nonce: au.Nonce.Uint64(), GasTipCap: au.GasTipCap, GasFeeCap: au.GasFeeCap,
+				Gas: gas, To: &toAddr, Value: value,
+			}))
+		}
+		gasPrice := au.GasPrice
+		if gasPrice == nil {
+			cl, err := c.Client(au.Context)
+			if err != nil {
+				return nil, err
+			}
+			if gasPrice, err = cl.SuggestGasPrice(au.Context); err != nil {
+				return nil, err
+			}
+		}
+		return au.Signer(au.From, types.NewTransaction(au.Nonce.Uint64(), toAddr, value, gas, gasPrice, nil))
+	})
+	if err != nil {
+		return err
+	}
+	return c.CheckTx(tx.Hash())
 }
 
+// TransferToken sends value of the DA token to toAddr, through sendTx.
 func (c *ContractManage) TransferToken(toAddr common.Address, value *big.Int) error {
-	return com.TransferToken(c.RPC, c.ChainID, c.sk, c.TokenAddr, toAddr, value)
+	tx, err := c.sendTx(context.Background(), func(au *bind.TransactOpts) (*types.Transaction, error) {
+		cl, err := c.Client(au.Context)
+		if err != nil {
+			return nil, err
+		}
+		ti, err := token.NewToken(c.TokenAddr, cl)
+		if err != nil {
+			return nil, err
+		}
+		return ti.Transfer(au, toAddr, value)
+	})
+	if err != nil {
+		return err
+	}
+	return c.CheckTx(tx.Hash())
 }
 
 func (c *ContractManage) BalanceOf(toAddr common.Address) *big.Int {

@@ -65,6 +65,15 @@ func WithLocalTTL(d time.Duration) Option {
 	return func(sf *LogFS) { sf.localTTL = d }
 }
 
+// WithReclaimGate restricts TTL reclaim: a sealed volume is deleted locally
+// only once canReclaim(idx) also says its owner is done with the local file.
+// The hub passes "the DA drain has committed this volume": the drain hashes
+// and uploads the local file, and with the file gone it could neither confirm
+// an earlier upload's record nor upload, so it stalled on that volume.
+func WithReclaimGate(canReclaim func(idx uint64) bool) Option {
+	return func(sf *LogFS) { sf.canReclaim = canReclaim }
+}
+
 type LogMeta struct {
 	Index uint64 // which volume
 	Start uint64
@@ -120,6 +129,7 @@ type LogFS struct {
 	// volumes confirmed uploaded are deleted locally once older than localTTL.
 	// uploadedAt records upload completion time per volume idx (guarded by ulMu).
 	localTTL    time.Duration
+	canReclaim  func(idx uint64) bool // nil: TTL + upload alone decide
 	uploadedAt  map[uint64]time.Time
 	ulMu        sync.Mutex
 	stopReclaim chan struct{}
@@ -263,6 +273,9 @@ func (sf *LogFS) reclaimPass() {
 	sf.ulMu.Unlock()
 
 	for _, idx := range due {
+		if sf.canReclaim != nil && !sf.canReclaim(idx) {
+			continue // still needed locally; asked again next pass
+		}
 		if !sf.fdc.tryEvict(idx) {
 			continue // fd in use; try again next tick
 		}
@@ -292,7 +305,7 @@ func GetIndex(local, addr string) uint64 {
 // finish independently), then closes the fd and opens the next one. New
 // reservations are blocked meanwhile because they too need sf.Lock.
 func (sf *LogFS) forward() error {
-	sf.wg.Wait()          // let in-flight writes on the current volume finish
+	sf.wg.Wait() // let in-flight writes on the current volume finish
 	sf.wg = &sync.WaitGroup{}
 
 	if sf.fsyncGroup {

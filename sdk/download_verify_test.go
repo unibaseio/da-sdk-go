@@ -32,6 +32,11 @@ func (c cachedPieces) GetPiece(_ context.Context, name string, w io.Writer, _ ty
 	return types.PieceReceipt{}, nil
 }
 
+func (c cachedPieces) DeleteData(_ context.Context, name string) error {
+	delete(c.data, name)
+	return nil
+}
+
 // gatewayWith serves one file receipt and, like a gateway predating owner
 // filtering, ignores ?owner=.
 func gatewayWith(t *testing.T, fr types.FileReceipt) *httptest.Server {
@@ -71,22 +76,30 @@ func TestDownloadChecksFileHash(t *testing.T) {
 		name    string
 		hash    string
 		wantErr bool
+		wantOut string
 	}{
-		{"matching hash", hex.EncodeToString(good[:]), false},
-		{"forged data", strings.Repeat("ab", 32), true},
+		{"matching hash", hex.EncodeToString(good[:]), false, "hello world"},
+		// with a cache the file is checked before it is written: nothing goes
+		// out, and the pieces that did not check out are evicted (the
+		// refetch then fails: this gateway serves no pieces)
+		{"forged data", strings.Repeat("ab", 32), true, ""},
 	} {
 		gw := gatewayWith(t, types.FileReceipt{
 			FileCore: types.FileCore{Name: "f", Hash: c.hash, Owner: owner},
 			Pieces:   []string{"p1", "p2"},
 		})
+		ks := cachedPieces{data: map[string][]byte{"p1": parts["p1"], "p2": parts["p2"]}}
 		var out bytes.Buffer
-		err := DownloadOf(gw.URL, types.Auth{}, "f", owner, cachedPieces{data: parts}, &out)
+		err := DownloadOf(gw.URL, types.Auth{}, "f", owner, ks, &out)
 		gw.Close()
 		if (err != nil) != c.wantErr {
 			t.Fatalf("%s: err=%v, wantErr=%v", c.name, err, c.wantErr)
 		}
-		if out.String() != "hello world" {
+		if out.String() != c.wantOut {
 			t.Fatalf("%s: wrote %q", c.name, out.String())
+		}
+		if c.wantErr && len(ks.data) != 0 {
+			t.Fatalf("%s: pieces that failed the check stayed cached", c.name)
 		}
 	}
 }

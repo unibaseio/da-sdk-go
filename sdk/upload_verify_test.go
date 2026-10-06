@@ -81,3 +81,22 @@ func TestUploadDataReportsReadError(t *testing.T) {
 		t.Fatal("upload of an unreadable file reported success")
 	}
 }
+
+// A stream cannot make the client read an answer of any size (audit N11).
+func TestUploadDataBoundsAnswer(t *testing.T) {
+	pol := types.Policy{N: 6, K: 4}
+	fp := writeTemp(t, testData())
+	big := strings.Repeat("x", 3<<20)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, big)
+	}))
+	defer s.Close()
+	_, err := UploadData(s.URL, types.Auth{}, pol, fp)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("an oversized answer was read: %v", err)
+	}
+	if l := uploadAnswerLimit(fp, pol); l != 128<<10 {
+		t.Fatalf("limit for a one-piece file: %d", l)
+	}
+}
