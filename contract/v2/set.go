@@ -16,6 +16,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	etypes "github.com/ethereum/go-ethereum/core/types"
 )
 
 // CurrentProofVersion is the proof-format version this client generates (V6-B2).
@@ -59,11 +60,9 @@ func (c *ContractManage) Attest(epoch uint64) error {
 	if err != nil {
 		return err
 	}
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-	tx, err := vi.Attest(au, epoch)
+	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return vi.Attest(au, epoch)
+	})
 	if err != nil {
 		return err
 	}
@@ -82,11 +81,9 @@ func (c *ContractManage) Claim() error {
 	if err != nil {
 		return err
 	}
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-	tx, err := vi.Claim(au)
+	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return vi.Claim(au)
+	})
 	if err != nil {
 		return err
 	}
@@ -117,12 +114,9 @@ func (c *ContractManage) UpdateEpoch() (uint64, error) {
 		return 0, err
 	}
 
-	au, err := c.MakeAuth()
-	if err != nil {
-		return 0, err
-	}
-
-	tx, err := ei.Check(au)
+	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return ei.Check(au)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -131,7 +125,7 @@ func (c *ContractManage) UpdateEpoch() (uint64, error) {
 		return 0, err
 	}
 
-	return ei.Current(&bind.CallOpts{From: au.From})
+	return ei.Current(&bind.CallOpts{From: c.From()})
 }
 
 func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
@@ -148,7 +142,7 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	}
 
 	// Decide whether a tx is needed before reserving a nonce: an early return
-	// after MakeAuth left a nonce gap that stalled every later tx (every store
+	// after reserving a nonce left a gap that stalled every later tx (every store
 	// startup took this path on an already-active node).
 	from := c.From()
 	if val == nil {
@@ -186,13 +180,10 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	}
 
 	com.Logger.Debug("register node: ", from, val)
-	au, err := c.MakeAuth()
+	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return ti.Approve(au, c.NodeAddr, val)
+	})
 	if err != nil {
-		return err
-	}
-	tx, err := ti.Approve(au, c.NodeAddr, val)
-	if err != nil {
-		c.releaseNonce(au.Nonce.Uint64()) // never broadcast
 		return err
 	}
 	err = c.CheckTx(tx.Hash())
@@ -201,23 +192,20 @@ func (c *ContractManage) RegisterNode(_typ uint8, val *big.Int) error {
 	}
 	// Wait for the RPC to observe the approve before Stake reads the allowance
 	// on a possibly-stale replica. See waitForAllowance.
-	if err = c.waitForAllowance(ctx, ti, au.From, c.NodeAddr, val); err != nil {
+	if err = c.waitForAllowance(ctx, ti, from, c.NodeAddr, val); err != nil {
 		return err
 	}
-	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
+	tx, err = c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return ni.Stake(au, _typ, val)
+	})
 	if err != nil {
-		return err
-	}
-	tx, err = ni.Stake(au, _typ, val)
-	if err != nil {
-		c.releaseNonce(au.Nonce.Uint64()) // never broadcast
 		return err
 	}
 	err = c.CheckTx(tx.Hash())
 	if err != nil {
 		return err
 	}
-	return c.waitForActive(ctx, ni, au.From, _typ)
+	return c.waitForActive(ctx, ni, from, _typ)
 }
 
 // waitForActive polls Node.check after a stake until the node reads active.
@@ -293,20 +281,18 @@ func (c *ContractManage) addPieceImpl(ctx context.Context, pc types.PieceCore, o
 	val := AddPieceCost(pc)
 	com.Logger.Debug("submitpiece val: ", utils.FormatEth(val))
 
-	au, err := c.MakeAuth()
-	if err != nil {
-		return "", err
-	}
-	au.Context = ctx // a cancelled ctx aborts the send's EstimateGas too
-
+	from := c.From()
 	ti, err := c.NewToken(ctx)
 	if err != nil {
 		return "", err
 	}
 
-	gtoken := c.BalanceOf(au.From)
+	gtoken := c.BalanceOf(from)
 	com.Logger.Debug("submitpiece0: ", gtoken)
-	tx, err := ti.Approve(au, c.PieceAddr, val)
+	// ctx reaches the send too: a cancelled ctx aborts its EstimateGas
+	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return ti.Approve(au, c.PieceAddr, val)
+	})
 	if err != nil {
 		return "", err
 	}
@@ -317,7 +303,7 @@ func (c *ContractManage) addPieceImpl(ctx context.Context, pc types.PieceCore, o
 	// Wait for the RPC's read side to observe the approve before addPiece's
 	// estimateGas reads the allowance (else a stale replica reverts the
 	// in-contract safeTransferFrom). See waitForAllowance.
-	if err = c.waitForAllowance(ctx, ti, au.From, c.PieceAddr, val); err != nil {
+	if err = c.waitForAllowance(ctx, ti, from, c.PieceAddr, val); err != nil {
 		return "", err
 	}
 
@@ -332,17 +318,13 @@ func (c *ContractManage) addPieceImpl(ctx context.Context, pc types.PieceCore, o
 	}
 
 	com.Logger.Debug("add piece: ", pc)
-	com.Logger.Debug("submitpiece1: ", c.BalanceOf(au.From))
-	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
-	if err != nil {
-		return "", err
-	}
-	au.Context = ctx
-	if owner != nil {
-		tx, err = fi.AddPieceFor(au, *owner, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
-	} else {
-		tx, err = fi.AddPiece(au, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
-	}
+	com.Logger.Debug("submitpiece1: ", c.BalanceOf(from))
+	tx, err = c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		if owner != nil {
+			return fi.AddPieceFor(au, *owner, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
+		}
+		return fi.AddPiece(au, pb, pc.Price, uint64(pc.Size), pc.Expire, pc.Policy.N, pc.Policy.K, pc.Streamer)
+	})
 	if err != nil {
 		return "", err
 	}
@@ -350,8 +332,8 @@ func (c *ContractManage) addPieceImpl(ctx context.Context, pc types.PieceCore, o
 	if err != nil {
 		return "", err
 	}
-	com.Logger.Debug("submitpiece2: ", c.BalanceOf(au.From))
-	com.Logger.Debug("submitpiece cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(au.From))))
+	com.Logger.Debug("submitpiece2: ", c.BalanceOf(from))
+	com.Logger.Debug("submitpiece cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(from))))
 
 	return tx.Hash().String(), nil
 }
@@ -369,16 +351,12 @@ func (c *ContractManage) AddReplica(rc types.ReplicaCore, pf []byte) error {
 		return err
 	}
 
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
+	from := c.From()
 	pbyte, err := com.G1StringInSolidity(rc.Piece)
 	if err != nil {
 		return err
 	}
-	_pi, err := fi.GetPIndex(&bind.CallOpts{From: au.From}, pbyte)
+	_pi, err := fi.GetPIndex(&bind.CallOpts{From: from}, pbyte)
 	if err != nil {
 		return err
 	}
@@ -387,7 +365,7 @@ func (c *ContractManage) AddReplica(rc types.ReplicaCore, pf []byte) error {
 		return fmt.Errorf("%s is not on chain", rc.Piece)
 	}
 
-	_ri, err := fi.GetRIndex(&bind.CallOpts{From: au.From}, rb)
+	_ri, err := fi.GetRIndex(&bind.CallOpts{From: from}, rb)
 	if err != nil {
 		return err
 	}
@@ -396,10 +374,12 @@ func (c *ContractManage) AddReplica(rc types.ReplicaCore, pf []byte) error {
 		return fmt.Errorf("%s is already on chain", rc.Name)
 	}
 
-	gtoken := c.BalanceOf(au.From)
+	gtoken := c.BalanceOf(from)
 	com.Logger.Debug("add replica: ", _pi, rc)
-	com.Logger.Debug("submitreplica0: ", c.BalanceOf(au.From))
-	tx, err := fi.AddReplica(au, rb, _pi, rc.Index, pf)
+	com.Logger.Debug("submitreplica0: ", gtoken)
+	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return fi.AddReplica(au, rb, _pi, rc.Index, pf)
+	})
 	if err != nil {
 		return err
 	}
@@ -407,8 +387,8 @@ func (c *ContractManage) AddReplica(rc types.ReplicaCore, pf []byte) error {
 	if err != nil {
 		return err
 	}
-	com.Logger.Debug("submitreplica1: ", c.BalanceOf(au.From))
-	com.Logger.Debug("submitreplica cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(au.From))))
+	com.Logger.Debug("submitreplica1: ", c.BalanceOf(from))
+	com.Logger.Debug("submitreplica cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(from))))
 
 	return nil
 }
@@ -423,12 +403,9 @@ func (c *ContractManage) UpdateStore(store common.Address) error {
 		return err
 	}
 
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
-	tx, err := fi.CheckStore(au, store)
+	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return fi.CheckStore(au, store)
+	})
 	if err != nil {
 		return err
 	}
@@ -441,70 +418,69 @@ func (c *ContractManage) UpdateStore(store common.Address) error {
 	return nil
 }
 
-func (c *ContractManage) ChallengeRS(_pn, _rn string, _pri uint8) error {
-	ctx, cancle := context.WithTimeout(context.TODO(), 3*time.Minute)
-	defer cancle()
-
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
+// g1OrHex decodes a G1 name to its Solidity encoding, accepting raw hex too.
+func g1OrHex(s string) ([]byte, error) {
+	b, err := com.G1StringInSolidity(s)
+	if err == nil {
+		return b, nil
 	}
+	return hex.DecodeString(s)
+}
 
+// approvePenalty approves spender for the challenge stake and waits until the
+// RPC's read side sees the allowance (else a stale replica reverts the
+// challenge's safeTransferFrom). See waitForAllowance.
+func (c *ContractManage) approvePenalty(ctx context.Context, spender common.Address) error {
 	ti, err := c.NewToken(ctx)
 	if err != nil {
 		return err
 	}
-
-	tx, err := ti.Approve(au, c.RSProofAddr, com.DefaultPenalty)
+	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return ti.Approve(au, spender, com.DefaultPenalty)
+	})
 	if err != nil {
 		return err
 	}
-	err = c.CheckTx(tx.Hash())
+	if err = c.CheckTx(tx.Hash()); err != nil {
+		return err
+	}
+	return c.waitForAllowance(ctx, ti, c.From(), spender, com.DefaultPenalty)
+}
+
+// sendAndWait sends one transaction through sendTx and waits for it to be mined.
+func (c *ContractManage) sendAndWait(ctx context.Context, build func(*bind.TransactOpts) (*etypes.Transaction, error)) error {
+	tx, err := c.sendTx(ctx, build)
 	if err != nil {
 		return err
 	}
-	// Wait for the RPC to observe the penalty approve before Challenge reads the
-	// allowance on a possibly-stale replica. See waitForAllowance.
-	if err = c.waitForAllowance(ctx, ti, au.From, c.RSProofAddr, com.DefaultPenalty); err != nil {
+	return c.CheckTx(tx.Hash())
+}
+
+func (c *ContractManage) ChallengeRS(_pn, _rn string, _pri uint8) error {
+	ctx, cancle := context.WithTimeout(context.TODO(), 3*time.Minute)
+	defer cancle()
+
+	pname, err := g1OrHex(_pn)
+	if err != nil {
 		return err
 	}
-
+	rname, err := g1OrHex(_rn)
+	if err != nil {
+		return err
+	}
 	rsp, err := c.NewRSProof(ctx)
 	if err != nil {
 		return err
 	}
-	pname, err := com.G1StringInSolidity(_pn)
-	if err != nil {
-		pname, err = hex.DecodeString(_pn)
-		if err != nil {
-			return err
-		}
-	}
 
-	rname, err := com.G1StringInSolidity(_rn)
-	if err != nil {
-		rname, err = hex.DecodeString(_rn)
-		if err != nil {
-			return err
-		}
+	if err := c.approvePenalty(ctx, c.RSProofAddr); err != nil {
+		return err
 	}
 
 	com.Logger.Debug("challenge rs proof: ", _rn, _pn, _pri)
-	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
-	if err != nil {
-		return err
-	}
-	tx, err = rsp.Challenge(au, pname, rname, _pri)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return rsp.Challenge(au, pname, rname, _pri)
+	})
 }
 
 func (c *ContractManage) ProveRS(_pn, _rn string, _pri uint8, _pf []byte) error {
@@ -515,11 +491,6 @@ func (c *ContractManage) ProveRS(_pn, _rn string, _pri uint8, _pf []byte) error 
 		return err
 	}
 
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
 	pname, err := com.G1StringInSolidity(_pn)
 	if err != nil {
 		return err
@@ -530,17 +501,9 @@ func (c *ContractManage) ProveRS(_pn, _rn string, _pri uint8, _pf []byte) error 
 		return err
 	}
 
-	tx, err := rsp.Prove(au, pname, rname, _pri, CurrentProofVersion, _pf)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return rsp.Prove(au, pname, rname, _pri, CurrentProofVersion, _pf)
+	})
 }
 
 func (c *ContractManage) CheckRSChallenge(_pn, _rn string, _pri uint8) error {
@@ -551,25 +514,13 @@ func (c *ContractManage) CheckRSChallenge(_pn, _rn string, _pri uint8) error {
 		return err
 	}
 
-	au, err := c.MakeAuth()
+	pname, err := g1OrHex(_pn)
 	if err != nil {
 		return err
 	}
-
-	pname, err := com.G1StringInSolidity(_pn)
+	rname, err := g1OrHex(_rn)
 	if err != nil {
-		pname, err = hex.DecodeString(_pn)
-		if err != nil {
-			return err
-		}
-	}
-
-	rname, err := com.G1StringInSolidity(_rn)
-	if err != nil {
-		rname, err = hex.DecodeString(_rn)
-		if err != nil {
-			return err
-		}
+		return err
 	}
 
 	piece, err := c.NewPiece(ctx)
@@ -577,27 +528,20 @@ func (c *ContractManage) CheckRSChallenge(_pn, _rn string, _pri uint8) error {
 		return err
 	}
 
-	_pi, err := piece.GetPIndex(&bind.CallOpts{From: au.From}, pname)
+	from := c.From()
+	_pi, err := piece.GetPIndex(&bind.CallOpts{From: from}, pname)
 	if err != nil {
 		return err
 	}
 
-	_ri, err := piece.GetRIndex(&bind.CallOpts{From: au.From}, rname)
+	_ri, err := piece.GetRIndex(&bind.CallOpts{From: from}, rname)
 	if err != nil {
 		return err
 	}
 
-	tx, err := rsp.Check(au, _pi, _ri, _pri)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return rsp.Check(au, _pi, _ri, _pri)
+	})
 }
 
 func (c *ContractManage) SubmitProof(_ep uint64, _pf bls.EpochProof) error {
@@ -608,30 +552,23 @@ func (c *ContractManage) SubmitProof(_ep uint64, _pf bls.EpochProof) error {
 		return err
 	}
 
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
 	_sum := com.G1InSolidity(_pf.Sum)
 	_pfb := com.G1InSolidity(_pf.H)
 	_frb := com.FrInSolidity(_pf.ClaimedValue)
 	_pfb = append(_pfb, _frb...)
 
-	gtoken := c.BalanceOf(au.From)
-	com.Logger.Debug("submit epoch proof: ", au.From, _ep)
-	com.Logger.Debug("submitproof0: ", c.BalanceOf(au.From))
-	tx, err := pi.Submit(au, _ep, _sum, _pfb)
+	from := c.From()
+	gtoken := c.BalanceOf(from)
+	com.Logger.Debug("submit epoch proof: ", from, _ep)
+	com.Logger.Debug("submitproof0: ", gtoken)
+	err = c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return pi.Submit(au, _ep, _sum, _pfb)
+	})
 	if err != nil {
 		return err
 	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-	com.Logger.Debug("submitproof1: ", c.BalanceOf(au.From))
-	com.Logger.Debug("submitproof cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(au.From))))
+	com.Logger.Debug("submitproof1: ", c.BalanceOf(from))
+	com.Logger.Debug("submitproof cost: ", utils.FormatEth(gtoken.Sub(gtoken, c.BalanceOf(from))))
 	return nil
 }
 
@@ -639,51 +576,19 @@ func (c *ContractManage) ChallengeKZG(addr common.Address, _ep uint64) error {
 	ctx, cancle := context.WithTimeout(context.TODO(), 3*time.Minute)
 	defer cancle()
 
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
-	ti, err := c.NewToken(ctx)
-	if err != nil {
-		return err
-	}
-
-	tx, err := ti.Approve(au, c.EProofAddr, com.DefaultPenalty)
-	if err != nil {
-		return err
-	}
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-	// Wait for the RPC to observe the penalty approve before ChalKZG reads the
-	// allowance on a possibly-stale replica. See waitForAllowance.
-	if err = c.waitForAllowance(ctx, ti, au.From, c.EProofAddr, com.DefaultPenalty); err != nil {
-		return err
-	}
-
 	pi, err := c.NewEProof(ctx)
 	if err != nil {
 		return err
 	}
 
+	if err := c.approvePenalty(ctx, c.EProofAddr); err != nil {
+		return err
+	}
+
 	com.Logger.Debug("challenge eproof: ", addr, _ep)
-	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
-	if err != nil {
-		return err
-	}
-	tx, err = pi.ChalKZG(au, addr, _ep)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return pi.ChalKZG(au, addr, _ep)
+	})
 }
 
 func (c *ContractManage) ProveKZG(_ep uint64, _wroot []byte, _pf []byte) error {
@@ -698,55 +603,17 @@ func (c *ContractManage) ProveKZG(_ep uint64, _wroot []byte, _pf []byte) error {
 		return err
 	}
 
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
 	var _wt [32]byte
 	copy(_wt[:], _wroot)
 
-	tx, err := pi.ProveKZG(au, _ep, _wt, CurrentProofVersion, _pf)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return pi.ProveKZG(au, _ep, _wt, CurrentProofVersion, _pf)
+	})
 }
 
 func (c *ContractManage) ChallengeSum(addr common.Address, _ep uint64, _qIndex uint8, sum string) error {
 	ctx, cancle := context.WithTimeout(context.TODO(), 3*time.Minute)
 	defer cancle()
-
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-	ti, err := c.NewToken(ctx)
-	if err != nil {
-		return err
-	}
-
-	if len(sum) > 0 {
-		tx, err := ti.Approve(au, c.EProofAddr, com.DefaultPenalty)
-		if err != nil {
-			return err
-		}
-		err = c.CheckTx(tx.Hash())
-		if err != nil {
-			return err
-		}
-		// Wait for the RPC to observe the penalty approve before Challenge reads
-		// the allowance on a possibly-stale replica. See waitForAllowance.
-		if err = c.waitForAllowance(ctx, ti, au.From, c.EProofAddr, com.DefaultPenalty); err != nil {
-			return err
-		}
-	}
 
 	pi, err := c.NewEProof(ctx)
 	if err != nil {
@@ -754,69 +621,28 @@ func (c *ContractManage) ChallengeSum(addr common.Address, _ep uint64, _qIndex u
 	}
 
 	if len(sum) > 0 {
-		_sum, err := com.G1StringInSolidity(sum)
+		_sum, err := g1OrHex(sum)
 		if err != nil {
-			_sum, err = hex.DecodeString(sum)
-			if err != nil {
-				return err
-			}
+			return err
+		}
+		if err := c.approvePenalty(ctx, c.EProofAddr); err != nil {
+			return err
 		}
 		com.Logger.Debug("challenge eproof sum0: ", addr, _ep)
-		au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
-		if err != nil {
-			return err
-		}
-		tx, err := pi.Challenge(au, addr, _ep, _sum)
-		if err != nil {
-			return err
-		}
-		err = c.CheckTx(tx.Hash())
-		if err != nil {
-			return err
-		}
-	} else {
-		com.Logger.Debug("challenge eproof sum: ", addr, _ep, _qIndex)
-		tx, err := pi.ChalCom(au, addr, _ep, _qIndex)
-		if err != nil {
-			return err
-		}
-
-		err = c.CheckTx(tx.Hash())
-		if err != nil {
-			return err
-		}
+		return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+			return pi.Challenge(au, addr, _ep, _sum)
+		})
 	}
 
-	return nil
+	com.Logger.Debug("challenge eproof sum: ", addr, _ep, _qIndex)
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return pi.ChalCom(au, addr, _ep, _qIndex)
+	})
 }
 
 func (c *ContractManage) ProveSum(_ep uint64, coms []bls.G1, _pf []byte) error {
 	ctx, cancle := context.WithTimeout(context.TODO(), 3*time.Minute)
 	defer cancle()
-
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
-	ti, err := c.NewToken(ctx)
-	if err != nil {
-		return err
-	}
-
-	tx, err := ti.Approve(au, c.EProofAddr, com.DefaultPenalty)
-	if err != nil {
-		return err
-	}
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-	// Wait for the RPC to observe the penalty approve before ProveCom reads the
-	// allowance on a possibly-stale replica. See waitForAllowance.
-	if err = c.waitForAllowance(ctx, ti, au.From, c.EProofAddr, com.DefaultPenalty); err != nil {
-		return err
-	}
 
 	pi, err := c.NewEProof(ctx)
 	if err != nil {
@@ -828,32 +654,21 @@ func (c *ContractManage) ProveSum(_ep uint64, coms []bls.G1, _pf []byte) error {
 		_coms[i] = com.G1InSolidity(coms[i])
 	}
 
-	com.Logger.Debug("prove eproof sum: ", au.From, _ep)
-	au, err = c.MakeAuth() // fresh nonce: the prior au's nonce is already spent
-	if err != nil {
-		return err
-	}
-	tx, err = pi.ProveCom(au, _ep, _coms, CurrentProofVersion, _pf)
-	if err != nil {
+	// Unchanged from before N5: an approve precedes proveCom, although
+	// EProof.proveCom itself moves no tokens.
+	if err := c.approvePenalty(ctx, c.EProofAddr); err != nil {
 		return err
 	}
 
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	com.Logger.Debug("prove eproof sum: ", c.From(), _ep)
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return pi.ProveCom(au, _ep, _coms, CurrentProofVersion, _pf)
+	})
 }
 
 func (c *ContractManage) ChallengeOne(addr common.Address, _ep uint64, _qIndex uint8) error {
 	ctx, cancle := context.WithTimeout(context.TODO(), 1*time.Minute)
 	defer cancle()
-
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
 
 	pi, err := c.NewEProof(ctx)
 	if err != nil {
@@ -861,27 +676,14 @@ func (c *ContractManage) ChallengeOne(addr common.Address, _ep uint64, _qIndex u
 	}
 
 	com.Logger.Debug("challenge eproof one: ", addr, _ep, _qIndex)
-	tx, err := pi.ChalOne(au, addr, _ep, _qIndex)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return pi.ChalOne(au, addr, _ep, _qIndex)
+	})
 }
 
 func (c *ContractManage) ProveOne(_ep uint64, _com bls.G1, _pf []byte) error {
 	ctx, cancle := context.WithTimeout(context.TODO(), 3*time.Minute)
 	defer cancle()
-
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
 
 	pi, err := c.NewEProof(ctx)
 	if err != nil {
@@ -889,28 +691,15 @@ func (c *ContractManage) ProveOne(_ep uint64, _com bls.G1, _pf []byte) error {
 	}
 
 	_commit := com.G1InSolidity(_com)
-	com.Logger.Debug("prove eproof one: ", au.From, _ep)
-	tx, err := pi.ProveOne(au, _ep, _commit, CurrentProofVersion, _pf)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	com.Logger.Debug("prove eproof one: ", c.From(), _ep)
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return pi.ProveOne(au, _ep, _commit, CurrentProofVersion, _pf)
+	})
 }
 
 func (c *ContractManage) CheckEpochChallenge(addr common.Address, _ep uint64) error {
 	ctx, cancle := context.WithTimeout(context.TODO(), 1*time.Minute)
 	defer cancle()
-
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
 
 	ep, err := c.NewEProof(ctx)
 	if err != nil {
@@ -918,17 +707,9 @@ func (c *ContractManage) CheckEpochChallenge(addr common.Address, _ep uint64) er
 	}
 
 	com.Logger.Debug("check eproof: ", addr, _ep)
-	tx, err := ep.Check(au, addr, _ep)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return ep.Check(au, addr, _ep)
+	})
 }
 
 func (c *ContractManage) TestProveRS(rsn, rsk uint8, pub []*big.Int, _pf []byte) error {
@@ -1048,22 +829,9 @@ func (c *ContractManage) Settle(_money *big.Int) error {
 	if err != nil {
 		return err
 	}
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
-	tx, err := fi.Settle(au, _money)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return fi.Settle(au, _money)
+	})
 }
 
 func (c *ContractManage) WithdrawRevenue(_money *big.Int) error {
@@ -1073,20 +841,7 @@ func (c *ContractManage) WithdrawRevenue(_money *big.Int) error {
 	if err != nil {
 		return err
 	}
-	au, err := c.MakeAuth()
-	if err != nil {
-		return err
-	}
-
-	tx, err := fi.Withdraw(au, _money)
-	if err != nil {
-		return err
-	}
-
-	err = c.CheckTx(tx.Hash())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.sendAndWait(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
+		return fi.Withdraw(au, _money)
+	})
 }

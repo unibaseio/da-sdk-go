@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // nonceStuckTimeout: if our locally-tracked nonce stays ahead of the chain's
@@ -421,21 +422,142 @@ func NewContractManage(sk *ecdsa.PrivateKey, chainType string) (*ContractManage,
 	return cm, nil
 }
 
-func (c *ContractManage) MakeAuth() (*bind.TransactOpts, error) {
-	au, err := com.MakeAuthBySk(c.RPC, c.ChainID, c.sk)
+// reserveAuth builds transact options carrying a freshly reserved nonce. It is
+// unexported on purpose: the only caller is sendTx, which hands the nonce back
+// when the transaction never leaves this process. A tx sent with an auth from
+// anywhere else would leak its nonce on failure and stall the key (N5).
+func (c *ContractManage) reserveAuth() (*bind.TransactOpts, error) {
+	au, err := com.MakeAuthBySk(c.activeRPC(), c.ChainID, c.sk)
 	if err != nil {
 		return nil, err
 	}
 	// Pin an explicit, serialized nonce instead of letting go-ethereum fetch
 	// PendingNonceAt at send time (which races across goroutines). Each send
-	// needs its OWN MakeAuth — reusing one auth for multiple sends would reuse
-	// this fixed nonce and self-collide.
+	// needs its OWN reservation — reusing one auth for multiple sends would
+	// reuse this fixed nonce and self-collide.
 	n, err := c.nextNonce()
 	if err != nil {
 		return nil, err
 	}
 	au.Nonce = new(big.Int).SetUint64(n)
 	return au, nil
+}
+
+// sendOutcome is what a failed broadcast says about the reserved nonce.
+type sendOutcome int
+
+const (
+	sendRejected  sendOutcome = iota // the node refused the tx: it is in no pool, the nonce is free
+	sendPooled                       // the node already holds this very tx: treat as sent
+	sendNonceUsed                    // another tx holds this nonce: re-read the chain's view
+	sendUnknown                      // no answer (transport): it may have been accepted, keep the nonce
+)
+
+// classifySendErr maps an eth_sendRawTransaction error to what it says about
+// the tx. A JSON-RPC error (or an HTTP 4xx) is an answer from the node, so the
+// tx was not accepted — except the answers that mean it, or another tx with
+// its nonce, is already pooled. A transport failure, an HTTP 5xx, an internal
+// error or a timeout reported by a proxy leaves it open whether the node
+// accepted it. Pure.
+func classifySendErr(err error) sendOutcome {
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{"already known", "known transaction", "already imported", "already in mempool", "already exists"} {
+		if strings.Contains(msg, s) {
+			return sendPooled
+		}
+	}
+	for _, s := range []string{"nonce too low", "nonce has already been used", "replacement transaction underpriced", "replacement fee too low"} {
+		if strings.Contains(msg, s) {
+			return sendNonceUsed
+		}
+	}
+	var he rpc.HTTPError
+	if errors.As(err, &he) {
+		if he.StatusCode >= 400 && he.StatusCode < 500 {
+			return sendRejected
+		}
+		return sendUnknown
+	}
+	var re rpc.Error
+	if errors.As(err, &re) {
+		if re.ErrorCode() == -32603 || strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out") {
+			return sendUnknown // a proxy may have forwarded it before giving up
+		}
+		return sendRejected
+	}
+	return sendUnknown
+}
+
+// sendTx is the only way contract/v2 sends a transaction. It reserves a nonce,
+// lets build construct and sign the call without broadcasting it (build gets
+// NoSend opts; gas estimation happens inside build), and then broadcasts it
+// itself, so it knows whether the tx left this process:
+//   - build fails (gas estimation reverted, encoding, signing): the tx was never
+//     broadcast, so the nonce is handed back;
+//   - the node rejects the tx: likewise handed back;
+//   - the node already holds it ("already known"): sent;
+//   - the nonce is taken by another tx: the next reservation re-reads the chain;
+//   - no answer (transport failure): the node may have accepted it, so the nonce
+//     is kept; if it really is a gap, nextNonce resyncs after nonceStuckTimeout.
+//
+// Errors after a successful broadcast (CheckTx: mined-but-reverted, not mined)
+// are the caller's and never release the nonce: it was spent or is pending.
+func (c *ContractManage) sendTx(ctx context.Context, build func(*bind.TransactOpts) (*types.Transaction, error)) (*types.Transaction, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	au, err := c.reserveAuth()
+	if err != nil {
+		return nil, err // no nonce reserved
+	}
+	n := au.Nonce.Uint64()
+	au.Context = ctx
+	au.NoSend = true
+	tx, err := build(au)
+	if err != nil {
+		c.releaseNonce(n) // never broadcast
+		return nil, err
+	}
+	if tx == nil || tx.Nonce() != n {
+		c.releaseNonce(n)
+		return nil, fmt.Errorf("built tx does not carry the reserved nonce %d", n)
+	}
+	cl, err := c.Client(ctx)
+	if err != nil {
+		c.releaseNonce(n) // not broadcast: no client to send with
+		return nil, err
+	}
+	err = cl.SendTransaction(ctx, tx)
+	if err == nil {
+		return tx, nil
+	}
+	switch classifySendErr(err) {
+	case sendPooled:
+		return tx, nil
+	case sendRejected:
+		c.releaseNonce(n)
+		return nil, err
+	case sendNonceUsed:
+		c.resyncNonce()
+		return nil, err
+	default:
+		// No answer. If the node has the tx after all, carry on as sent.
+		qctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _, qerr := cl.TransactionByHash(qctx, tx.Hash())
+		cancel()
+		if qerr == nil {
+			return tx, nil
+		}
+		com.Logger.Warnf("send tx %s (nonce %d): no answer (%v); nonce kept in case it was accepted", tx.Hash().Hex(), n, err)
+		return nil, err
+	}
+}
+
+// resyncNonce makes the next reservation adopt the chain's pending nonce.
+func (c *ContractManage) resyncNonce() {
+	c.nonceMu.Lock()
+	c.nonceReady = false
+	c.nonceMu.Unlock()
 }
 
 func (c *ContractManage) GetTransactionReceipt(hash common.Hash) (*types.Receipt, error) {
