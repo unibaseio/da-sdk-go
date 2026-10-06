@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/unibaseio/da-sdk-go/build"
-	"github.com/unibaseio/da-sdk-go/contract/v1/go/token"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/token"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	dlog "github.com/unibaseio/da-sdk-go/lib/log"
 	"github.com/unibaseio/da-sdk-go/lib/utils"

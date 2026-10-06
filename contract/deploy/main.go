@@ -8,7 +8,7 @@ import (
 	"math/big"
 
 	contract "github.com/unibaseio/da-sdk-go/contract/common"
-	"github.com/unibaseio/da-sdk-go/contract/v1/go/token"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/token"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/eproof"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/piece"
 	"github.com/unibaseio/da-sdk-go/contract/v2/go/rsproof"
@@ -164,132 +164,6 @@ func DeployTokenTest(client *ethclient.Client, sk string) error {
 	}
 	log.Println("owner has token: ", bal)
 	return nil
-}
-
-func deployall_v1(client *ethclient.Client, sk string) {
-	minPledge := big.NewInt(1e18)
-	minPledge.Mul(minPledge, big.NewInt(10))
-	err := DeployBank(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = DeployToken(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = SetMiner(client, sk, bankAddr)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = DeployEpoch(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = DeployNode(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = SetMinPledge(client, sk, 1, minPledge)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = SetMinPledge(client, sk, 2, minPledge)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = SetMinPledge(client, sk, 3, minPledge)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = DeployReward(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = DeployControl(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = DeployPiece(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = DeployRSPlonk(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = DeployRSProof(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	for _, p := range types.SupportedPolicies {
-		err = SetRSVKRoot(client, sk, int(p.N), int(p.K))
-		if err != nil {
-			log.Println(err)
-			return
-		}
-	}
-
-	err = DeployEproof(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = DeployEverify(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = DeployKZGPlonk(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = DeployMulPlonk(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = DeployAddPlonk(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = DeployGPU(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = DeployModel(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	err = DeploySpace(client, sk)
-	if err != nil {
-		log.Println(err)
-		return
-	}
 }
 
 // deployall_v2 deploys all V2 contracts:
