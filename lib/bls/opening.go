@@ -54,6 +54,42 @@ func SRSVerifyKey() (*VerifyKey, error) {
 	return srsVK, srsVKErr
 }
 
+// Accumulation formats of an encoding's opening H (EncodeWitness.Format).
+const (
+	// FormatV1: shard i's C_i, M_i, L_i are weighted 1, v_i, v_i² with
+	// v_i = MiMC(y_i). The data commitments share weight 1, so only their
+	// sum is bound (2026-10-05 audit, N1). Kept to verify existing encodings.
+	FormatV1 uint8 = 1
+	// FormatV2: one coefficient γ derived after every commitment and claimed
+	// value is fixed; shard i's C_i, M_i, L_i are weighted γ^(3i), γ^(3i+1),
+	// γ^(3i+2), so every commitment is bound on its own.
+	FormatV2 uint8 = 2
+)
+
+// BatchCoefficient is FormatV2's γ = MiMC(point ‖ y_0 ‖ … ‖ y_{k-1}): point
+// is the raw Fiat-Shamir output (ew.Challenge, which already binds every
+// commitment) and each y_i the shard's claimed value, every input one
+// 48-byte field element. The RSOne v2 circuit derives the same value.
+func (ew *EncodeWitness) BatchCoefficient(point []byte) Fr {
+	h := NewFieldHash()
+	h.Write(pad48(point))
+	for i := range ew.ClaimedValues {
+		b := ew.ClaimedValues[i].Marshal()
+		h.Write(pad48(b))
+	}
+	var g Fr
+	g.SetBytes(h.Sum(nil))
+	return g
+}
+
+func pad48(b []byte) []byte {
+	if len(b) >= 48 {
+		return b
+	}
+	out := make([]byte, 48-len(b), 48)
+	return append(out, b...)
+}
+
 // AccCoefficient is v = MiMC(y), the per-shard coefficient of the encoding's
 // accumulated opening (format 1): the shard's move and limit commitments are
 // weighted v and v². The encoder (da-core acc) and the RSOne circuits use
@@ -69,16 +105,10 @@ func AccCoefficient(y Fr) Fr {
 	return v
 }
 
-// VerifyOpening checks the encoder's accumulated KZG opening H: at the
-// Fiat-Shamir point r,
-//
-//	Σ_i (C_i + v_i·M_i + v_i²·L_i)  opens to  Σ_i y_i·(1 + v_i·r^(i·slen) + v_i²·r^(Max-slen))
-//
-// with v_i = AccCoefficient(y_i), slen the shard length in field elements.
-// Together with the claimed values y_i (which the caller checks against the
-// real data) this binds every move and limit commitment, hence the piece
-// root, to the data. In this format the data commitments C_i share the
-// coefficient 1, so only their sum is bound (2026-10-05 audit, N1).
+// VerifyOpening checks the encoder's accumulated KZG opening H under the
+// witness's format. slen is the shard length in field elements. Every point is
+// checked to lie in the prime-order subgroup first: the witness comes from the
+// stream and is decoded without subgroup checks.
 func (ew *EncodeWitness) VerifyOpening(vk *VerifyKey, stream []byte, slen int) error {
 	k := len(ew.MoveCommits)
 	if k == 0 || len(ew.LimitCommits) != k || len(ew.ClaimedValues) != k || len(ew.Commits) < k {
@@ -87,7 +117,34 @@ func (ew *EncodeWitness) VerifyOpening(vk *VerifyKey, stream []byte, slen int) e
 	if slen <= 0 || slen*k > MaxShard {
 		return fmt.Errorf("shard length %d out of range", slen)
 	}
+	pts := append([]G1{ew.Root, ew.H}, ew.Commits...)
+	pts = append(pts, ew.MoveCommits...)
+	pts = append(pts, ew.LimitCommits...)
+	for i := range pts {
+		if !pts[i].IsInSubGroup() {
+			return fmt.Errorf("witness point %d is not in the G1 subgroup", i)
+		}
+	}
+	switch ew.format() {
+	case FormatV1:
+		return ew.verifyOpeningV1(vk, stream, slen)
+	case FormatV2:
+		return ew.verifyOpeningV2(vk, stream, slen)
+	}
+	return fmt.Errorf("unknown witness format %d", ew.Format)
+}
 
+// verifyOpeningV1 checks FormatV1: at the Fiat-Shamir point r,
+//
+//	Σ_i (C_i + v_i·M_i + v_i²·L_i)  opens to  Σ_i y_i·(1 + v_i·r^(i·slen) + v_i²·r^(Max-slen))
+//
+// with v_i = AccCoefficient(y_i), slen the shard length in field elements.
+// Together with the claimed values y_i (which the caller checks against the
+// real data) this binds every move and limit commitment, hence the piece
+// root, to the data. In this format the data commitments C_i share the
+// coefficient 1, so only their sum is bound (2026-10-05 audit, N1).
+func (ew *EncodeWitness) verifyOpeningV1(vk *VerifyKey, stream []byte, slen int) error {
+	k := len(ew.MoveCommits)
 	var r Fr
 	r.SetBytes(ew.Challenge(stream))
 	rLen := new(big.Int)
@@ -124,16 +181,76 @@ func (ew *EncodeWitness) VerifyOpening(vk *VerifyKey, stream []byte, slen int) e
 		rk1.Mul(&rk1, &rStep)
 	}
 
-	// e([value]G₁ - Σ - r·H, G₂) · e(H, [τ]G₂) == 1
+	return checkOpening(vk, &sum, &value, &r, &ew.H)
+}
+
+// verifyOpeningV2 checks FormatV2: with γ = BatchCoefficient(r) and
+// a_i = γ^(3i), at r
+//
+//	Σ_i a_i·(C_i + γ·M_i + γ²·L_i)  opens to  Σ_i a_i·y_i·(1 + γ·r^(i·slen) + γ²·r^(Max-slen))
+//
+// Each commitment has its own weight, so each is bound to its claimed value.
+func (ew *EncodeWitness) verifyOpeningV2(vk *VerifyKey, stream []byte, slen int) error {
+	k := len(ew.MoveCommits)
+	point := ew.Challenge(stream)
+	var r Fr
+	r.SetBytes(point)
+	g := ew.BatchCoefficient(point)
+	var g2, g3 Fr
+	g2.Mul(&g, &g)
+	g3.Mul(&g2, &g)
+
+	e := new(big.Int)
+	var rStep, rk1, rk2 Fr
+	rStep.Exp(r, e.SetInt64(int64(slen)))
+	rk2.Exp(r, e.SetInt64(int64(MaxShard-slen)))
+	rk1.SetOne()
+
+	var sum G1
+	var value Fr
+	var a Fr
+	a.SetOne()
+	gb, g2b := new(big.Int), new(big.Int)
+	g.BigInt(gb)
+	g2.BigInt(g2b)
+	for i := 0; i < k; i++ {
+		// a·(C + γ·M + γ²·L)
+		var t, m, l G1
+		m.ScalarMultiplication(&ew.MoveCommits[i], gb)
+		l.ScalarMultiplication(&ew.LimitCommits[i], g2b)
+		t.Add(&ew.Commits[i], &m)
+		t.Add(&t, &l)
+		ab := new(big.Int)
+		a.BigInt(ab)
+		t.ScalarMultiplication(&t, ab)
+		sum.Add(&sum, &t)
+
+		// a·y·(1 + γ·r^k1 + γ²·r^k2)
+		var f, tmp Fr
+		f.Mul(&g2, &rk2)
+		tmp.Mul(&g, &rk1)
+		f.Add(&f, &tmp)
+		tmp.SetOne()
+		f.Add(&f, &tmp).Mul(&f, &ew.ClaimedValues[i]).Mul(&f, &a)
+		value.Add(&value, &f)
+
+		rk1.Mul(&rk1, &rStep)
+		a.Mul(&a, &g3)
+	}
+	return checkOpening(vk, &sum, &value, &r, &ew.H)
+}
+
+// checkOpening is the KZG check e([value]G₁ - com - r·H, G₂)·e(H, [τ]G₂) == 1.
+func checkOpening(vk *VerifyKey, com *G1, value, r *Fr, h *G1) error {
 	var left, rh G1
 	b := new(big.Int)
 	value.BigInt(b)
 	left.ScalarMultiplication(&vk.G1, b)
-	left.Sub(&left, &sum)
+	left.Sub(&left, com)
 	r.BigInt(b)
-	rh.ScalarMultiplication(&ew.H, b)
+	rh.ScalarMultiplication(h, b)
 	left.Sub(&left, &rh)
-	ok, err := bls12377.PairingCheck([]G1{left, ew.H}, []G2{vk.G2[0], vk.G2[1]})
+	ok, err := bls12377.PairingCheck([]G1{left, *h}, []G2{vk.G2[0], vk.G2[1]})
 	if err != nil {
 		return err
 	}
