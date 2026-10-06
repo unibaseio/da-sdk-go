@@ -624,8 +624,17 @@ func (c *ContractManage) CheckTxCtx(ctx context.Context, txHash common.Hash) err
 			com.Logger.Warn("tx revert: ", err)
 			return err
 		}
-		if receipt.GasUsed != receipt.CumulativeGasUsed {
-			return fmt.Errorf("%s transaction exceed gas limit", txHash)
+		// (GasUsed != CumulativeGasUsed, tested here before, only means the tx
+		// was not first in its block; it says nothing about the gas limit.)
+		if cl, cerr := c.Client(ctx); cerr == nil {
+			qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			tx, _, terr := cl.TransactionByHash(qctx, txHash)
+			cancel()
+			if terr == nil {
+				if err := com.UsedAllGas(txHash, receipt.GasUsed, tx.Gas()); err != nil {
+					return err
+				}
+			}
 		}
 		return fmt.Errorf("%s transaction mined but execution failed, check your input", txHash)
 	}
