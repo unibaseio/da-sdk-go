@@ -46,6 +46,10 @@ func (c *ContractManage) HandleSetEpoch(elog etypes.Log, cabi abi.ABI) (types.Ep
 // calldata is not that method's arguments and cannot be decoded as such.
 var ErrNotDirectCall = errors.New("event's transaction is not a direct call to the method")
 
+// ErrForeignLog means a log handed to a decoder was not emitted by the
+// contract that decoder is for.
+var ErrForeignLog = errors.New("log not emitted by the expected contract")
+
 // directCallInputs decodes the arguments of method m from tx's calldata, but
 // only when tx calls the emitting contract directly with m's selector. Any
 // other shape (a call routed through a contract, or crafted calldata) is
@@ -163,6 +167,9 @@ func (c *ContractManage) HandleAddReplica(elog etypes.Log, cabi abi.ABI) (types.
 		return rc, fmt.Errorf("no event 'AddReplica' in ABI")
 	}
 
+	if elog.Address != c.PieceAddr {
+		return rc, fmt.Errorf("%w: AddReplica log from %s, Piece is %s", ErrForeignLog, elog.Address.Hex(), c.PieceAddr.Hex())
+	}
 	if len(elog.Topics) != 2 {
 		return rc, fmt.Errorf("invalid log topic length")
 	}
@@ -196,9 +203,14 @@ func (c *ContractManage) HandleAddReplica(elog etypes.Log, cabi abi.ABI) (types.
 	if len(inputs) != 4 {
 		return rc, fmt.Errorf("invalid input length")
 	}
-	if err := c.checkReplicaFields(rc.Serial, rc.StoredOn, inputs[0].([]byte), inputs[1].(uint64), inputs[2].(uint8), inputs[3].([]byte)); err != nil {
-		return rc, err
-	}
+	// No re-read of these fields from Piece state (N4). The log comes from
+	// Piece (checked above), whose only AddReplica emit is at the end of
+	// addReplica, and directCallInputs has proved the tx is a direct call to
+	// Piece.addReplica — so a successful tx runs exactly one addReplica, with
+	// exactly these arguments, and it stored rmap[name]=ri, prmap[pi][pri]=ri,
+	// storedOn=caller and root=keccak(proof) from them; Piece never rewrites
+	// those entries. A re-read adds nothing, and reading at the latest block
+	// made a lagging or failing RPC drop the event for good.
 
 	g1, err := com.SolidityToG1(inputs[0].([]byte))
 	if err == nil {

@@ -489,34 +489,3 @@ func (c *ContractManage) GetEpochCommits(_a common.Address, _ep uint64) ([][]byt
 	}
 	return out, nil
 }
-
-// checkReplicaFields confirms replica fields decoded from an addReplica call
-// against what the Piece contract recorded for replica ri: the name maps to ri,
-// slot pri of piece pi holds ri on store, and the proof hashes to ri's root.
-func (c *ContractManage) checkReplicaFields(ri uint64, store common.Address, name []byte, pi uint64, pri uint8, proof []byte) error {
-	ctx, cancle := context.WithTimeout(context.TODO(), readCallTimeout())
-	defer cancle()
-	p, err := c.NewPiece(ctx)
-	if err != nil {
-		return err
-	}
-	opts := &bind.CallOpts{From: com.Base, Context: ctx}
-	if got, err := p.GetRIndex(opts, name); err != nil {
-		return err
-	} else if got != ri {
-		return fmt.Errorf("replica name maps to %d on chain, event says %d", got, ri)
-	}
-	if got, on, err := p.GetPRI(opts, pi, pri); err != nil {
-		return err
-	} else if got != ri || on != store {
-		return fmt.Errorf("piece %d slot %d holds replica %d on %s on chain, event says %d on %s", pi, pri, got, on.Hex(), ri, store.Hex())
-	}
-	info, err := p.GetReplica(opts, ri)
-	if err != nil {
-		return err
-	}
-	if crypto.Keccak256Hash(proof) != common.Hash(info.Root) {
-		return fmt.Errorf("replica %d proof does not hash to its on-chain root", ri)
-	}
-	return nil
-}

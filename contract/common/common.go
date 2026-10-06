@@ -366,17 +366,21 @@ func GetTransactionReceipt(endPoint string, hash common.Hash) (*types.Receipt, e
 	return client.TransactionReceipt(ctx, hash)
 }
 
+// GetTransactionRetry fetches tx h, retrying for about a minute. The last
+// error is wrapped so callers can tell an RPC outage from other failures.
 func GetTransactionRetry(endpoint string, h common.Hash) (*types.Transaction, error) {
-	retry := 0
-	for retry < 10 {
+	var lastErr error
+	for retry := 1; retry <= 10; retry++ {
 		tx, err := GetTransaction(endpoint, h)
 		if err == nil {
 			return tx, nil
 		}
-		retry++
-		time.Sleep(time.Duration(retry) * time.Second)
+		lastErr = err
+		if retry < 10 {
+			time.Sleep(time.Duration(retry) * time.Second)
+		}
 	}
-	return nil, fmt.Errorf("fail to get tx")
+	return nil, fmt.Errorf("fail to get tx %s: %w", h.Hex(), lastErr)
 }
 
 func GetTransaction(endpoint string, h common.Hash) (*types.Transaction, error) {

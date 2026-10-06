@@ -39,6 +39,11 @@ type fakeRPC struct {
 	callResult map[string][]byte
 	// eth_getTransactionByHash answers "found" for sent txs when true
 	knowsSent bool
+	// txs eth_getTransactionByHash knows regardless of knowsSent
+	known map[common.Hash]*types.Transaction
+	// receipt shape: failed status and gas figures (zero = defaults)
+	receiptFailed            bool
+	receiptGas, receiptCumul uint64
 }
 
 type jsonRPCError struct {
@@ -53,6 +58,7 @@ func newFakeRPC(t *testing.T) *fakeRPC {
 		rpcErr:     map[string]jsonRPCError{},
 		drop:       map[string]bool{},
 		dropAfter:  map[string]bool{},
+		known:      map[common.Hash]*types.Transaction{},
 		callResult: map[string][]byte{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
@@ -170,6 +176,9 @@ func (f *fakeRPC) result(method string, params []json.RawMessage) interface{} {
 		_ = json.Unmarshal(params[0], &h)
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if tx, ok := f.known[h]; ok {
+			return minedTxJSON(f.t, tx)
+		}
 		if f.knowsSent {
 			for _, tx := range f.sent {
 				if tx.Hash() == h {
@@ -181,10 +190,19 @@ func (f *fakeRPC) result(method string, params []json.RawMessage) interface{} {
 	case "eth_getTransactionReceipt":
 		var h common.Hash
 		_ = json.Unmarshal(params[0], &h)
+		f.mu.Lock()
+		status, gas, cumul := types.ReceiptStatusSuccessful, uint64(21000), uint64(21000)
+		if f.receiptFailed {
+			status = types.ReceiptStatusFailed
+		}
+		if f.receiptGas != 0 {
+			gas, cumul = f.receiptGas, f.receiptCumul
+		}
+		f.mu.Unlock()
 		return &types.Receipt{
-			Status:            types.ReceiptStatusSuccessful,
-			CumulativeGasUsed: 21000,
-			GasUsed:           21000,
+			Status:            status,
+			CumulativeGasUsed: cumul,
+			GasUsed:           gas,
 			Logs:              []*types.Log{},
 			TxHash:            h,
 			BlockHash:         common.Hash{2},
@@ -215,4 +233,20 @@ func managerOn(t *testing.T, f *fakeRPC) *ContractManage {
 
 func hasSubstr(err error, s string) bool {
 	return err != nil && strings.Contains(err.Error(), s)
+}
+
+// minedTxJSON is tx as eth_getTransactionByHash returns a mined tx.
+func minedTxJSON(t *testing.T, tx *types.Transaction) map[string]interface{} {
+	b, err := tx.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]interface{}{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["blockNumber"] = "0x10"
+	m["blockHash"] = common.Hash{2}
+	m["transactionIndex"] = "0x0"
+	return m
 }
