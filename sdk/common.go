@@ -36,6 +36,7 @@ import (
 )
 
 var logger = log.Logger("sdk")
+
 // ChainType is the chain used when CHAIN_TYPE is unset. CheckENV exports it, and
 // CLI flags reading CHAIN_TYPE see it before their own default, so it must be
 // the live chain: DA anchors on Base (BSC testnets are retired).
@@ -180,6 +181,17 @@ func CheckFileFullPolicy(ff types.FileFull, stream common.Address, fp string, wa
 			return nil, err
 		}
 
+		// the encoder's accumulated opening binds the move/limit commitments
+		// (hence the piece root) to the claimed values checked below
+		vk, err := encodingVerifyKey()
+		if err != nil {
+			return nil, err
+		}
+		shardElems := 1 + (ff.PieceSizes[i]-1)/(31*int64(ff.Policy.K))
+		if err := ew.VerifyOpening(vk, stream.Bytes(), int(shardElems)); err != nil {
+			return nil, fmt.Errorf("piece %d: %w", i, err)
+		}
+
 		root := ew.Root.Bytes()
 		name := hex.EncodeToString(root[:])
 		if !strings.EqualFold(name, ff.Pieces[i]) {
@@ -227,6 +239,10 @@ func CheckFileFullPolicy(ff types.FileFull, stream common.Address, fp string, wa
 	}
 	return res, nil
 }
+
+// encodingVerifyKey is the KZG verifying key encoding openings are checked
+// with: the shared SRS's (tests swap in a key of their own).
+var encodingVerifyKey = bls.SRSVerifyKey
 
 func CheckWitness(rsn, rsk int, ew *bls.EncodeWitness) error {
 	if len(ew.Commits) != rsn {
