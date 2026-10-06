@@ -157,6 +157,9 @@ type EncodeWitness struct {
 	LimitCommits  []G1 // k
 	H             G1   // k
 	ClaimedValues []Fr // k
+	// Format is the rule H was accumulated with (FormatV1 / FormatV2). It
+	// travels as the frame's version; 0 means FormatV1. Not hashed.
+	Format uint8
 }
 
 func NewEncodeWitness(n, k int) *EncodeWitness {
@@ -175,16 +178,21 @@ func NewEncodeWitness(n, k int) *EncodeWitness {
 // safe. A versioned blob starts with ewMagic; a legacy (pre-versioning) blob is
 // raw gnark uncompressed encoding whose first byte has bit7==0 and thus can
 // never equal ewMagic — so the two are unambiguous with no length heuristics.
+//
+// The wire version is the witness's accumulation Format: 1 and 2 have the
+// same payload layout and differ only in how H was computed, so a node that
+// does not know format 2 refuses such a witness instead of misreading it.
 const (
 	ewMagic       byte   = 0xDA // bit7==1 ⇒ never collides with legacy raw G1 (bit7==0)
-	ewWireVersion uint16 = 1
+	ewWireVersion uint16 = uint16(FormatV2)
 )
 
 func (ew *EncodeWitness) Serialize() []byte {
+	ver := uint16(ew.format())
 	var w bytes.Buffer
 	w.WriteByte(ewMagic)
-	w.WriteByte(byte(ewWireVersion >> 8))
-	w.WriteByte(byte(ewWireVersion))
+	w.WriteByte(byte(ver >> 8))
+	w.WriteByte(byte(ver))
 	enc := bls.NewEncoder(&w, bls.RawEncoding())
 	toEncode := []interface{}{
 		&ew.Root,
@@ -272,6 +280,13 @@ func CheckEncodeWitnessShape(buf []byte, n, k int) error {
 	return nil
 }
 
+func (ew *EncodeWitness) format() uint8 {
+	if ew.Format == 0 {
+		return FormatV1
+	}
+	return ew.Format
+}
+
 func (ew *EncodeWitness) Deserialize(buf []byte) error {
 	// Versioned frame iff first byte has bit7 set (legacy raw G1 never does).
 	if len(buf) > 0 && buf[0]&0x80 != 0 {
@@ -279,10 +294,13 @@ func (ew *EncodeWitness) Deserialize(buf []byte) error {
 			return fmt.Errorf("bad EncodeWitness frame: first byte %#x", buf[0])
 		}
 		v := uint16(buf[1])<<8 | uint16(buf[2])
-		if v > ewWireVersion {
-			return fmt.Errorf("unsupported EncodeWitness wire version %d (this node understands <= %d) — upgrade the node", v, ewWireVersion)
+		if v == 0 || v > ewWireVersion {
+			return fmt.Errorf("unsupported EncodeWitness wire version %d (this node understands 1..%d) — upgrade the node", v, ewWireVersion)
 		}
+		ew.Format = uint8(v)
 		buf = buf[3:]
+	} else {
+		ew.Format = FormatV1
 	}
 	// legacy (unframed) or versioned payload: raw gnark decode
 	dec := bls.NewDecoder(bytes.NewReader(buf), bls.NoSubgroupChecks())

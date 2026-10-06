@@ -9,6 +9,7 @@ import (
 
 	"github.com/unibaseio/da-sdk-go/lib/types"
 
+	bls12377 "github.com/consensys/gnark-crypto/ecc/bls12-377"
 	"github.com/consensys/gnark-crypto/ecc/bls12-377/kzg"
 )
 
@@ -171,7 +172,11 @@ func (vk *VerifyKey) Deserialize(buf []byte) error {
 		vk.VerifyingKey = new(kzg.VerifyingKey)
 	}
 	_, err := vk.VerifyingKey.ReadFrom(bytes.NewReader(buf))
-	return err
+	if err != nil {
+		return err
+	}
+	PrecomputeLines(vk.VerifyingKey)
+	return nil
 }
 
 var _ types.IPublicKey = (*PublicKey)(nil)
@@ -214,7 +219,21 @@ func (pk *PublicKey) Deserialize(buf []byte) error {
 		return err
 	}
 	_, err = pk.SRS.Vk.ReadFrom(r)
-	return err
+	if err != nil {
+		return err
+	}
+	PrecomputeLines(&pk.SRS.Vk)
+	return nil
+}
+
+// PrecomputeLines (re)derives a verifying key's precomputed pairing lines
+// from its G2 points. gnark-crypto's kzg.Verify pairs with these lines only,
+// so a key built or loaded without them — ToKZG, and the cached KZG SRS,
+// which was written by it — makes kzg.Verify accept any opening. Never trust
+// serialized lines: always call this after building or reading a key.
+func PrecomputeLines(vk *kzg.VerifyingKey) {
+	vk.Lines[0] = bls12377.PrecomputeLines(vk.G2[0])
+	vk.Lines[1] = bls12377.PrecomputeLines(vk.G2[1])
 }
 
 func GenKZGKey(num uint64, seed *big.Int) *PublicKey {
