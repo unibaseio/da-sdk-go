@@ -548,6 +548,12 @@ func BuildAuth(addr, privk string, hash []byte) types.Auth {
 }
 
 func doRequest(ctx context.Context, baseUrl, method, ctype string, au types.Auth, r io.Reader) ([]byte, error) {
+	return doRequestLimit(ctx, baseUrl, method, ctype, au, r, -1)
+}
+
+// doRequestLimit is doRequest reading at most max bytes of the response body
+// (max < 0: unbounded). A longer body is an error.
+func doRequestLimit(ctx context.Context, baseUrl, method, ctype string, au types.Auth, r io.Reader, max int64) ([]byte, error) {
 	haddr := baseUrl + method
 	hreq, err := http.NewRequestWithContext(ctx, "POST", haddr, r)
 	if err != nil {
@@ -595,12 +601,19 @@ func doRequest(ctx context.Context, baseUrl, method, ctype string, au types.Auth
 	}
 	defer resp.Body.Close()
 
-	pr := progressbar.NewReader(resp.Body, bar)
+	var body io.Reader = resp.Body
+	if max >= 0 {
+		body = io.LimitReader(resp.Body, max+1)
+	}
+	pr := progressbar.NewReader(body, bar)
 	res, err := io.ReadAll(&pr)
 	if err != nil {
 		return nil, err
 	}
 	bar.Finish()
+	if max >= 0 && int64(len(res)) > max {
+		return nil, fmt.Errorf("response from %s exceeds %d bytes", haddr, max)
+	}
 
 	// Accept any 2xx — the clean /v1 writes use proper REST codes (POST /v1/files
 	// and /v1/edges return 201 Created), not just 200.

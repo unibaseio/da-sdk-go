@@ -79,19 +79,20 @@ func DownloadPiece(baseUrl string, auth types.Auth, name string) (types.PieceCor
 		}
 	}
 
+	// every shard of the piece has the length the encoder gave it, fixed by the
+	// gateway's Size and K: a store cannot set it by answering first
+	shardLen, err := pieceShardLen(pr.PieceCore)
+	if err != nil {
+		return pr.PieceCore, nil, err
+	}
+
 	suc = 0
-	shardLen := -1
 	for i, rep := range pr.Replicas {
-		val, err := DownloadReplica(baseUrl, streamURL, auth, rep, pr.StoredOn[i])
-		if err == nil && len(val) > 0 {
-			// shards of one piece are equal-length multiples of PadSize
-			if len(val)%bls.PadSize != 0 || (shardLen >= 0 && len(val) != shardLen) {
-				err = fmt.Errorf("replica %s has a malformed length %d", rep, len(val))
-			} else {
-				shardLen = len(val)
-			}
+		val, err := downloadReplica(baseUrl, streamURL, auth, rep, pr.StoredOn[i], int64(shardLen))
+		if err == nil && len(val) != shardLen {
+			err = fmt.Errorf("replica %s has %d bytes, want %d", rep, len(val), shardLen)
 		}
-		if err != nil || len(val) == 0 {
+		if err != nil {
 			if i < int(pr.Policy.K) {
 				need = append(need, i)
 			}
@@ -111,7 +112,7 @@ func DownloadPiece(baseUrl string, auth types.Auth, name string) (types.PieceCor
 	}
 	// repair
 	if len(need) > 0 {
-		slen := len(res[survived[0]]) / bls.PadSize
+		slen := shardLen / bls.PadSize
 		for _, v := range need {
 			res[v] = make([]byte, 0, slen*bls.PadSize)
 		}
@@ -154,6 +155,20 @@ func DownloadPiece(baseUrl string, auth types.Auth, name string) (types.PieceCor
 	return pr.PieceCore, pbyte[:pr.Size], nil
 }
 
+// pieceShardLen is the byte length of each of a piece's N shards, as the
+// stream encodes it (stream/file.go Put: shardLen = 1+(n-1)/(31K) field
+// elements of PadSize bytes). Size must be a piece size the policy allows.
+func pieceShardLen(pc types.PieceCore) (int, error) {
+	if err := pc.Policy.Check(); err != nil {
+		return 0, err
+	}
+	if pc.Size <= 0 || pc.Size > MaxPieceSize(pc.Policy) {
+		return 0, fmt.Errorf("piece %s: size %d outside 1..%d", pc.Name, pc.Size, MaxPieceSize(pc.Policy))
+	}
+	elems := 1 + (pc.Size-1)/(bls.UnPadSize*int64(pc.Policy.K))
+	return int(elems * bls.PadSize), nil
+}
+
 // checkReplicaList makes a receipt's replica list safe to index: one name and
 // one storing address per slot, at most N slots.
 func checkReplicaList(pr types.PieceReceipt) error {
@@ -164,17 +179,27 @@ func checkReplicaList(pr types.PieceReceipt) error {
 }
 
 func DownloadReplica(baseUrl, streamUrl string, auth types.Auth, name string, addr common.Address) ([]byte, error) {
+	return downloadReplica(baseUrl, streamUrl, auth, name, addr, -1)
+}
+
+// downloadReplica is DownloadReplica reading at most max bytes of an answer
+// (max < 0: unbounded); a longer one is an error, not a buffer to hold.
+func downloadReplica(baseUrl, streamUrl string, auth types.Auth, name string, addr common.Address, max int64) ([]byte, error) {
 	if addr != types.EmptyAddr {
-		res, err := DownloadReplicaFromStream(baseUrl, auth, name, addr)
+		res, err := downloadReplicaFromStream(baseUrl, auth, name, addr, max)
 		if err == nil {
 			return res, nil
 		}
 	}
 
-	return DownloadReplicaOrigin(streamUrl, auth, name)
+	return downloadReplicaOrigin(streamUrl, auth, name, max)
 }
 
 func DownloadReplicaOrigin(baseUrl string, auth types.Auth, name string) ([]byte, error) {
+	return downloadReplicaOrigin(baseUrl, auth, name, -1)
+}
+
+func downloadReplicaOrigin(baseUrl string, auth types.Auth, name string, max int64) ([]byte, error) {
 	form := url.Values{}
 	form.Set("name", name)
 	form.Set("type", "replica")
@@ -182,7 +207,7 @@ func DownloadReplicaOrigin(baseUrl string, auth types.Auth, name string) ([]byte
 	logger.Debug("download replica: ", name, " at:", baseUrl)
 	ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Minute)
 	defer cancle()
-	resByte, err := doRequest(ctx, baseUrl, "/v1/download", "", auth, strings.NewReader(form.Encode()))
+	resByte, err := doRequestLimit(ctx, baseUrl, "/v1/download", "", auth, strings.NewReader(form.Encode()), max)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +216,10 @@ func DownloadReplicaOrigin(baseUrl string, auth types.Auth, name string) ([]byte
 }
 
 func DownloadReplicaFromStream(baseUrl string, auth types.Auth, name string, addr common.Address) ([]byte, error) {
+	return downloadReplicaFromStream(baseUrl, auth, name, addr, -1)
+}
+
+func downloadReplicaFromStream(baseUrl string, auth types.Auth, name string, addr common.Address, max int64) ([]byte, error) {
 	logger.Debug("download replica: ", name, " via stream")
 	el, err := ListEdge(baseUrl, auth, types.StreamType)
 	if err != nil {
@@ -205,7 +234,7 @@ func DownloadReplicaFromStream(baseUrl string, auth types.Auth, name string, add
 		logger.Debug("download replica: ", name, " via stream: ", er.Name, " at: ", er.ExposeURL)
 		ctx, cancle := context.WithTimeout(context.TODO(), 5*time.Minute)
 		defer cancle()
-		resByte, err := doRequest(ctx, er.ExposeURL, "/v1/download", "", auth, strings.NewReader(form.Encode()))
+		resByte, err := doRequestLimit(ctx, er.ExposeURL, "/v1/download", "", auth, strings.NewReader(form.Encode()), max)
 		if err != nil {
 			continue
 		}
