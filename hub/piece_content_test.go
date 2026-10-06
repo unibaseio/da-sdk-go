@@ -132,8 +132,9 @@ func TestV1PieceContentNotCached(t *testing.T) {
 }
 
 // stalledPieceRead starts a piece read of 64 MiB on a real server from a
-// client that sends the request and then does not read.
-func stalledPieceRead(t *testing.T) (*Server, net.Conn, int) {
+// client that sends the request and then does not read. The server has one
+// global piece slot and the given per-client cap (0 = none).
+func stalledPieceRead(t *testing.T, perClient int) (*Server, *httptest.Server, net.Conn, int) {
 	t.Helper()
 	t.Setenv("HUB_PIECE_WRITE_BASE_SEC", "1")
 	t.Setenv("HUB_PIECE_WRITE_MIN_BPS", "1099511627776") // the size adds ~nothing
@@ -141,6 +142,7 @@ func stalledPieceRead(t *testing.T) (*Server, net.Conn, int) {
 	big := bytes.Repeat([]byte{0x5a}, 64<<20) // far more than socket buffers hold
 	s.ps = &recPieces{data: map[string][]byte{"c1d": big}}
 	s.pieceSem = make(chan struct{}, 1)
+	s.pieceClients = newClientSlots(perClient)
 	srv := httptest.NewServer(s.Router)
 	t.Cleanup(srv.Close)
 	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
@@ -151,30 +153,89 @@ func stalledPieceRead(t *testing.T) (*Server, net.Conn, int) {
 	if _, err := conn.Write([]byte("GET /v1/pieces/c1d/content HTTP/1.1\r\nHost: hub\r\n\r\n")); err != nil {
 		t.Fatal(err)
 	}
-	return s, conn, len(big)
+	return s, srv, conn, len(big)
 }
 
-// H-Q2: the piece slot is held until the response has been written (it
-// bounds the pieces held in memory), and released once the write ends.
-func TestV1PieceContentSlotCoversWrite(t *testing.T) {
-	s, _, _ := stalledPieceRead(t)
-	time.Sleep(300 * time.Millisecond) // the handler is now blocked writing
-	if len(s.pieceSem) != 1 {
-		t.Fatal("piece slot released while the piece is still being written")
+// getPiece reads c1d in full from srv, reporting the status and body size.
+func getPiece(t *testing.T, srv *httptest.Server) (int, int) {
+	t.Helper()
+	resp, err := http.Get(srv.URL + "/v1/pieces/c1d/content")
+	if err != nil {
+		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for len(s.pieceSem) != 0 && time.Now().Before(deadline) {
+	defer resp.Body.Close()
+	n, _ := io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, int(n)
+}
+
+// H-Q2 (rework): a client that stops reading must not block other readers.
+// With the global slot held through the write, the second read waited
+// maxSlotWait and got 503 while the first client sat on its write deadline.
+func TestV1PieceContentStalledReaderDoesNotBlockOthers(t *testing.T) {
+	old := maxSlotWait
+	maxSlotWait = 500 * time.Millisecond
+	t.Cleanup(func() { maxSlotWait = old })
+	t.Setenv("HUB_PIECE_WRITE_BASE_SEC", "30") // the stalled write outlives the test's wait
+	s, srv, _, size := stalledPieceRead(t, 0)
+	time.Sleep(300 * time.Millisecond) // the stalled handler is now blocked writing
+	if len(s.pieceSem) != 0 {
+		t.Fatal("global piece slot still held while the response is being written")
+	}
+	code, n := getPiece(t, srv)
+	if code != http.StatusOK || n != size {
+		t.Fatalf("second reader got %d with %d bytes while another client stalled; want 200 with %d", code, n, size)
+	}
+}
+
+// H-Q2 (rework): one client's concurrent piece requests are capped, write
+// included, and its slot comes back once the bounded write ends.
+func TestV1PieceContentPerClientCap(t *testing.T) {
+	s, srv, _, size := stalledPieceRead(t, 1)
+	time.Sleep(300 * time.Millisecond)
+	if code, _ := getPiece(t, srv); code != http.StatusTooManyRequests {
+		t.Fatalf("second concurrent request from the same client got %d, want 429", code)
+	}
+	deadline := time.Now().Add(10 * time.Second) // the stalled write ends after ~1 s
+	for {
+		s.pieceClients.mu.Lock()
+		held := len(s.pieceClients.n)
+		s.pieceClients.mu.Unlock()
+		if held == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("client slot still held long after the write deadline")
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if len(s.pieceSem) != 0 {
-		t.Fatal("slot still held long after the write deadline")
+	if code, n := getPiece(t, srv); code != http.StatusOK || n != size {
+		t.Fatalf("after the stalled write ended: %d with %d bytes, want 200 with %d", code, n, size)
+	}
+}
+
+func TestClientSlots(t *testing.T) {
+	cs := newClientSlots(2)
+	r1, ok1 := cs.acquire("a")
+	_, ok2 := cs.acquire("a")
+	_, ok3 := cs.acquire("a")
+	_, okB := cs.acquire("b")
+	if !ok1 || !ok2 || ok3 || !okB {
+		t.Fatalf("cap 2: got %v %v %v (b %v)", ok1, ok2, ok3, okB)
+	}
+	r1()
+	r1() // a second release is a no-op
+	if _, ok := cs.acquire("a"); !ok {
+		t.Fatal("slot not returned on release")
+	}
+	if _, ok := cs.acquire("a"); ok {
+		t.Fatal("double release freed two slots")
 	}
 }
 
 // H-Q2: the write is time-bounded: a client that stops reading loses the
 // connection instead of holding the handler (and its buffer) forever.
 func TestV1PieceContentWriteBounded(t *testing.T) {
-	_, conn, size := stalledPieceRead(t)
+	_, _, conn, size := stalledPieceRead(t, 0)
 	time.Sleep(2500 * time.Millisecond) // past the 1 s write deadline
 	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
 	got, _ := io.Copy(io.Discard, conn)
