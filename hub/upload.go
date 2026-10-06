@@ -456,7 +456,7 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		return
 	}
 
-	for i := next; i < curIndex; i++ {
+	drainVolumes(s.rp.MetaStore(), dsKey, next, curIndex, func(i uint64) bool {
 		fname := fmt.Sprintf("%s/%d.vol", key, i)
 		fp := filepath.Join(s.rp.Path(), LOGFS, key, fmt.Sprintf("%d.vol", i))
 
@@ -468,7 +468,7 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 			// reclaim gate); one missing here predates that gate or was
 			// removed by hand, and nothing below can work without it
 			logger.Errorf("drain %s vol %d: local volume unavailable (%v); restore %s to continue", key, i, serr, fp)
-			break
+			return false
 		}
 		volSize := vi.Size()
 		fr, err := sdk.GetFileReceiptOf(sdk.ServerURL, fname, au.Addr)
@@ -481,15 +481,12 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		if err == nil {
 			logger.Infof("%s/%d.vol is already uploaded, check its piece onchain", key, i)
 			if fr.ChainType != s.rp.Repo().Config().Chain.Type {
-				buf := make([]byte, 8)
-				binary.BigEndian.PutUint64(buf, i+1)
-				s.rp.MetaStore().Put(dsKey, buf)
 				logger.Warnf("new chain type detected, ignore previous one")
-				continue
+				return true
 			}
 			streams, err := s.trustedStreams(au)
 			if err != nil {
-				break
+				return false
 			}
 			suc := 0
 			for _, pn := range fr.Pieces {
@@ -516,13 +513,11 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 					}
 				}
 			}
-			if suc == len(fr.Pieces) {
-				buf := make([]byte, 8)
-				binary.BigEndian.PutUint64(buf, i+1)
-				s.rp.MetaStore().Put(dsKey, buf)
-				continue
-			}
-			continue
+			// a volume with a piece still unregistered stays the drain's next
+			// one: moving on would let a later volume's commit carry the
+			// offset past it, and the reclaim gate would then free its local
+			// file (audit 2026-10-06)
+			return suc == len(fr.Pieces)
 		}
 		// upload to stream and submit to gateway
 		// each request signed when sent: encoding a volume takes minutes, and
@@ -543,17 +538,14 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 				}
 			}
 			if pn != "" && s.recoverStagedPiece(cm, au, key, i, pn, policy, volSize) {
-				buf := make([]byte, 8)
-				binary.BigEndian.PutUint64(buf, i+1)
-				s.rp.MetaStore().Put(dsKey, buf)
-				continue
+				return true
 			}
 			logger.Warnf("drain %s vol %d: %v", key, i, err)
-			break
+			return false
 		}
 		pcs, err := sdk.CheckFileFull(res, streamer, fp)
 		if err != nil {
-			break
+			return false
 		}
 		log.Printf("upload %s to %s, sha256: %s\n", fp, streamer, res.Hash)
 		log.Printf("submit %s to chain\n", res.Name)
@@ -567,12 +559,23 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 			}
 			s.addVolume(key, i, pc.Name, txn)
 		}
-		if terr != nil {
-			break
+		return terr == nil
+	})
+}
+
+// drainVolumes commits volumes from..to-1 in order with commit and records the
+// drain offset (dsKey) after each one committed. It stops at the first volume
+// commit reports as not committed, so the offset never passes an uncommitted
+// volume: the reclaim gate frees a volume's local file once it is below the
+// offset.
+func drainVolumes(ds types.IKVStore, dsKey []byte, from, to uint64, commit func(i uint64) bool) {
+	for i := from; i < to; i++ {
+		if !commit(i) {
+			return
 		}
 		buf := make([]byte, 8)
 		binary.BigEndian.PutUint64(buf, i+1)
-		s.rp.MetaStore().Put(dsKey, buf)
+		ds.Put(dsKey, buf)
 	}
 }
 
