@@ -364,7 +364,7 @@ func (ppk *PointPublicKey) ReadDump(r io.Reader, maxPkPoints ...int) error {
 }
 
 func (ppk *PointPublicKey) ToKZG() *PublicKey {
-	return &PublicKey{
+	pk := &PublicKey{
 		SRS: &kzg.SRS{
 			Pk: kzg.ProvingKey{
 				G1: ppk.G1L,
@@ -375,6 +375,8 @@ func (ppk *PointPublicKey) ToKZG() *PublicKey {
 			},
 		},
 	}
+	PrecomputeLines(&pk.SRS.Vk)
+	return pk
 }
 
 func (ppk *PointPublicKey) ToCirciutKey() *PointCircuitKey {
