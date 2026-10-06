@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -236,4 +237,49 @@ func TestVolumeBackendNilDefault(t *testing.T) {
 	if !bytes.Equal(got, val) {
 		t.Fatal("default read mismatch")
 	}
+}
+
+// S9: TTL reclaim keeps a sealed, uploaded volume on local disk while the
+// reclaim gate says its owner (the hub's DA drain) still needs the file, and
+// reclaims it once the gate allows.
+func TestVolumeBackendReclaimGate(t *testing.T) {
+	vb := newFakeBackend()
+	dir := t.TempDir()
+	ds, err := kv.NewBadgerStore(filepath.Join(dir, "kv"), &kv.DefaultOptions)
+	if err != nil {
+		t.Fatalf("badger: %v", err)
+	}
+	var drained atomic.Bool
+	fs, err := New(ds, filepath.Join(dir, "data"), "0xlocal", "0xowner",
+		WithVolumeBackend(vb), WithLocalTTL(50*time.Millisecond),
+		WithReclaimGate(func(uint64) bool { return drained.Load() }))
+	if err != nil {
+		t.Fatalf("logfs new: %v", err)
+	}
+	defer fs.Close()
+
+	if err := fs.Put([]byte("k"), bytes.Repeat([]byte{0x3c}, 77)); err != nil {
+		t.Fatal(err)
+	}
+	sealedIdx := fs.curIndex
+	if err := fs.Roll(); err != nil {
+		t.Fatal(err)
+	}
+	sealedPath := filepath.Join(fs.basedir, fmt.Sprintf("%d.vol", sealedIdx))
+	waitFor(t, func() bool { return vb.has(sealedIdx) })
+
+	time.Sleep(2500 * time.Millisecond) // > TTL and two reclaim passes (1 s apart)
+	if _, err := os.Stat(sealedPath); err != nil {
+		t.Fatalf("volume the drain still needs was reclaimed: %v", err)
+	}
+
+	drained.Store(true)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sealedPath); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("drained volume was never reclaimed")
 }

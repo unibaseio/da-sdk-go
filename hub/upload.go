@@ -404,12 +404,8 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 	}
 	curIndex := binary.BigEndian.Uint64(val)
 
-	next := logfs.GetIndex(s.local.String(), key)
-	dsKey = types.NewKey(types.DsLogFS, LOGINST, key)
-	val, err = s.rp.MetaStore().Get(dsKey)
-	if err == nil && len(val) == 8 {
-		next = binary.BigEndian.Uint64(val)
-	}
+	next := drainNext(s.rp.MetaStore(), s.local.String(), key)
+	dsKey = drainOffsetKey(key)
 
 	logger.Debugf("check: %s %d %d", key, next, curIndex)
 	if next >= curIndex {
@@ -422,6 +418,13 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 
 		// only the hub's own record counts: anyone can register a file under
 		// this (predictable) volume name, and trusting it would skip the volume
+		if _, serr := os.Stat(fp); serr != nil {
+			// volumes the drain has not committed are kept on disk (the
+			// reclaim gate); one missing here predates that gate or was
+			// removed by hand, and nothing below can work without it
+			logger.Errorf("drain %s vol %d: local volume unavailable (%v); restore %s to continue", key, i, serr, fp)
+			break
+		}
 		fr, err := sdk.GetFileReceiptOf(sdk.ServerURL, fname, au.Addr)
 		if err == nil && !volumeMatches(fp, fr.Hash) {
 			// a record of ours under this name that is not this volume's bytes
@@ -517,6 +520,21 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		binary.BigEndian.PutUint64(buf, i+1)
 		s.rp.MetaStore().Put(dsKey, buf)
 	}
+}
+
+// drainOffsetKey is where drainInstance keeps an owner's next volume to
+// commit to DA: every volume below it is committed.
+func drainOffsetKey(owner string) []byte {
+	return types.NewKey(types.DsLogFS, LOGINST, owner)
+}
+
+// drainNext reads an owner's drain offset (its first volume index when the
+// drain has not committed any).
+func drainNext(ds types.IKVStore, local, owner string) uint64 {
+	if val, err := ds.Get(drainOffsetKey(owner)); err == nil && len(val) == 8 {
+		return binary.BigEndian.Uint64(val)
+	}
+	return logfs.GetIndex(local, owner)
 }
 
 // volumeMatches reports whether the sealed volume file at fp has sha256 hash
