@@ -376,9 +376,20 @@ func (s *Server) v1PutObject(c *gin.Context) {
 		return
 	}
 
-	// a declared length lets an over-quota write fail before its body is read
-	if c.Request.ContentLength > 0 && !s.chargeWrite(c, c.Request.ContentLength) {
-		return
+	// a declared length lets an over-quota write fail before its body is read;
+	// whatever is charged is given back unless the object is written
+	var charged int64
+	written := false
+	defer func() {
+		if !written {
+			s.refundWrite(c, charged)
+		}
+	}()
+	if c.Request.ContentLength > 0 {
+		if !s.chargeWrite(c, c.Request.ContentLength) {
+			return
+		}
+		charged = c.Request.ContentLength
 	}
 	// one copy of the body: read it (preallocating from Content-Length up to
 	// maxPrealloc) and hand that slice to LogFS (it used to be copied twice more)
@@ -391,8 +402,11 @@ func (s *Server) v1PutObject(c *gin.Context) {
 		abortWithBadRequest(c, fmt.Errorf("empty body"))
 		return
 	}
-	if c.Request.ContentLength <= 0 && !s.chargeWrite(c, int64(len(data))) {
-		return
+	if charged == 0 {
+		if !s.chargeWrite(c, int64(len(data))) {
+			return
+		}
+		charged = int64(len(data))
 	}
 
 	large := v1KindProfileLarge(b.Kind, int64(len(data)))
@@ -400,6 +414,7 @@ func (s *Server) v1PutObject(c *gin.Context) {
 		c.JSON(599, lerror.ToAPIError("hub", err))
 		return
 	}
+	written = true
 	// ?wait=1: block until the object commits on-chain (drainInstance AddPiece),
 	// then return 200 + committed receipt. Best for passthrough kinds (own volume,
 	// uploads promptly); small coalesce kinds may stay staged until the batch flush.
@@ -449,10 +464,13 @@ func (s *Server) v1PostObjects(c *gin.Context) {
 		}
 		total += fh.Size
 	}
-	// the whole batch counts against the signer's quota, all or nothing
+	// the whole batch counts against the signer's quota, all or nothing; the
+	// files not written when the batch stops are given back
 	if !s.chargeWrite(c, total) {
 		return
 	}
+	var written int64
+	defer func() { s.refundWrite(c, total-written) }()
 	receipts := make([]v1Receipt, 0, len(files))
 	for _, fh := range files {
 		fr, err := fh.Open()
@@ -467,6 +485,7 @@ func (s *Server) v1PostObjects(c *gin.Context) {
 			c.JSON(599, lerror.ToAPIError("hub", err))
 			return
 		}
+		written += fh.Size
 		receipts = append(receipts, v1Receipt{Bucket: bucket, Key: fh.Filename, Size: uint64(fh.Size), Status: "staged", Availability: "pending"})
 	}
 	c.JSON(http.StatusAccepted, gin.H{"objects": receipts})
