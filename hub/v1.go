@@ -688,6 +688,13 @@ func (s *Server) v1GetPieceContent(c *gin.Context) {
 	if _, ok := ResolveOwnerForList(c, c.Query("owner")); !ok {
 		return
 	}
+	// the slot covers the write too: the piece's buffer lives until then
+	release, err := acquireSem(c.Request.Context(), s.pieceSem)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, lerror.ToAPIError("hub", err))
+		return
+	}
+	defer release()
 	data, err := s.downloadPiece(c.Request.Context(), c.Param("name"))
 	if err != nil {
 		code := http.StatusNotFound
@@ -696,6 +703,11 @@ func (s *Server) v1GetPieceContent(c *gin.Context) {
 		}
 		c.JSON(code, lerror.ToAPIError("hub", err))
 		return
+	}
+	// bounded write: a client that stops reading loses the connection rather
+	// than holding the slot (the hub runs without a server WriteTimeout)
+	if err := http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(pieceWriteTimeout(len(data)))); err != nil {
+		logger.Warnf("piece %s: cannot bound the response write: %v", c.Param("name"), err)
 	}
 	c.Data(http.StatusOK, "application/octet-stream", data)
 }

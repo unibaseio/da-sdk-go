@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -126,5 +128,57 @@ func TestV1PieceContentNotCached(t *testing.T) {
 	ps.data[n.cid] = []byte("from-store")
 	if w := do(t, s, "GET", "/v1/pieces/"+n.cid+"/content", "", ""); w.Body.String() != "from-store" {
 		t.Fatalf("stored piece not served from the store: %q", w.Body.String())
+	}
+}
+
+// stalledPieceRead starts a piece read of 64 MiB on a real server from a
+// client that sends the request and then does not read.
+func stalledPieceRead(t *testing.T) (*Server, net.Conn, int) {
+	t.Helper()
+	t.Setenv("HUB_PIECE_WRITE_BASE_SEC", "1")
+	t.Setenv("HUB_PIECE_WRITE_MIN_BPS", "1099511627776") // the size adds ~nothing
+	s := newV1TestServer(t)
+	big := bytes.Repeat([]byte{0x5a}, 64<<20) // far more than socket buffers hold
+	s.ps = &recPieces{data: map[string][]byte{"c1d": big}}
+	s.pieceSem = make(chan struct{}, 1)
+	srv := httptest.NewServer(s.Router)
+	t.Cleanup(srv.Close)
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() }) // runs before srv.Close
+	if _, err := conn.Write([]byte("GET /v1/pieces/c1d/content HTTP/1.1\r\nHost: hub\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	return s, conn, len(big)
+}
+
+// H-Q2: the piece slot is held until the response has been written (it
+// bounds the pieces held in memory), and released once the write ends.
+func TestV1PieceContentSlotCoversWrite(t *testing.T) {
+	s, _, _ := stalledPieceRead(t)
+	time.Sleep(300 * time.Millisecond) // the handler is now blocked writing
+	if len(s.pieceSem) != 1 {
+		t.Fatal("piece slot released while the piece is still being written")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(s.pieceSem) != 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(s.pieceSem) != 0 {
+		t.Fatal("slot still held long after the write deadline")
+	}
+}
+
+// H-Q2: the write is time-bounded: a client that stops reading loses the
+// connection instead of holding the handler (and its buffer) forever.
+func TestV1PieceContentWriteBounded(t *testing.T) {
+	_, conn, size := stalledPieceRead(t)
+	time.Sleep(2500 * time.Millisecond) // past the 1 s write deadline
+	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	got, _ := io.Copy(io.Discard, conn)
+	if got >= int64(size) {
+		t.Fatalf("a client that stopped reading still got the whole piece (%d bytes): the write was not bounded", got)
 	}
 }

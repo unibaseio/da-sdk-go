@@ -7,14 +7,36 @@ import (
 	"time"
 
 	"github.com/unibaseio/da-sdk-go/build"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 	"github.com/unibaseio/da-sdk-go/sdk"
 )
 
-// defaultPieceDownloadConcurrency bounds concurrent public piece reads and
-// rebuilds (HUB_PIECE_DOWNLOAD_CONCURRENCY). It does not bound memory held
-// while responses are written: the slot is released before the bytes go out.
+// defaultPieceDownloadConcurrency bounds concurrent public piece reads,
+// rebuilds and response writes (HUB_PIECE_DOWNLOAD_CONCURRENCY): a slot is
+// held until the piece has been written out, so at most this many pieces are
+// in memory for the endpoint.
 const defaultPieceDownloadConcurrency = 4
+
+// A piece response must be written within base + size/minRate
+// (HUB_PIECE_WRITE_BASE_SEC, HUB_PIECE_WRITE_MIN_BPS): the hub has no server
+// WriteTimeout (large object reads), so without this a client that stops
+// reading would hold its slot and the piece's buffer forever. 1 GiB at the
+// default 1 MiB/s gets about 17 minutes.
+const (
+	defaultPieceWriteBaseSec = 30
+	defaultPieceWriteMinBPS  = 1 << 20
+)
+
+// pieceWriteTimeout is how long writing n bytes of a piece may take.
+func pieceWriteTimeout(n int) time.Duration {
+	base := time.Duration(env.Int64("HUB_PIECE_WRITE_BASE_SEC", defaultPieceWriteBaseSec)) * time.Second
+	bps := env.Int64("HUB_PIECE_WRITE_MIN_BPS", defaultPieceWriteMinBPS)
+	if bps <= 0 {
+		bps = defaultPieceWriteMinBPS
+	}
+	return base + time.Duration(float64(n)/float64(bps)*float64(time.Second))
+}
 
 // errBusy is returned when a read gave up waiting for a download slot.
 var errBusy = errors.New("too many downloads in progress; retry later")
@@ -41,11 +63,11 @@ func acquireSem(ctx context.Context, sem chan struct{}) (func(), error) {
 }
 
 // downloadPiece returns a committed piece by its DA commitment: from the local
-// piece store when it holds it, else rebuilt from store nodes. The read (not
-// the response write) holds a pieceSem slot (the endpoint is public and a
-// piece may be ~1 GB), a rebuild also a dlSem slot
-// like other DA reconstructs, and concurrent requests for one piece share a
-// single rebuild.
+// piece store when it holds it, else rebuilt from store nodes. The caller
+// holds a pieceSem slot across the read and the response write (the endpoint
+// is public and a piece may be ~1 GB); a rebuild also takes a dlSem slot like
+// other DA reconstructs, and concurrent requests for one piece share a single
+// rebuild.
 //
 // A rebuilt piece is NOT put into the piece store. A bare piece has nothing
 // the hub can check it against (its name is a KZG commitment; checking bytes
@@ -57,12 +79,6 @@ func acquireSem(ctx context.Context, sem chan struct{}) (func(), error) {
 // dlSem and singleflight, and pieces the hub did check (fetched for a file
 // whose hash matched) are still served from the store.
 func (s *Server) downloadPiece(ctx context.Context, cid string) ([]byte, error) {
-	release, err := acquireSem(ctx, s.pieceSem)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
 	var local bytes.Buffer
 	if _, err := s.ps.GetPiece(ctx, cid, &local, types.Options{}); err == nil {
 		return local.Bytes(), nil

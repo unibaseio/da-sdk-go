@@ -90,9 +90,9 @@ type Server struct {
 	dlTotal  atomic.Int64
 	dlShared atomic.Int64
 
-	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads and rebuilds
-	// (a piece may be ~1 GB); slow clients still hold the bytes while they
-	// are written. HUB_PIECE_DOWNLOAD_CONCURRENCY.
+	// pieceSem bounds concurrent /v1/pieces/{cid}/content reads, rebuilds and
+	// response writes (a piece may be ~1 GB); the write is time-bounded, see
+	// pieceWriteTimeout. HUB_PIECE_DOWNLOAD_CONCURRENCY.
 	pieceSem chan struct{}
 
 	// quota is the per-signer budget for hub-paid writes (nil = off); sealSem
