@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/piece"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 
 	"github.com/unibaseio/da-sdk-go/lib/kv"
@@ -105,5 +107,32 @@ func TestSameContentRecorded(t *testing.T) {
 	none.Pieces = nil
 	if sameContentRecorded(msg(h), none, fp) {
 		t.Fatal("receipt without pieces: must not commit")
+	}
+}
+
+// A piece already on chain stands for a volume only if it is the piece the
+// volume needs: anyone can register a name first with another size or
+// streamer, or an expiry that has passed.
+func TestPieceUsable(t *testing.T) {
+	st := common.HexToAddress("0x5da4eab14b739cacd400de5d79549c38a23fac8b")
+	pol := types.Policy{N: 6, K: 4}
+	ok := piece.IPiecePieceInfo{Rsn: 6, Rsk: 4, Size: 1000, Expire: 2000, Streamer: st}
+	if err := pieceUsable(ok, 1000, pol, 1000, st); err != nil {
+		t.Fatalf("matching piece refused: %v", err)
+	}
+	for name, c := range map[string]struct {
+		info piece.IPiecePieceInfo
+		size int64
+		st   common.Address
+	}{
+		"policy":   {piece.IPiecePieceInfo{Rsn: 14, Rsk: 7, Size: 1000, Expire: 2000, Streamer: st}, 1000, st},
+		"size":     {piece.IPiecePieceInfo{Rsn: 6, Rsk: 4, Size: 999, Expire: 2000, Streamer: st}, 1000, st},
+		"streamer": {piece.IPiecePieceInfo{Rsn: 6, Rsk: 4, Size: 1000, Expire: 2000, Streamer: common.HexToAddress("0x1")}, 1000, st},
+		"expired":  {piece.IPiecePieceInfo{Rsn: 6, Rsk: 4, Size: 1000, Expire: 1000, Streamer: st}, 1000, st},
+		"negative": {ok, -1, st},
+	} {
+		if err := pieceUsable(c.info, 1000, pol, c.size, c.st); err == nil {
+			t.Errorf("%s: unusable piece accepted", name)
+		}
 	}
 }

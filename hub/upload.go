@@ -18,6 +18,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/piece"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
@@ -313,6 +314,43 @@ func parseAlreadyHasPiece(msg string) string {
 	return ""
 }
 
+// pieceUsable reports whether a piece already on chain (info) can stand for
+// a volume: same erasure policy and size, the stream that holds the volume's
+// data as its streamer (stores take a piece's replicas only from its on-chain
+// streamer), and not expired at epoch now. Piece registration is open to
+// anyone and a piece's name is only its root, so a piece registered first by
+// someone else with another size or streamer would never be stored; recording
+// the volume against it would let the drain move on and the reclaim gate drop
+// the volume's local file (review 2026-10-07). Pure.
+func pieceUsable(info piece.IPiecePieceInfo, now uint64, policy types.Policy, size int64, streamer common.Address) error {
+	if info.Rsn != policy.N || info.Rsk != policy.K {
+		return fmt.Errorf("on-chain policy %d/%d, volume needs %d/%d", info.Rsn, info.Rsk, policy.N, policy.K)
+	}
+	if size < 0 || info.Size != uint64(size) {
+		return fmt.Errorf("on-chain size %d, volume is %d bytes", info.Size, size)
+	}
+	if info.Streamer != streamer {
+		return fmt.Errorf("on-chain streamer %s, the volume is on %s", info.Streamer.Hex(), streamer.Hex())
+	}
+	if info.Expire <= now {
+		return fmt.Errorf("expired at epoch %d (now %d)", info.Expire, now)
+	}
+	return nil
+}
+
+// checkOnChainPiece reads piece serial from chain and checks pieceUsable.
+func checkOnChainPiece(cm *contract.ContractManage, serial uint64, policy types.Policy, size int64, streamer common.Address) error {
+	info, err := cm.GetPiece(serial)
+	if err != nil {
+		return err
+	}
+	now, err := cm.GetEpoch()
+	if err != nil {
+		return err
+	}
+	return pieceUsable(info, now, policy, size, streamer)
+}
+
 // sameContentRecorded reports whether the gateway refused a volume's file
 // record only because this hub (the record's owner) already has a file with
 // the very same bytes: the hash the gateway names is the stream receipt's and
@@ -418,6 +456,10 @@ func (s *Server) recoverStagedPiece(cm *contract.ContractManage, au types.Auth, 
 			s.addVolume(key, i, pr.Name, txn)
 			logger.Infof("recovered staged piece %s -> on-chain (tx %s)", pn, txn)
 		} else {
+			if err := checkOnChainPiece(cm, pr.Serial, policy, volSize, st.Name); err != nil {
+				logger.Errorf("recover staged piece %s: on-chain piece %d not usable: %v", pn, pr.Serial, err)
+				return false
+			}
 			s.addVolume(key, i, pr.Name, "")
 			logger.Infof("recovered staged piece %s (already on-chain, serial %d)", pn, pr.Serial)
 		}
@@ -513,6 +555,10 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 						continue
 					}
 					if pr.Serial > 0 {
+						if err := checkOnChainPiece(cm, pr.Serial, policy, volSize, st.Name); err != nil {
+							logger.Errorf("%s/%d.vol: on-chain piece %d not usable: %v", key, i, pr.Serial, err)
+							break
+						}
 						suc++
 						break
 					}
@@ -577,6 +623,11 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 			// a piece with these bytes may be on chain already (an identical
 			// volume): AddPiece would revert and hold the drain here
 			if serial, err := cm.GetPieceSerial(pc.Name); err == nil && serial > 0 {
+				if err := checkOnChainPiece(cm, serial, pc.Policy, pc.Size, pc.Streamer); err != nil {
+					logger.Errorf("drain %s vol %d: on-chain piece %d not usable: %v", key, i, serial, err)
+					terr = err
+					break
+				}
 				s.addVolume(key, i, pc.Name, "")
 				continue
 			}
