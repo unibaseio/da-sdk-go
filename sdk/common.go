@@ -206,6 +206,11 @@ func CheckFileFullPolicy(ff types.FileFull, stream common.Address, fp string, wa
 
 		slen := (1 + (ff.PieceSizes[i]-1)/(31*int64(ff.Policy.K))) * 31
 		rest := ff.PieceSizes[i]
+		// data shards past the piece's data hold one derived filler element
+		// (bls.EmptyShardElement); the 0.1.34 constant filler is still
+		// accepted for receipts from a stream not yet upgraded
+		elems := int(1 + (ff.PieceSizes[i]-1)/31)
+		nonEmpty := bls.NonEmptyDataShards(elems, int(shardElems), int(ff.Policy.K))
 		for j := 0; j < int(ff.Policy.K); j++ {
 			size := slen
 			if rest < slen {
@@ -217,6 +222,17 @@ func CheckFileFullPolicy(ff types.FileFull, stream common.Address, fp string, wa
 			}
 			rest -= size
 
+			if j >= nonEmpty {
+				if size != 0 {
+					return nil, fmt.Errorf("piece %d shard %d: expected empty, has %d bytes", i, j, size)
+				}
+				derived := bls.Eval(bls.Split(32, bls.EmptyShardElement(ew.Commits[:nonEmpty], j)), rnd)
+				legacy := bls.Eval(bls.Split(32, bls.LegacyEmptyShardElement()), rnd)
+				if derived.Cmp(&ew.ClaimedValues[j]) != 0 && legacy.Cmp(&ew.ClaimedValues[j]) != 0 {
+					return nil, fmt.Errorf("unequal val at %d %d (empty shard)", i, j)
+				}
+				continue
+			}
 			cval := bls.Eval(bls.Split(31, buf), rnd)
 			if cval.Cmp(&ew.ClaimedValues[j]) != 0 {
 				return nil, fmt.Errorf("unequal val at %d %d", i, j)
