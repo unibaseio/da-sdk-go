@@ -18,6 +18,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	contract "github.com/unibaseio/da-sdk-go/contract/v2"
+	"github.com/unibaseio/da-sdk-go/contract/v2/go/piece"
 	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/key"
 	"github.com/unibaseio/da-sdk-go/lib/logfs"
@@ -301,6 +302,7 @@ func (s *Server) getLFS(addr string) *logfs.LogFS {
 var (
 	alreadyHasPieceRe   = regexp.MustCompile(`already has piece: ([0-9a-fA-F]+)`)
 	alreadyHasReplicaRe = regexp.MustCompile(`already has replica: ([0-9a-fA-F]+)`)
+	alreadyHasFileRe    = regexp.MustCompile(`already has file with hash ([0-9a-fA-F]{64})`)
 )
 
 // parseAlreadyHasPiece pulls the piece name out of a stream "already has piece: <hex>"
@@ -310,6 +312,58 @@ func parseAlreadyHasPiece(msg string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// pieceUsable reports whether a piece already on chain (info) can stand for
+// a volume: same erasure policy and size, the stream that holds the volume's
+// data as its streamer (stores take a piece's replicas only from its on-chain
+// streamer), and not expired at epoch now. Piece registration is open to
+// anyone and a piece's name is only its root, so a piece registered first by
+// someone else with another size or streamer would never be stored; recording
+// the volume against it would let the drain move on and the reclaim gate drop
+// the volume's local file (review 2026-10-07). Pure.
+func pieceUsable(info piece.IPiecePieceInfo, now uint64, policy types.Policy, size int64, streamer common.Address) error {
+	if info.Rsn != policy.N || info.Rsk != policy.K {
+		return fmt.Errorf("on-chain policy %d/%d, volume needs %d/%d", info.Rsn, info.Rsk, policy.N, policy.K)
+	}
+	if size < 0 || info.Size != uint64(size) {
+		return fmt.Errorf("on-chain size %d, volume is %d bytes", info.Size, size)
+	}
+	if info.Streamer != streamer {
+		return fmt.Errorf("on-chain streamer %s, the volume is on %s", info.Streamer.Hex(), streamer.Hex())
+	}
+	if info.Expire <= now {
+		return fmt.Errorf("expired at epoch %d (now %d)", info.Expire, now)
+	}
+	return nil
+}
+
+// checkOnChainPiece reads piece serial from chain and checks pieceUsable.
+func checkOnChainPiece(cm *contract.ContractManage, serial uint64, policy types.Policy, size int64, streamer common.Address) error {
+	info, err := cm.GetPiece(serial)
+	if err != nil {
+		return err
+	}
+	now, err := cm.GetEpoch()
+	if err != nil {
+		return err
+	}
+	return pieceUsable(info, now, policy, size, streamer)
+}
+
+// sameContentRecorded reports whether the gateway refused a volume's file
+// record only because this hub (the record's owner) already has a file with
+// the very same bytes: the hash the gateway names is the stream receipt's and
+// the local volume's. Two owners' volumes can be byte-identical, and the
+// gateway keeps one record per (hash, owner); the drain used to retry such a
+// volume forever, holding back every later volume of that owner (seen on
+// testnet since July).
+func sameContentRecorded(errMsg string, res types.FileFull, fp string) bool {
+	m := alreadyHasFileRe.FindStringSubmatch(errMsg)
+	if m == nil || len(res.Pieces) == 0 || !strings.EqualFold(m[1], res.Hash) {
+		return false
+	}
+	return volumeMatches(fp, m[1])
 }
 
 // parseAlreadyHasReplica pulls the replica name out of "already has replica: <hex>".
@@ -402,6 +456,10 @@ func (s *Server) recoverStagedPiece(cm *contract.ContractManage, au types.Auth, 
 			s.addVolume(key, i, pr.Name, txn)
 			logger.Infof("recovered staged piece %s -> on-chain (tx %s)", pn, txn)
 		} else {
+			if err := checkOnChainPiece(cm, pr.Serial, policy, volSize, st.Name); err != nil {
+				logger.Errorf("recover staged piece %s: on-chain piece %d not usable: %v", pn, pr.Serial, err)
+				return false
+			}
 			s.addVolume(key, i, pr.Name, "")
 			logger.Infof("recovered staged piece %s (already on-chain, serial %d)", pn, pr.Serial)
 		}
@@ -497,6 +555,10 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 						continue
 					}
 					if pr.Serial > 0 {
+						if err := checkOnChainPiece(cm, pr.Serial, policy, volSize, st.Name); err != nil {
+							logger.Errorf("%s/%d.vol: on-chain piece %d not usable: %v", key, i, pr.Serial, err)
+							break
+						}
 						suc++
 						break
 					}
@@ -523,6 +585,12 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		// each request signed when sent: encoding a volume takes minutes, and
 		// the gateway and streams reject signatures older than ~10 minutes
 		res, streamer, err := sdk.UploadWith(sdk.ServerURL, s.rp.Key().BuildAuth, policy, fp, fname)
+		if err != nil && sameContentRecorded(err.Error(), res, fp) {
+			// the bytes are recorded already; what is left is to make sure the
+			// pieces are on chain and to record this volume
+			logger.Infof("drain %s vol %d: same bytes already recorded by this hub (sha256 %s); committing its pieces", key, i, res.Hash)
+			err = nil
+		}
 		if err != nil {
 			// The piece is already staged on a stream from a prior attempt whose
 			// on-chain AddPiece never completed (hub briefly out of gas, or a
@@ -552,6 +620,17 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		// submit meta to chain
 		var terr error
 		for _, pc := range pcs {
+			// a piece with these bytes may be on chain already (an identical
+			// volume): AddPiece would revert and hold the drain here
+			if serial, err := cm.GetPieceSerial(pc.Name); err == nil && serial > 0 {
+				if err := checkOnChainPiece(cm, serial, pc.Policy, pc.Size, pc.Streamer); err != nil {
+					logger.Errorf("drain %s vol %d: on-chain piece %d not usable: %v", key, i, serial, err)
+					terr = err
+					break
+				}
+				s.addVolume(key, i, pc.Name, "")
+				continue
+			}
 			txn, err := cm.AddPiece(pc)
 			if err != nil {
 				terr = err
