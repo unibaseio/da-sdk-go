@@ -301,6 +301,7 @@ func (s *Server) getLFS(addr string) *logfs.LogFS {
 var (
 	alreadyHasPieceRe   = regexp.MustCompile(`already has piece: ([0-9a-fA-F]+)`)
 	alreadyHasReplicaRe = regexp.MustCompile(`already has replica: ([0-9a-fA-F]+)`)
+	alreadyHasFileRe    = regexp.MustCompile(`already has file with hash ([0-9a-fA-F]{64})`)
 )
 
 // parseAlreadyHasPiece pulls the piece name out of a stream "already has piece: <hex>"
@@ -310,6 +311,21 @@ func parseAlreadyHasPiece(msg string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// sameContentRecorded reports whether the gateway refused a volume's file
+// record only because this hub (the record's owner) already has a file with
+// the very same bytes: the hash the gateway names is the stream receipt's and
+// the local volume's. Two owners' volumes can be byte-identical, and the
+// gateway keeps one record per (hash, owner); the drain used to retry such a
+// volume forever, holding back every later volume of that owner (seen on
+// testnet since July).
+func sameContentRecorded(errMsg string, res types.FileFull, fp string) bool {
+	m := alreadyHasFileRe.FindStringSubmatch(errMsg)
+	if m == nil || len(res.Pieces) == 0 || !strings.EqualFold(m[1], res.Hash) {
+		return false
+	}
+	return volumeMatches(fp, m[1])
 }
 
 // parseAlreadyHasReplica pulls the replica name out of "already has replica: <hex>".
@@ -523,6 +539,12 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		// each request signed when sent: encoding a volume takes minutes, and
 		// the gateway and streams reject signatures older than ~10 minutes
 		res, streamer, err := sdk.UploadWith(sdk.ServerURL, s.rp.Key().BuildAuth, policy, fp, fname)
+		if err != nil && sameContentRecorded(err.Error(), res, fp) {
+			// the bytes are recorded already; what is left is to make sure the
+			// pieces are on chain and to record this volume
+			logger.Infof("drain %s vol %d: same bytes already recorded by this hub (sha256 %s); committing its pieces", key, i, res.Hash)
+			err = nil
+		}
 		if err != nil {
 			// The piece is already staged on a stream from a prior attempt whose
 			// on-chain AddPiece never completed (hub briefly out of gas, or a
@@ -552,6 +574,12 @@ func (s *Server) drainInstance(cm *contract.ContractManage, au types.Auth, polic
 		// submit meta to chain
 		var terr error
 		for _, pc := range pcs {
+			// a piece with these bytes may be on chain already (an identical
+			// volume): AddPiece would revert and hold the drain here
+			if serial, err := cm.GetPieceSerial(pc.Name); err == nil && serial > 0 {
+				s.addVolume(key, i, pc.Name, "")
+				continue
+			}
 			txn, err := cm.AddPiece(pc)
 			if err != nil {
 				terr = err
