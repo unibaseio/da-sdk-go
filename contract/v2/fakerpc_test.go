@@ -49,6 +49,7 @@ type fakeRPC struct {
 type jsonRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    string `json:"data,omitempty"`
 }
 
 func newFakeRPC(t *testing.T) *fakeRPC {
