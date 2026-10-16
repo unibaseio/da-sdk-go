@@ -50,6 +50,26 @@ var ErrNotDirectCall = errors.New("event's transaction is not a direct call to t
 // contract that decoder is for.
 var ErrForeignLog = errors.New("log not emitted by the expected contract")
 
+// isEvent reports whether elog is cabi's event name (by topic 0).
+func isEvent(elog etypes.Log, cabi abi.ABI, name string) bool {
+	ev, ok := cabi.Events[name]
+	return ok && len(elog.Topics) > 0 && elog.Topics[0] == ev.ID
+}
+
+// EventIDs returns the topic-0 ids of the named events that cabi has, for a
+// log filter. Piece and EProof emit AddPieceV2/AddReplicaV2/SubmitV2 since
+// audit 2026-10-13 F2 and AddPiece/AddReplica/Submit before it; a node syncing
+// across the upgrade needs both.
+func EventIDs(cabi abi.ABI, names ...string) []common.Hash {
+	var ids []common.Hash
+	for _, n := range names {
+		if ev, ok := cabi.Events[n]; ok {
+			ids = append(ids, ev.ID)
+		}
+	}
+	return ids
+}
+
 // directCallInputs decodes the arguments of method m from tx's calldata, but
 // only when tx calls the emitting contract directly with m's selector. Any
 // other shape (a call routed through a contract, or crafted calldata) is
@@ -117,6 +137,26 @@ func (c *ContractManage) HandleAddPiece(elog etypes.Log, cabi abi.ABI) (types.Pi
 	}
 	pc.Owner = common.HexToAddress(elog.Topics[1].Hex())
 
+	if isEvent(elog, cabi, "AddPieceV2") {
+		// every field is in the event (F2): no calldata, so a piece added
+		// through a contract is seen like any other. The fields are taken as
+		// the log says, so the log must be Piece's own.
+		if elog.Address != c.PieceAddr {
+			return pc, fmt.Errorf("%w: AddPieceV2 log from %s, Piece is %s", ErrForeignLog, elog.Address.Hex(), c.PieceAddr.Hex())
+		}
+		ld, err := cabi.Unpack("AddPieceV2", elog.Data)
+		if err != nil {
+			return pc, err
+		}
+		if len(ld) != 9 {
+			return pc, fmt.Errorf("invalid AddPieceV2 data length")
+		}
+		pc.Serial = ld[0].(uint64)
+		pc.Start = ld[1].(uint64)
+		fillPiece(&pc, ld[2:])
+		return pc, nil
+	}
+
 	ld, err := cabi.Unpack(evInfo.Name, elog.Data)
 	if err != nil {
 		return pc, err
@@ -140,6 +180,13 @@ func (c *ContractManage) HandleAddPiece(elog etypes.Log, cabi abi.ABI) (types.Pi
 		return pc, err
 	}
 
+	fillPiece(&pc, fields)
+	return pc, nil
+}
+
+// fillPiece sets pc from [pn, price, size, expire, rsn, rsk, streamer] — the
+// addPiece arguments, as decoded from calldata or from an AddPieceV2 event.
+func fillPiece(pc *types.PieceCore, fields []interface{}) {
 	g1, err := com.SolidityToG1(fields[0].([]byte))
 	if err == nil {
 		pc.Name = com.G1ToString(g1)
@@ -152,8 +199,6 @@ func (c *ContractManage) HandleAddPiece(elog etypes.Log, cabi abi.ABI) (types.Pi
 	pc.Policy.N = fields[4].(uint8)
 	pc.Policy.K = fields[5].(uint8)
 	pc.Streamer = fields[6].(common.Address)
-
-	return pc, nil
 }
 
 func (c *ContractManage) HandleAddReplica(elog etypes.Log, cabi abi.ABI) (types.ReplicaInChain, error) {
@@ -174,6 +219,22 @@ func (c *ContractManage) HandleAddReplica(elog etypes.Log, cabi abi.ABI) (types.
 		return rc, fmt.Errorf("invalid log topic length")
 	}
 	rc.StoredOn = common.HexToAddress(elog.Topics[1].Hex())
+
+	if isEvent(elog, cabi, "AddReplicaV2") {
+		// every argument is in the event (F2): a replica added through a
+		// contract or an EIP-7702 account is seen, and challenged, like any other
+		ld, err := cabi.Unpack("AddReplicaV2", elog.Data)
+		if err != nil {
+			return rc, err
+		}
+		if len(ld) != 6 {
+			return rc, fmt.Errorf("invalid AddReplicaV2 data length")
+		}
+		rc.Serial = ld[0].(uint64)
+		rc.Witness.Index = ld[1].(uint64)
+		fillReplica(&rc, ld[2:])
+		return rc, nil
+	}
 
 	ld, err := cabi.Unpack(evInfo.Name, elog.Data)
 	if err != nil {
@@ -212,17 +273,22 @@ func (c *ContractManage) HandleAddReplica(elog etypes.Log, cabi abi.ABI) (types.
 	// those entries. A re-read adds nothing, and reading at the latest block
 	// made a lagging or failing RPC drop the event for good.
 
-	g1, err := com.SolidityToG1(inputs[0].([]byte))
+	fillReplica(&rc, inputs)
+	return rc, nil
+}
+
+// fillReplica sets rc from [rn, pi, pri, proof] — the addReplica arguments, as
+// decoded from calldata or from an AddReplicaV2 event.
+func fillReplica(rc *types.ReplicaInChain, fields []interface{}) {
+	g1, err := com.SolidityToG1(fields[0].([]byte))
 	if err == nil {
 		rc.Name = com.G1ToString(g1)
 	} else {
-		rc.Name = hex.EncodeToString(inputs[0].([]byte))
+		rc.Name = hex.EncodeToString(fields[0].([]byte))
 	}
-	rc.Piece = inputs[1].(uint64)
-	rc.Index = inputs[2].(uint8)
-	rc.Witness.Proof = inputs[3].([]byte)
-
-	return rc, nil
+	rc.Piece = fields[1].(uint64)
+	rc.Index = fields[2].(uint8)
+	rc.Witness.Proof = fields[3].([]byte)
 }
 
 func (c *ContractManage) HandleRSChallenge(elog etypes.Log, cabi abi.ABI) (types.RSChalInChain, error) {
@@ -288,6 +354,24 @@ func (c *ContractManage) HandleSubmitEProof(elog etypes.Log, cabi abi.ABI) (type
 	}
 	ei.Store = common.HexToAddress(elog.Topics[1].Hex())
 
+	if isEvent(elog, cabi, "SubmitV2") {
+		// sum and proof are in the event (F2): a validator sees a submission
+		// made through a contract instead of challenging one it never saw
+		if elog.Address != c.EProofAddr {
+			return ei, fmt.Errorf("%w: SubmitV2 log from %s, EProof is %s", ErrForeignLog, elog.Address.Hex(), c.EProofAddr.Hex())
+		}
+		ld, err := cabi.Unpack("SubmitV2", elog.Data)
+		if err != nil {
+			return ei, err
+		}
+		if len(ld) != 3 {
+			return ei, fmt.Errorf("invalid SubmitV2 data length")
+		}
+		ei.Epoch = ld[0].(uint64)
+		fillEProof(&ei, ld[1].([]byte), ld[2].([]byte))
+		return ei, nil
+	}
+
 	ld, err := cabi.Unpack(evInfo.Name, elog.Data)
 	if err != nil {
 		return ei, err
@@ -316,7 +400,13 @@ func (c *ContractManage) HandleSubmitEProof(elog etypes.Log, cabi abi.ABI) (type
 		return ei, fmt.Errorf("invalid input length")
 	}
 
-	sum := inputs[1].([]byte)
+	fillEProof(&ei, inputs[1].([]byte), inputs[2].([]byte))
+	return ei, nil
+}
+
+// fillEProof sets ei from a submitted sum and proof (the submit arguments, as
+// decoded from calldata or from a SubmitV2 event).
+func fillEProof(ei *types.EProofInChain, sum, pf []byte) {
 	g1, err := com.SolidityToG1(sum)
 	if err == nil {
 		g1b := g1.Bytes()
@@ -325,7 +415,6 @@ func (c *ContractManage) HandleSubmitEProof(elog etypes.Log, cabi abi.ABI) (type
 		ei.Sum = sum
 	}
 
-	pf := inputs[2].(([]byte))
 	if len(pf) == 144 {
 		g1, err := com.SolidityToG1(pf[:96])
 		if err == nil {
@@ -339,8 +428,6 @@ func (c *ContractManage) HandleSubmitEProof(elog etypes.Log, cabi abi.ABI) (type
 		}
 	}
 	ei.Hash = crypto.Keccak256(sum, pf)
-
-	return ei, nil
 }
 
 func (c *ContractManage) HandleEPChallenge(elog etypes.Log, cabi abi.ABI) (types.EPChalInChain, error) {
