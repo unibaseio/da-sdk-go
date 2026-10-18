@@ -19,6 +19,7 @@ type StatManager struct {
 	stats    map[string]*types.Stat // key: YYYY-MM-DD
 	lastDay  time.Time
 	stopChan chan struct{}
+	done     chan struct{} // closed when run exits; nil until Start launches it
 
 	// Track last processed IDs for incremental updates
 	lastAccountID uint
@@ -157,6 +158,7 @@ func (sm *StatManager) Start(ctx context.Context) error {
 	}
 
 	// Start background update routine
+	sm.done = make(chan struct{})
 	go sm.run(ctx)
 	return nil
 }
@@ -165,12 +167,16 @@ func (sm *StatManager) Start(ctx context.Context) error {
 func (sm *StatManager) Stop() {
 	logger.Info("stopping statistics manager...")
 
-	// Signal the background routine to stop
+	// Signal the background routine to stop, and wait for it: a tick already
+	// inside updateDailyStat must finish before the final update below, or
+	// both would count the same id range. Not holding sm.mu here is deliberate —
+	// updateDailyStat takes it itself, and sync.RWMutex is not reentrant, so
+	// holding it across the call deadlocked every graceful shutdown (SIGTERM
+	// hung until SIGKILL, skipping the LogFS flush, WAL checkpoint and repo close).
 	close(sm.stopChan)
-
-	// Save current statistics before shutdown
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	if sm.done != nil {
+		<-sm.done
+	}
 
 	now := time.Now().UTC()
 	now = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
@@ -188,6 +194,7 @@ func (sm *StatManager) Stop() {
 
 // run executes the background update routine
 func (sm *StatManager) run(ctx context.Context) {
+	defer close(sm.done)
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
