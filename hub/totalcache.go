@@ -33,6 +33,25 @@ type totalEntry struct {
 
 func newTotalCache() *totalCache { return &totalCache{m: make(map[string]totalEntry)} }
 
+// maxTotalCacheEntries caps the map. Keys embed client-chosen strings (the
+// bucket and kind of a list request), so without a cap any signer could grow it
+// until the process runs out of memory — the same bound the limiter and quota
+// maps carry.
+const maxTotalCacheEntries = 100_000
+
+// put stores n under key; the caller holds t.mu.
+func (t *totalCache) put(key string, n int64) {
+	if _, ok := t.m[key]; !ok && len(t.m) >= maxTotalCacheEntries {
+		// ponytail: evicts an arbitrary entry (map order is random) — O(1) under a
+		// flood, where an LRU or an expiry sweep would cost a scan per insert.
+		for k := range t.m {
+			delete(t.m, k)
+			break
+		}
+	}
+	t.m[key] = totalEntry{val: n, at: time.Now()}
+}
+
 func totalCacheTTL() time.Duration {
 	return time.Duration(env.Int64("HUB_TOTAL_CACHE_SEC", 3600)) * time.Second
 }
@@ -54,7 +73,7 @@ func (t *totalCache) get(key string, count func() (int64, error)) (int64, error)
 			return int64(0), err
 		}
 		t.mu.Lock()
-		t.m[key] = totalEntry{val: n, at: time.Now()}
+		t.put(key, n)
 		t.mu.Unlock()
 		return n, nil
 	})
@@ -90,12 +109,12 @@ func (s *Server) startTotalRefresh(ctx context.Context) {
 		var n int64
 		if err := s.gdb.Model(&types.Needle{}).Count(&n).Error; err == nil {
 			s.totals.mu.Lock()
-			s.totals.m["needles||"] = totalEntry{val: n, at: time.Now()}
+			s.totals.put("needles||", n)
 			s.totals.mu.Unlock()
 		}
 		if err := s.gdb.Model(&types.Bucket{}).Count(&n).Error; err == nil {
 			s.totals.mu.Lock()
-			s.totals.m["buckets||"] = totalEntry{val: n, at: time.Now()}
+			s.totals.put("buckets||", n)
 			s.totals.mu.Unlock()
 		}
 	}
