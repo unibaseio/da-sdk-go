@@ -11,7 +11,8 @@ import (
 
 func TestHTTPServerTimeouts(t *testing.T) {
 	srv := newHTTPServer(":0", http.NotFoundHandler())
-	if srv.ReadHeaderTimeout != 10*time.Second || srv.IdleTimeout != 120*time.Second ||
+	// idle must exceed the ALBs' 180s idle timeout (see newHTTPServer)
+	if srv.ReadHeaderTimeout != 10*time.Second || srv.IdleTimeout != 240*time.Second ||
 		srv.ReadTimeout != 10*time.Minute {
 		t.Fatalf("unexpected defaults: %+v", srv)
 	}
