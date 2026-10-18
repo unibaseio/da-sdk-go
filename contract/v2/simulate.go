@@ -54,8 +54,8 @@ func isRevert(err error) bool {
 	return strings.Contains(err.Error(), "execution reverted")
 }
 
-// SimulateProveRS runs ProveRS(_pn, _rn, _pri, _pf) as an eth_call.
-func (c *ContractManage) SimulateProveRS(_pn, _rn string, _pri uint8, _pf []byte) error {
+// SimulateProveRS runs ProveRS(ver, _pn, _rn, _pri, _pf) as an eth_call.
+func (c *ContractManage) SimulateProveRS(ver uint8, _pn, _rn string, _pri uint8, _pf []byte) error {
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute)
 	defer cancel()
 	rsp, err := c.NewRSProof(ctx)
@@ -70,7 +70,7 @@ func (c *ContractManage) SimulateProveRS(_pn, _rn string, _pri uint8, _pf []byte
 	if err != nil {
 		return err
 	}
-	return c.simulate(ctx, &rsproof.RSProofRaw{Contract: rsp}, "prove", pname, rname, _pri, CurrentProofVersion, _pf)
+	return c.simulate(ctx, &rsproof.RSProofRaw{Contract: rsp}, "prove", pname, rname, _pri, ver, _pf)
 }
 
 // SimulateProveKZG runs ProveKZG(_ep, _wroot, _pf) as an eth_call.

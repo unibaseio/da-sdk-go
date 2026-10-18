@@ -264,6 +264,35 @@
   },
   {
     "type": "function",
+    "name": "getVKRootV",
+    "inputs": [
+      {
+        "name": "_ver",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "_rsn",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "_rsk",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "grantRole",
     "inputs": [
       {
@@ -395,6 +424,32 @@
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "minVersion",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "minVersionFrom",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
@@ -585,8 +640,54 @@
   },
   {
     "type": "function",
+    "name": "setMinVersion",
+    "inputs": [
+      {
+        "name": "_ver",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "_fromReplica",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setVKRoot",
     "inputs": [
+      {
+        "name": "_rsn",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "_rsk",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "_vkroot",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setVKRootV",
+    "inputs": [
+      {
+        "name": "_ver",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
       {
         "name": "_rsn",
         "type": "uint8",
@@ -865,6 +966,56 @@
       },
       {
         "name": "_new",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetMinVersion",
+    "inputs": [
+      {
+        "name": "ver",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "fromReplica",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetVKRoot",
+    "inputs": [
+      {
+        "name": "ver",
+        "type": "uint8",
+        "indexed": true,
+        "internalType": "uint8"
+      },
+      {
+        "name": "rsn",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "rsk",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "vkroot",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
