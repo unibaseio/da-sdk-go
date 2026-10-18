@@ -29,7 +29,7 @@ func TestHashSpeed(t *testing.T) {
 		h.Sum(nil)
 	}
 
-	t.Fatal("cost: ", time.Since(nt))
+	t.Log("cost: ", time.Since(nt))
 }
 
 func TestMerkleHashSpeed(t *testing.T) {
@@ -50,7 +50,7 @@ func TestMerkleHashSpeed(t *testing.T) {
 
 	mt.Root()
 
-	t.Fatal("cost: ", time.Since(nt))
+	t.Log("cost: ", time.Since(nt))
 }
 
 func TestHashTwo(t *testing.T) {
@@ -75,5 +75,4 @@ func TestHashTwo(t *testing.T) {
 	if !bytes.Equal(h1, h2.Bytes()) {
 		t.Fatal("unequal")
 	}
-	t.Fatal()
 }

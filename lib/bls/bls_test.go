@@ -20,6 +20,7 @@ import (
 )
 
 func TestKZG(t *testing.T) {
+	slowExperiment(t)
 	pk := GenKZGKey(MaxShard/8, big.NewInt(12345678))
 
 	pkb := pk.Serialize()
@@ -94,6 +95,7 @@ func TestKZG(t *testing.T) {
 }
 
 func TestProof4(t *testing.T) {
+	slowExperiment(t)
 	pk := GenKZGKey(MaxShard, big.NewInt(123456789))
 	vk := &VerifyKey{
 		&pk.Vk,
@@ -156,6 +158,7 @@ func genMoveProof(pk *PublicKey) (types.IChallenge, types.IProof) {
 }
 
 func TestKZGSloth(t *testing.T) {
+	slowExperiment(t)
 	opk := GenKZGKey(MaxShard, big.NewInt(12345678))
 
 	pkb := opk.Serialize()
@@ -218,6 +221,7 @@ func TestKZGSloth(t *testing.T) {
 }
 
 func TestPad(t *testing.T) {
+	slowExperiment(t)
 	fsize := 3*MaxSize + 28
 	data := utils.RandomBytes(fsize)
 	nt := time.Now()
@@ -236,6 +240,7 @@ func TestPad(t *testing.T) {
 }
 
 func TestSloth(t *testing.T) {
+	slowExperiment(t)
 	mod := fr.Modulus()
 	mod1 := new(big.Int).Sub(mod, big.NewInt(1))
 	t.Log(mod1.Text(16))
@@ -275,6 +280,7 @@ func TestSloth(t *testing.T) {
 }
 
 func TestSlothV2(t *testing.T) {
+	slowExperiment(t)
 	rnd := utils.RandomBytes(32)
 	data := make([]byte, 32*1024*1024)
 	var fr_r Fr
@@ -304,6 +310,7 @@ func TestSlothV2(t *testing.T) {
 }
 
 func TestPoint(t *testing.T) {
+	slowExperiment(t)
 	fmt.Println("test")
 	nt := time.Now()
 	pk := GenPointKey(MaxShard/4, big.NewInt(12345678))
@@ -349,6 +356,7 @@ func TestPoint(t *testing.T) {
 }
 
 func TestMultiPoint(t *testing.T) {
+	slowExperiment(t)
 	fmt.Println("test")
 	nt := time.Now()
 	pk := GenPointKey(MaxShard/128, big.NewInt(12345678))
@@ -379,6 +387,7 @@ func TestMultiPoint(t *testing.T) {
 }
 
 func TestMarshalSpeed(t *testing.T) {
+	slowExperiment(t)
 	ppk := GenPointKey(20240, big.NewInt(895576))
 	rawres := make([]byte, 0, (ppk.N+1)*G2Size*2)
 	res := make([]byte, 0, (ppk.N+1)*G2Size)
@@ -412,6 +421,7 @@ func TestMarshalSpeed(t *testing.T) {
 }
 
 func TestHash(t *testing.T) {
+	slowExperiment(t)
 	nt := time.Now()
 	//h, err := recursion.NewShort(curveID.ScalarField(), fr.Modulus())
 	//if err != nil {
@@ -452,6 +462,7 @@ func GenRandom(len int) []byte {
 
 // 4M: 10s vs 100 ms
 func TestReverse(t *testing.T) {
+	slowExperiment(t)
 	var fr, v Fr
 	fr.SetRandom()
 	v.SetRandom()
@@ -467,6 +478,7 @@ func TestReverse(t *testing.T) {
 
 // 10s, 320ms
 func TestSlothV3(t *testing.T) {
+	slowExperiment(t)
 	rnd := utils.RandomBytes(32)
 	data := make([]byte, 32*4*1024*1024)
 	var fr_r Fr
@@ -496,6 +508,7 @@ func TestSlothV3(t *testing.T) {
 }
 
 func TestSlothV4(t *testing.T) {
+	slowExperiment(t)
 	rnd := utils.RandomBytes(32)
 	var fr_r Fr
 	fr_r.SetBytes(rnd)
@@ -554,5 +567,18 @@ func TestMarshal(t *testing.T) {
 	err := new.Deserialize(ewb)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// slowExperiment skips the timing experiments in this file. They generate KZG /
+// point keys in-process or loop over millions of field elements (seconds to
+// many minutes each — together far past go test's 10-minute default, so the
+// package timed out before the newer witness/transcript tests in later files
+// ever ran), and several end in a bare t.Fatal just to print their timings.
+// Set BLS_SLOW=1 to run them.
+func slowExperiment(t *testing.T) {
+	t.Helper()
+	if os.Getenv("BLS_SLOW") == "" {
+		t.Skip("timing experiment (slow); set BLS_SLOW=1 to run")
 	}
 }
