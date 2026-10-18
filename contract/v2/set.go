@@ -289,6 +289,18 @@ func (c *ContractManage) addPieceImpl(ctx context.Context, pc types.PieceCore, o
 
 	gtoken := c.BalanceOf(from)
 	com.Logger.Debug("submitpiece0: ", gtoken)
+
+	// Hold payMu until the addPiece has mined, not just been sent: a nonce
+	// released by a failed send can be reused below ours, so mining order alone
+	// does not keep another approve from landing between ours and our addPiece.
+	// ponytail: Lock is not ctx-aware; the wait is bounded by the holder's ctx
+	// (3 min default), and a ctx that expired while waiting stops here unsent.
+	c.payMu.Lock()
+	defer c.payMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	// ctx reaches the send too: a cancelled ctx aborts its EstimateGas
 	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
 		return ti.Approve(au, c.PieceAddr, val)
