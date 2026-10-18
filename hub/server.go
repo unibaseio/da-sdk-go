@@ -322,9 +322,10 @@ func (s *Server) isSQLite() bool {
 // HTTP server timeouts (env-tunable, seconds; 0 disables one):
 //   - HUB_HTTP_READ_HEADER_TIMEOUT_SEC (10): slowloris guard on the request line and
 //     headers.
-//   - HUB_HTTP_IDLE_TIMEOUT_SEC (120): keep-alive idle; above the ALB's default
-//     60s idle timeout so the ALB, not the hub, closes idle connections (the
-//     other way round yields sporadic 502s).
+//   - HUB_HTTP_IDLE_TIMEOUT_SEC (240): keep-alive idle; must stay above the load
+//     balancer's idle timeout so the LB, not the hub, closes idle connections
+//     (the other way round yields sporadic 502s). Our ALBs run 180s, not the 60s
+//     default, so a seal (encode + ~90s on-chain wait) isn't cut off.
 //   - HUB_HTTP_READ_TIMEOUT_SEC (600): whole request including the body. Uploads
 //     are capped at HUB_MAX_MULTIPART_BYTES (64 MiB), so 10 min still admits a
 //     ~110 KB/s client.
@@ -334,7 +335,7 @@ func (s *Server) isSQLite() bool {
 //     handlers are bounded by their own contexts and semaphores instead.
 const (
 	defaultHTTPReadHeaderTimeoutSec = 10
-	defaultHTTPIdleTimeoutSec       = 120
+	defaultHTTPIdleTimeoutSec       = 240
 	defaultHTTPReadTimeoutSec       = 600
 	defaultHTTPWriteTimeoutSec      = 0
 )

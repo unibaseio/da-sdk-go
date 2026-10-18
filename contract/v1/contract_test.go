@@ -1,3 +1,9 @@
+//go:build integration
+
+// Manual checks against a live chain/gateway and local key files (/tmp/sk,
+// ~/da-go): run with `go test -tags integration`. Kept out of the default run,
+// which must pass offline.
+
 package contract
 
 import (

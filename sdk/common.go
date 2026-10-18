@@ -168,6 +168,9 @@ func CheckFileFullPolicy(ff types.FileFull, stream common.Address, fp string, wa
 	h := sha256.New()
 	fi := io.TeeReader(f, h)
 
+	// ponytail: an env knob, not the chain's RSOne cutoff — streams pick
+	// their format by env too (STREAM_WITNESS_FORMAT), so ops flip both together.
+	minFormat := env.Int(env.MinWitnessFormat, int(bls.FormatV1))
 	res := make([]types.PieceCore, len(ff.Pieces))
 	var rnd bls.Fr
 	for i := 0; i < len(ff.Pieces); i++ {
@@ -175,6 +178,9 @@ func CheckFileFullPolicy(ff types.FileFull, stream common.Address, fp string, wa
 		err := ew.Deserialize(ff.Proofs[i])
 		if err != nil {
 			return nil, err
+		}
+		if int(ew.Format) < minFormat {
+			return nil, fmt.Errorf("piece %d witness is format %d, %s requires %d or newer", i, ew.Format, env.MinWitnessFormat, minFormat)
 		}
 
 		err = CheckWitness(int(ff.Policy.N), int(ff.Policy.K), ew)

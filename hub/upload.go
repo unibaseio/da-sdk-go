@@ -232,7 +232,10 @@ func (s *Server) uploadTo() {
 		K: uint8(env.Int("HUB_RS_K", 4)),
 	}
 
-	cm, err := contract.NewContractManage(sk, s.rp.Repo().Config().Chain.Type)
+	// The same manager /v1/seal uses: nonce allocation and the approve→addPiece
+	// lock are per manager, so a second manager on this key would hand out
+	// colliding nonces and overwrite seal's token approval.
+	cm, err := s.chainManager()
 	if err != nil {
 		panic(err)
 	}

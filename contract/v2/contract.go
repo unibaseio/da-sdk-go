@@ -101,6 +101,13 @@ type ContractManage struct {
 	freeNonces      []uint64  // released nonces below localNonce, handed out first
 	lastChainNonce  uint64    // last chain pending nonce observed (progress tracking)
 	nonceProgressAt time.Time // when the chain pending nonce last advanced
+
+	// payMu serializes the approve → addPiece pair. The UB token is OpenZeppelin
+	// v5, which has no increaseAllowance, so Approve SETS the allowance: two
+	// concurrent AddPiece calls would each overwrite the other's approval, and
+	// one paid piece would fail to register. Like the nonce state above it is
+	// per manager, so one account must use one manager per process.
+	payMu sync.Mutex
 }
 
 // From is the address of this manager's signing key, for read-only CallOpts.

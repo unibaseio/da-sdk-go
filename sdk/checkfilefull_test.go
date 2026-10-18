@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/unibaseio/da-sdk-go/lib/bls"
 	"github.com/unibaseio/da-sdk-go/lib/bls/erasure"
+	"github.com/unibaseio/da-sdk-go/lib/env"
 	"github.com/unibaseio/da-sdk-go/lib/types"
 )
 
@@ -158,6 +159,44 @@ func toyOpening(ew *bls.EncodeWitness, r bls.Fr, elems int64, cT, mT, lT []bls.F
 		f.Add(&f, &tmp).Add(&f, &cT[i])
 		fTau.Add(&fTau, &f)
 	}
+	return toyQuotient(fTau, fR, r)
+}
+
+// toyOpeningV2 is toyOpening for format 2: shard i weighted a_i = γ^(3i), its
+// C, M, L by 1, γ, γ² (bls verifyOpeningV2).
+func toyOpeningV2(ew *bls.EncodeWitness, elems int64, cT, mT, lT []bls.Fr) bls.G1 {
+	point := ew.Challenge(testStream.Bytes())
+	var r bls.Fr
+	r.SetBytes(point)
+	g := ew.BatchCoefficient(point)
+	var g2, g3 bls.Fr
+	g2.Mul(&g, &g)
+	g3.Mul(&g2, &g)
+	rk2 := pow(r, int64(bls.MaxShard)-elems)
+	var fTau, fR, a bls.Fr
+	a.SetOne()
+	for i := range ew.MoveCommits {
+		// F(r): a·y·(1 + γ r^k1 + γ² r^k2)
+		rk1 := pow(r, int64(i)*elems)
+		var f, tmp bls.Fr
+		f.Mul(&g2, &rk2)
+		tmp.Mul(&g, &rk1)
+		f.Add(&f, &tmp)
+		tmp.SetOne()
+		f.Add(&f, &tmp).Mul(&f, &ew.ClaimedValues[i]).Mul(&f, &a)
+		fR.Add(&fR, &f)
+		// F(τ): a·(c + γ·m + γ²·l)
+		f.Mul(&g2, &lT[i])
+		tmp.Mul(&g, &mT[i])
+		f.Add(&f, &tmp).Add(&f, &cT[i]).Mul(&f, &a)
+		fTau.Add(&fTau, &f)
+		a.Mul(&a, &g3)
+	}
+	return toyQuotient(fTau, fR, r)
+}
+
+// toyQuotient is [(F(τ)-F(r))/(τ-r)]G₁.
+func toyQuotient(fTau, fR, r bls.Fr) bls.G1 {
 	var q, d bls.Fr
 	q.Sub(&fTau, &fR)
 	d.Sub(&testTau, &r)
@@ -337,16 +376,59 @@ func TestFormat1SumShiftStillVerifies(t *testing.T) {
 	fp := writeTemp(t, data)
 	ff := fakeEncode(t, data, pol, testStream)
 	ew := witnessOf(t, ff)
-	k := 4
-	size := int64(len(data))
-	elems := 1 + (size-1)/(31*int64(k))
+	honestC, mT, lT, elems := shiftSum(t, ew, data)
+	// the opening of the attacker's polynomial: the C-part sums to the
+	// honest one, so this is the honest opening at r, computable without τ
+	var r bls.Fr
+	r.SetBytes(ew.Challenge(testStream.Bytes()))
+	ew.H = toyOpening(ew, r, elems, honestC, mT, lT)
+	reencode(&ff, ew)
+	if _, err := CheckFileFull(ff, testStream, fp); err != nil {
+		t.Fatalf("format 1 was expected to accept the sum shift (its known limit), got %v", err)
+	}
+}
 
-	// recover the honest discrete logs the way fakeEncode built them
+// MIN_WITNESS_FORMAT=2 closes N1: format 1 is refused outright, an honest
+// format-2 answer verifies, and the sum shift does not survive format 2.
+func TestMinWitnessFormat2(t *testing.T) {
+	data := testData()
+	pol := types.Policy{N: 6, K: 4}
+	fp := writeTemp(t, data)
+	t.Setenv(env.MinWitnessFormat, "2")
+
+	ff := fakeEncode(t, data, pol, testStream)
+	if _, err := CheckFileFull(ff, testStream, fp); err == nil || !strings.Contains(err.Error(), "format 1") {
+		t.Fatalf("format 1 under %s=2: %v", env.MinWitnessFormat, err)
+	}
+
+	ew := witnessOf(t, ff)
+	_, cT, mT, lT, elems := honestLogs(data, int(pol.K))
+	ew.Format = bls.FormatV2
+	ew.H = toyOpeningV2(ew, elems, cT, mT, lT)
+	reencode(&ff, ew)
+	if _, err := CheckFileFull(ff, testStream, fp); err != nil {
+		t.Fatalf("honest format 2 rejected: %v", err)
+	}
+
+	ff = fakeEncode(t, data, pol, testStream)
+	ew = witnessOf(t, ff)
+	ew.Format = bls.FormatV2
+	honestC, mT, lT, elems := shiftSum(t, ew, data)
+	ew.H = toyOpeningV2(ew, elems, honestC, mT, lT)
+	reencode(&ff, ew)
+	if _, err := CheckFileFull(ff, testStream, fp); err == nil || !strings.Contains(err.Error(), "opening") {
+		t.Fatalf("format 2 accepted the sum shift: %v", err)
+	}
+}
+
+// honestLogs recovers the discrete logs fakeEncode committed to for data in
+// one piece of k shards: each shard's elements and the values at τ of its
+// data, move and limit polynomials.
+func honestLogs(data []byte, k int) (shards [][]bls.Fr, cT, mT, lT []bls.Fr, elems int64) {
+	elems = 1 + (int64(len(data))-1)/(31*int64(k))
 	slen := elems * 31
-	cT := make([]bls.Fr, k)
-	mT := make([]bls.Fr, k)
-	lT := make([]bls.Fr, k)
-	shards := make([][]bls.Fr, k)
+	cT, mT, lT = make([]bls.Fr, k), make([]bls.Fr, k), make([]bls.Fr, k)
+	shards = make([][]bls.Fr, k)
 	rest := data
 	k2 := pow(testTau, int64(bls.MaxShard)-elems)
 	for j := 0; j < k; j++ {
@@ -361,8 +443,19 @@ func TestFormat1SumShiftStillVerifies(t *testing.T) {
 		mT[j].Mul(&cT[j], &k1)
 		lT[j].Mul(&cT[j], &k2)
 	}
+	return
+}
 
-	// Δ = [d]G₁ for a d the attacker picks: C₀+Δ, C₁−Δ; parity recomputed
+// shiftSum is the N1 forgery on ew, an honest answer for data: Δ = [d]G₁ for
+// a d the attacker picks moves from C₀ to C₁, parity commits and claimed
+// values recomputed. It returns the honest logs, whose C-part has the same
+// sum as the forged one.
+func shiftSum(t *testing.T, ew *bls.EncodeWitness, data []byte) (honestC, mT, lT []bls.Fr, elems int64) {
+	t.Helper()
+	n, k := len(ew.Commits), len(ew.MoveCommits)
+	shards, cT, mT, lT, elems := honestLogs(data, k)
+	honestC = append([]bls.Fr(nil), cT...)
+
 	var d bls.Fr
 	d.SetUint64(424242)
 	var dG bls.G1
@@ -371,11 +464,15 @@ func TestFormat1SumShiftStillVerifies(t *testing.T) {
 	ew.Commits[1].Sub(&ew.Commits[1], &dG)
 	cT[0].Add(&cT[0], &d)
 	cT[1].Sub(&cT[1], &d)
-	rs, err := erasure.NewRS(6, k)
+	rs, err := erasure.NewRS(n, k)
 	if err != nil {
 		t.Fatal(err)
 	}
-	par, err := rs.EncodeFr(cT, []int{4, 5})
+	at := make([]int, n-k)
+	for i := range at {
+		at[i] = k + i
+	}
+	par, err := rs.EncodeFr(cT, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,15 +484,5 @@ func TestFormat1SumShiftStillVerifies(t *testing.T) {
 	for j := 0; j < k; j++ {
 		ew.ClaimedValues[j] = bls.Eval(shards[j], r)
 	}
-	// the opening of the attacker's polynomial: the C-part sums to the
-	// honest one, so this is the honest opening at r, computable without τ
-	honestC := make([]bls.Fr, k)
-	copy(honestC, cT)
-	honestC[0].Sub(&honestC[0], &d)
-	honestC[1].Add(&honestC[1], &d)
-	ew.H = toyOpening(ew, r, elems, honestC, mT, lT)
-	reencode(&ff, ew)
-	if _, err := CheckFileFull(ff, testStream, fp); err != nil {
-		t.Fatalf("format 1 was expected to accept the sum shift (its known limit), got %v", err)
-	}
+	return honestC, mT, lT, elems
 }

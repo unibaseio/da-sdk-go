@@ -39,6 +39,11 @@ const (
 
 	StreamUploadConcurrency = "STREAM_UPLOAD_CONCURRENCY"
 
+	// oldest encoding-witness format sdk.CheckFileFull accepts (default 1);
+	// 2 refuses FormatV1, which binds only the sum of the data commitments
+	// (audit N1). Raise it once streams encode FormatV2.
+	MinWitnessFormat = "MIN_WITNESS_FORMAT"
+
 	// gateway backend split
 	GatewayMode      = "GATEWAY_MODE"
 	GatewayDBDriver  = "GATEWAY_DB_DRIVER"
