@@ -33,10 +33,14 @@ hub create the gorm indexes (incl. the covering `LOWER(owner),size` one).
 
 ### 1a. Freeze writes (consistency) and snapshot
 
+> The compose service was called `dimo-hub` until 2026-10-31. On a host still
+> running the old name, use `dimo-hub` in the `stop` below; the first
+> `up -d --remove-orphans hub` (step 1d) replaces that container with `hub`.
+
 ```bash
 cd ~/unibase-sdk-go
 # stop the hub so gorm.db is quiescent (or take an EBS snapshot and migrate from a copy)
-docker-compose -f docker-compose/docker-compose-hub.yml stop dimo-hub
+docker-compose -f docker-compose/docker-compose-hub.yml stop hub
 cp -a ~/data/hub/gorm/gorm.db /tmp/gorm.migrate.db   # migrate from a static copy
 ```
 
@@ -96,9 +100,9 @@ Add to the writer's compose `environment:` and start:
       HUB_DB_DSN: "postgres://hubuser:PASSWORD@HUB-RDS...:5432/hub?sslmode=require"
 ```
 ```bash
-docker-compose -f docker-compose/docker-compose-hub.yml rm -f dimo-hub
-docker-compose -f docker-compose/docker-compose-hub.yml up -d dimo-hub
-docker logs -f docker-compose_dimo-hub_1 2>&1 | grep -iE "gorm backend|memstat refreshed"
+docker-compose -f docker-compose/docker-compose-hub.yml rm -f hub
+docker-compose -f docker-compose/docker-compose-hub.yml up -d --remove-orphans hub
+docker logs -f docker-compose_hub_1 2>&1 | grep -iE "gorm backend|memstat refreshed"
 # expect: "gorm backend: postgres (shared index)" then later "memstat refreshed: ..."
 ```
 

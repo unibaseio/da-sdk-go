@@ -1,6 +1,5 @@
 services:
-  dimo-hub:
-    #image: mossv2/dimo:hub-latest
+  hub:
     image: unibaseio/hub:hub-v2
     ports:
       - 8080:8080

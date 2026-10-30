@@ -7,8 +7,8 @@ RUN apk add bash ca-certificates git gcc g++ libc-dev
 
 ENV GO111MODULE=on
 # Populate the module cache based on the go.{mod,sum} files.
-COPY . /opt/dimo
-WORKDIR /opt/dimo
+COPY . /opt/da-sdk-go
+WORKDIR /opt/da-sdk-go
 
 ###############################################################################
 FROM build_base AS server_builder
@@ -31,6 +31,6 @@ FROM alpine AS hub
 WORKDIR /app
 ENTRYPOINT ["/app/start"]
 COPY --from=server_builder /app/start /app/start
-COPY --from=server_builder /app/hub /app/dimo
+COPY --from=server_builder /app/hub /app/hub
 #RUN apk add --no-cache --upgrade bc ca-certificates openssl
 #CMD ["--bind", "0.0.0.0:8080"]

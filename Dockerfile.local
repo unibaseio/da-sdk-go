@@ -1,11 +1,11 @@
 # Dockerfile for development purposes.
 FROM alpine
 
-ARG DIMO_BIN=""
+ARG BIN="hub-edge"
 
 WORKDIR /app
 RUN apk add --no-cache libc6-compat
 
 ENTRYPOINT ["/app/start"]
 COPY scripts/start.sh /app/start
-COPY bin/${DIMO_BIN} /app/dimo
+COPY bin/${BIN} /app/hub
