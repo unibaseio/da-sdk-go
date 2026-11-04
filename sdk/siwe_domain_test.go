@@ -31,9 +31,9 @@ func siweAuth(t *testing.T, domain string, issued time.Time, extra string) types
 
 func TestSIWEDomainAndValidity(t *testing.T) {
 	now := time.Now()
-	ours := []string{"app.membase.io", "hub.unibase.io"}
+	ours := []string{"app.membase.com", "hub.unibase.io"}
 
-	if err := VerifyAuthFreshDomains(siweAuth(t, "app.membase.io", now, ""), DefaultAuthDrift, ours); err != nil {
+	if err := VerifyAuthFreshDomains(siweAuth(t, "app.membase.com", now, ""), DefaultAuthDrift, ours); err != nil {
 		t.Fatalf("our own domain rejected: %v", err)
 	}
 	// a sign-in another site collected from the user
@@ -47,15 +47,15 @@ func TestSIWEDomainAndValidity(t *testing.T) {
 	}
 
 	expired := "\nExpiration Time: " + now.Add(-time.Minute).UTC().Format(time.RFC3339)
-	if err := VerifyAuthFresh(siweAuth(t, "app.membase.io", now, expired), DefaultAuthDrift); err == nil {
+	if err := VerifyAuthFresh(siweAuth(t, "app.membase.com", now, expired), DefaultAuthDrift); err == nil {
 		t.Fatal("expired message accepted")
 	}
 	notYet := "\nNot Before: " + now.Add(time.Hour).UTC().Format(time.RFC3339)
-	if err := VerifyAuthFresh(siweAuth(t, "app.membase.io", now, notYet), DefaultAuthDrift); err == nil {
+	if err := VerifyAuthFresh(siweAuth(t, "app.membase.com", now, notYet), DefaultAuthDrift); err == nil {
 		t.Fatal("not-yet-valid message accepted")
 	}
 	valid := "\nExpiration Time: " + now.Add(time.Hour).UTC().Format(time.RFC3339)
-	if err := VerifyAuthFresh(siweAuth(t, "app.membase.io", now, valid), DefaultAuthDrift); err != nil {
+	if err := VerifyAuthFresh(siweAuth(t, "app.membase.com", now, valid), DefaultAuthDrift); err != nil {
 		t.Fatalf("message inside its validity window rejected: %v", err)
 	}
 }

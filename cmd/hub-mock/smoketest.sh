@@ -14,7 +14,7 @@
 #     can mint Authorization headers via build_authorization().
 #   - curl, awk
 #
-# Override the target with HUB_BASE, e.g. HUB_BASE=https://testnet.hub.membase.io
+# Override the target with HUB_BASE, e.g. HUB_BASE=https://testnet.hub.membase.com
 # to test the real hub once it's deployed.
 
 set -u
