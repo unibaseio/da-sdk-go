@@ -34,11 +34,13 @@ var (
 var (
 	// slots / minProveTime are in BLOCKS, so their wall-clock depends on the
 	// chain's block interval. These defaults assume ~450ms blocks (16000*450ms
-	// ≈ 2h epoch, 8000*450ms ≈ 1h prove window). ⚠️ base-sepolia is ~2s blocks,
-	// so the SAME block counts become ~8.9h / ~4.4h — recalibrate per chain via
-	// -slots / -min-prove-time (e.g. base-sepolia: -slots 3600 -min-prove-time
-	// 1800 for ~2h / ~1h). Safety note: the prove window must comfortably exceed
-	// the BN254 proof wall-clock (~4-5 min), which 1800*2s=1h does.
+	// ≈ 2h epoch, 8000*450ms ≈ 1h prove window). Block times differ per chain
+	// and change: base-sepolia ran 2s blocks until 2026-10-21 and 0.2s since,
+	// which cut a -slots 3600 / -min-prove-time 1800 deployment's 2h / 1h to
+	// 12 / 6 min. The windows in seconds below (-slot-seconds,
+	// -min-prove-seconds) put a floor under them whatever the block time; the
+	// prove window must comfortably exceed an outer proof (~6 min on the
+	// prover, ~26 min on a 4-vCPU store).
 	slots    = uint64(16000)    // Epoch slots (blocks); see note above
 	delay    = uint64(7)        // Piece delay in epochs
 	minStore = uint64(1200)     // Minimum storage time, 1200 epochs = 100 days
@@ -52,6 +54,13 @@ var (
 	streamPrice     = big.NewInt(1e12) // streaming price, per replica
 	minProveTime    = big.NewInt(8000) // Min prove time (blocks); ~1h @450ms — see slots note
 	challengeWindow = uint64(7)        // Challenge window in epochs for EProof
+	// Windows in seconds on top of the block counts above: they hold whatever
+	// the block time becomes (base-sepolia went from 2s to 0.2s blocks on
+	// 2026-10-21 and every block-counted window shrank 10x). 0 = blocks only.
+	slotSeconds     = uint64(7200)                                         // epochs last at least 2 h
+	minProveSeconds = uint64(3600)                                         // answers get at least 1 h
+	submitGrace     = uint64(1)                                            // epochs an epoch proof may be late
+	livenessPenalty = new(big.Int).Mul(big.NewInt(1_000), big.NewInt(1e18)) // fine for a missing epoch proof
 	minPledgeMap    = map[uint8]*big.Int{
 		// type 1 (store) min pledge must cover the fraud-proof penalty
 		// (challenge() locks basePenalty of the defender's stake — an
@@ -96,6 +105,9 @@ func main() {
 	rsoneV2Cutoff = flag.Bool("rsone-v2-cutoff", true, "require v2 proofs for every replica (fresh deployments)")
 	slotsFlag := flag.Uint64("slots", 0, "epoch length in blocks (default 16000; use a small value on local anvil)")
 	mptFlag := flag.Int64("min-prove-time", 0, "min prove time in blocks (default 8000)")
+	slotSecFlag := flag.Int64("slot-seconds", -1, "minimum epoch length in seconds (default 7200; 0 = blocks only, e.g. local anvil)")
+	mpsFlag := flag.Int64("min-prove-seconds", -1, "minimum answer window in seconds (default 3600; 0 = blocks only)")
+	graceFlag := flag.Int64("submit-grace", -1, "epochs an epoch proof may come late (default 1)")
 	tokenFlag := flag.String("token", "", "reuse an EXISTING ERC20 as the stake/penalty token (skip deploying a fresh test token); e.g. the canonical UB on this chain")
 	flag.Parse()
 
@@ -115,6 +127,15 @@ func main() {
 	}
 	if *mptFlag != 0 {
 		minProveTime = big.NewInt(*mptFlag)
+	}
+	if *slotSecFlag >= 0 {
+		slotSeconds = uint64(*slotSecFlag)
+	}
+	if *mpsFlag >= 0 {
+		minProveSeconds = uint64(*mpsFlag)
+	}
+	if *graceFlag >= 0 {
+		submitGrace = uint64(*graceFlag)
 	}
 	deployDAOPhase = !*skipDAO
 
@@ -373,6 +394,14 @@ func deployall_v2(client *ethclient.Client, sk string) {
 	log.Println("=== Setting Base Penalty ===")
 	if err := SetBasePenaltyV2(client, sk, rsproofProxy, eproofProxy, contract.DefaultPenalty); err != nil {
 		log.Println("Failed to set base penalty:", err)
+		return
+	}
+
+	// Step 6b: windows in seconds and the liveness rules
+	log.Println("=== Setting time windows and liveness ===")
+	if err := SetTimeAndLivenessV2(client, sk, epochProxy, rsproofProxy, eproofProxy,
+		slotSeconds, minProveSeconds, submitGrace, livenessPenalty); err != nil {
+		log.Println("Failed to set time windows / liveness:", err)
 		return
 	}
 

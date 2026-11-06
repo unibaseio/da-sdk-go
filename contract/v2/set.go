@@ -440,16 +440,21 @@ func g1OrHex(s string) ([]byte, error) {
 	return hex.DecodeString(s)
 }
 
-// approvePenalty approves spender for the challenge stake and waits until the
+// approvePenalty approves spender for the challenge stake (its basePenalty, read
+// from the chain) and waits until the
 // RPC's read side sees the allowance (else a stale replica reverts the
 // challenge's safeTransferFrom). See waitForAllowance.
 func (c *ContractManage) approvePenalty(ctx context.Context, spender common.Address) error {
+	stake, err := c.challengeStake(ctx, spender)
+	if err != nil {
+		return err
+	}
 	ti, err := c.NewToken(ctx)
 	if err != nil {
 		return err
 	}
 	tx, err := c.sendTx(ctx, func(au *bind.TransactOpts) (*etypes.Transaction, error) {
-		return ti.Approve(au, spender, com.DefaultPenalty)
+		return ti.Approve(au, spender, stake)
 	})
 	if err != nil {
 		return err
@@ -457,7 +462,7 @@ func (c *ContractManage) approvePenalty(ctx context.Context, spender common.Addr
 	if err = c.CheckTx(tx.Hash()); err != nil {
 		return err
 	}
-	return c.waitForAllowance(ctx, ti, c.From(), spender, com.DefaultPenalty)
+	return c.waitForAllowance(ctx, ti, c.From(), spender, stake)
 }
 
 // sendAndWait sends one transaction through sendTx and waits for it to be mined.

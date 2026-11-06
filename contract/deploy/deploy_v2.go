@@ -714,6 +714,56 @@ func SetBasePenaltyV2(client *ethclient.Client, sk string, rsproofAddr, eproofAd
 	return nil
 }
 
+// SetTimeAndLivenessV2 sets the windows in seconds (0 skips them: blocks only)
+// and EProof's late-submission grace and liveness fine. One makeAuth per tx.
+func SetTimeAndLivenessV2(client *ethclient.Client, sk string, epochAddr, rsproofAddr, eproofAddr common.Address,
+	slotSec, proveSec, grace uint64, liveness *big.Int) error {
+	ei, err := epoch.NewEpoch(epochAddr, client)
+	if err != nil {
+		return err
+	}
+	ri, err := rsproof.NewRSProof(rsproofAddr, client)
+	if err != nil {
+		return err
+	}
+	pi, err := eproof.NewEProof(eproofAddr, client)
+	if err != nil {
+		return err
+	}
+	type step struct {
+		name string
+		skip bool
+		send func(*bind.TransactOpts) (*etypes.Transaction, error)
+	}
+	ps := new(big.Int).SetUint64(proveSec)
+	steps := []step{
+		{"epoch slotSeconds", slotSec == 0, func(au *bind.TransactOpts) (*etypes.Transaction, error) { return ei.SetSlotSeconds(au, slotSec) }},
+		{"rsproof minProveSeconds", proveSec == 0, func(au *bind.TransactOpts) (*etypes.Transaction, error) { return ri.SetMinProveSeconds(au, ps) }},
+		{"eproof minProveSeconds", proveSec == 0, func(au *bind.TransactOpts) (*etypes.Transaction, error) { return pi.SetMinProveSeconds(au, ps) }},
+		{"eproof submitGrace", false, func(au *bind.TransactOpts) (*etypes.Transaction, error) { return pi.SetSubmitGrace(au, grace) }},
+		{"eproof livenessPenalty", false, func(au *bind.TransactOpts) (*etypes.Transaction, error) { return pi.SetLivenessPenalty(au, liveness) }},
+	}
+	for _, st := range steps {
+		if st.skip {
+			log.Printf("%s: skipped (blocks only)\n", st.name)
+			continue
+		}
+		au, err := makeAuth(sk)
+		if err != nil {
+			return err
+		}
+		tx, err := st.send(au)
+		if err != nil {
+			return fmt.Errorf("%s: %w", st.name, err)
+		}
+		if err := contract.CheckTx(ChainURL, tx.Hash()); err != nil {
+			return fmt.Errorf("%s: %w", st.name, err)
+		}
+		log.Printf("%s set\n", st.name)
+	}
+	return nil
+}
+
 // --- ValidatorReward (FixB+A2) ---------------------------------------------
 
 func DeployValidatorRewardImpl(client *ethclient.Client, sk string) (common.Address, error) {
