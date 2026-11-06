@@ -397,14 +397,6 @@ func deployall_v2(client *ethclient.Client, sk string) {
 		return
 	}
 
-	// Step 6b: windows in seconds and the liveness rules
-	log.Println("=== Setting time windows and liveness ===")
-	if err := SetTimeAndLivenessV2(client, sk, epochProxy, rsproofProxy, eproofProxy,
-		slotSeconds, minProveSeconds, submitGrace, livenessPenalty); err != nil {
-		log.Println("Failed to set time windows / liveness:", err)
-		return
-	}
-
 	// Step 7: ValidatorReward pool (FixB+A2) — deployed LAST so it does not
 	// shift the deterministic addresses of the core proxies (the LocalAnvil
 	// table + integration tests depend on the existing deploy order). Repoint
@@ -437,6 +429,15 @@ func deployall_v2(client *ethclient.Client, sk string) {
 			log.Println("Failed to deploy/register RSOne v2:", err)
 			return
 		}
+	}
+
+	// Step 8: windows in seconds and the liveness rules. Transactions only, and
+	// after every deployment, so no address moves (LocalAnvil table)
+	log.Println("=== Setting time windows and liveness ===")
+	if err := SetTimeAndLivenessV2(client, sk, epochProxy, rsproofProxy, eproofProxy,
+		slotSeconds, minProveSeconds, submitGrace, livenessPenalty); err != nil {
+		log.Println("Failed to set time windows / liveness:", err)
+		return
 	}
 
 	log.Println("=== V2 Deployment Complete ===")
