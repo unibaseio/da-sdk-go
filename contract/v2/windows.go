@@ -163,3 +163,13 @@ func (c *ContractManage) LateFill() (bool, error) {
 	}
 	return true, nil
 }
+
+// ClaimOpen reports whether a slot of a piece that started at epoch start and
+// expires at expire can still be claimed at epoch: until expiry with LateFill,
+// else within the claim window (start + DelaySubmit). Pure.
+func ClaimOpen(start, expire, epoch uint64, lateFill bool) bool {
+	if lateFill {
+		return epoch < expire
+	}
+	return epoch < start+uint64(com.DelaySubmit)
+}
