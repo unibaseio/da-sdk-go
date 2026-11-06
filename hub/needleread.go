@@ -79,7 +79,7 @@ var fetchOwnerFile = func(s *Server, name string, owner common.Address, w io.Wri
 	if _, err := sdk.GetFileReceiptOf(build.ServerURL, name, owner); err != nil {
 		return err
 	}
-	return sdk.DownloadOf(build.ServerURL, s.auth, name, owner, s.ps, w)
+	return sdk.DownloadOf(build.ServerURL, s.readAuth(), name, owner, s.ps, w)
 }
 
 // shardFetchObject fetches the row's object from its owner's home shard (the

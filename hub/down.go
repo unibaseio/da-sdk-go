@@ -135,7 +135,7 @@ func (s *Server) downloadPiece(ctx context.Context, cid string) ([]byte, error) 
 			return nil, err
 		}
 		defer release()
-		_, data, err := sdk.DownloadPiece(build.ServerURL, s.auth, cid)
+		_, data, err := sdk.DownloadPiece(build.ServerURL, s.readAuth(), cid)
 		if err != nil {
 			return nil, err
 		}

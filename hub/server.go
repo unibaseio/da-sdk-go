@@ -73,7 +73,10 @@ type Server struct {
 
 	local common.Address
 
-	auth types.Auth
+	auth types.Auth // built at start; DA reads use readAuth (kept fresh)
+
+	authMu sync.Mutex
+	authAt time.Time
 
 	statManager *StatManager
 
@@ -178,11 +181,12 @@ func NewServer(rp repo.Repo) (*Server, error) {
 	s := &Server{
 		Router: router,
 
-		typ:   types.HubType,
-		local: localAddr,
-		rp:    rp,
-		ps:    piece.New(rp.MetaStore(), rp.DataStore()),
-		auth:  auth,
+		typ:    types.HubType,
+		local:  localAddr,
+		rp:     rp,
+		ps:     piece.New(rp.MetaStore(), rp.DataStore()),
+		auth:   auth,
+		authAt: time.Now(),
 
 		readCache: newReadCache(),
 		memStat:   &memStatCache{},
@@ -496,4 +500,21 @@ func (s *Server) register() error {
 		return err
 	}
 	return nil
+}
+
+// authRefresh is how old a reused read header may get: streams and stores
+// may refuse headers older than their drift (10 min; audit 2026-10-13 M1/F9).
+const authRefresh = 5 * time.Minute
+
+// readAuth is the header for reads from the DA (streams, stores), rebuilt
+// once it is authRefresh old. A failed rebuild keeps the last one.
+func (s *Server) readAuth() types.Auth {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	if s.rp != nil && time.Since(s.authAt) >= authRefresh {
+		if au, err := s.rp.Key().BuildAuth([]byte("hub")); err == nil {
+			s.auth, s.authAt = au, time.Now()
+		}
+	}
+	return s.auth
 }
