@@ -526,3 +526,38 @@ func (c *ContractManage) HandleEPFake(elog etypes.Log, cabi abi.ABI) (types.EPCh
 	ei.Epoch = ld[0].(uint64)
 	return ei, nil
 }
+
+// SlotFreed is Piece's SlotFreed event: RSProof proved the replica in slot
+// Index of piece Piece (on-chain serial) forged, freed the slot and refunded
+// the forger's unearned pay to the piece.
+type SlotFreed struct {
+	Piece   uint64
+	Index   uint8
+	Replica uint64
+	Store   common.Address
+	Refund  *big.Int
+}
+
+// HandleSlotFreed decodes a SlotFreed log of Piece.
+func (c *ContractManage) HandleSlotFreed(elog etypes.Log, cabi abi.ABI) (SlotFreed, error) {
+	var sf SlotFreed
+	if elog.Address != c.PieceAddr {
+		return sf, fmt.Errorf("%w: SlotFreed log from %s, Piece is %s", ErrForeignLog, elog.Address.Hex(), c.PieceAddr.Hex())
+	}
+	if !isEvent(elog, cabi, "SlotFreed") || len(elog.Topics) != 2 {
+		return sf, fmt.Errorf("not a SlotFreed log")
+	}
+	sf.Piece = new(big.Int).SetBytes(elog.Topics[1].Bytes()).Uint64()
+	ld, err := cabi.Unpack("SlotFreed", elog.Data)
+	if err != nil {
+		return sf, err
+	}
+	if len(ld) != 4 {
+		return sf, fmt.Errorf("invalid SlotFreed data length")
+	}
+	sf.Index = ld[0].(uint8)
+	sf.Replica = ld[1].(uint64)
+	sf.Store = ld[2].(common.Address)
+	sf.Refund = ld[3].(*big.Int)
+	return sf, nil
+}
