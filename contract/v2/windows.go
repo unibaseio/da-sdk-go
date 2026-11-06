@@ -89,3 +89,58 @@ func (c *ContractManage) challengeStake(ctx context.Context, spender common.Addr
 	}
 	return com.DefaultPenalty, nil
 }
+
+// Window is a game's answer window as the contract enforces it: the move made
+// at block base (chalTime / proveTime) may be answered while the block is
+// below base+Blocks, or while the time is below MoveAt+Secs (Secs 0: blocks
+// only).
+type Window struct {
+	MoveAt uint64 // unix time of the last move
+	Blocks uint64
+	Secs   uint64
+}
+
+// OpenAt reports whether the move made at block base is still open at block
+// and unix time now (an emergency pause aside).
+func (w Window) OpenAt(base, block, now uint64) bool {
+	return block < base+w.Blocks || (w.Secs != 0 && now < w.MoveAt+w.Secs)
+}
+
+// GetRSClock reads RSProof.getClock: the window of the challenge on slot pri
+// of piece pi. Against a contract without it: minProveTime blocks only.
+func (c *ContractManage) GetRSClock(pi uint64, pri uint8) (Window, error) {
+	ctx, cancel := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancel()
+	rsp, err := c.NewRSProof(ctx)
+	if err != nil {
+		return Window{}, err
+	}
+	w, err := rsp.GetClock(&bind.CallOpts{From: com.Base, Context: ctx}, pi, pri)
+	if err != nil {
+		if !isRevert(err) {
+			return Window{}, err
+		}
+		b, err := c.GetRSMinTime()
+		return Window{Blocks: b}, err
+	}
+	return Window{MoveAt: w.MoveAt, Blocks: w.Blocks, Secs: w.Secs}, nil
+}
+
+// GetEpochClock reads EProof.getClock: the window of store a's game on epoch ep.
+func (c *ContractManage) GetEpochClock(a common.Address, ep uint64) (Window, error) {
+	ctx, cancel := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancel()
+	epi, err := c.NewEProof(ctx)
+	if err != nil {
+		return Window{}, err
+	}
+	w, err := epi.GetClock(&bind.CallOpts{From: com.Base, Context: ctx}, a, ep)
+	if err != nil {
+		if !isRevert(err) {
+			return Window{}, err
+		}
+		b, err := c.GetEProofMinTime()
+		return Window{Blocks: b}, err
+	}
+	return Window{MoveAt: w.MoveAt, Blocks: w.Blocks, Secs: w.Secs}, nil
+}
