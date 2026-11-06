@@ -144,3 +144,22 @@ func (c *ContractManage) GetEpochClock(a common.Address, ep uint64) (Window, err
 	}
 	return Window{MoveAt: w.MoveAt, Blocks: w.Blocks, Secs: w.Secs}, nil
 }
+
+// LateFill reports whether Piece accepts a replica in an empty slot after the
+// claim window, until the piece expires (da-contract D1). Earlier contracts
+// refuse it ("too late") once start+DelaySubmit epochs have passed.
+func (c *ContractManage) LateFill() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancel()
+	pi, err := c.NewPiece(ctx)
+	if err != nil {
+		return false, err
+	}
+	if _, err = pi.ReserveOf(&bind.CallOpts{From: com.Base, Context: ctx}, 0); err != nil {
+		if isRevert(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
