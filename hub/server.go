@@ -489,7 +489,8 @@ func (s *Server) register() error {
 		ChainType: s.rp.Config().Chain.Type,
 	}
 
-	err = sdk.RegisterEdge(s.rp.Config().Remote.URL, auth, mm)
+	// signed over the registration itself, not a label (audit 2026-10-13 M1/F9)
+	err = sdk.RegisterEdgeSigned(s.rp.Config().Remote.URL, s.rp.Key().BuildAuth, mm)
 	if err != nil {
 		logger.Debug("register hub fail:", err)
 		return err

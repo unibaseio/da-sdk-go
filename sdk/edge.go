@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/ethereum/go-ethereum/crypto"
 	"net/url"
 	"strings"
 
@@ -17,16 +18,54 @@ func RegisterEdge(baseUrl string, auth types.Auth, em types.EdgeMeta) error {
 	if err != nil {
 		return err
 	}
+	return registerEdgeRaw(baseUrl, auth, mmb)
+}
 
-	form := url.Values{}
-	form.Set("txMsg", hex.EncodeToString(mmb))
+// EdgeAuthHash is what a registration's signature covers: the registration
+// itself. A header signed over a label (RegisterEdge with a "register" auth)
+// could be replayed within its window to register the edge again with
+// another ExposeURL (audit 2026-10-13 M1/F9).
+func EdgeAuthHash(txMsg []byte) []byte {
+	return crypto.Keccak256([]byte("da-edge-register/v1"), txMsg)
+}
 
-	_, err = doRequest(context.TODO(), baseUrl, "/v1/edges", "", auth, strings.NewReader(form.Encode()))
+// EnsureEdgeSigned is EnsureEdge with the registration signed by sign over
+// EdgeAuthHash of it, so the signature is good for this registration only.
+func EnsureEdgeSigned(baseUrl string, sign func([]byte) (types.Auth, error), em types.EdgeMeta) (already bool, err error) {
+	cur, gerr := GetEdge(baseUrl, types.Auth{}, em.Name)
+	if gerr == nil && cur.ExposeURL != "" && cur.ExposeURL == em.ExposeURL {
+		return true, nil
+	}
+	mmb, err := json.Marshal(em)
+	if err != nil {
+		return false, err
+	}
+	auth, err := sign(EdgeAuthHash(mmb))
+	if err != nil {
+		return false, err
+	}
+	return false, registerEdgeRaw(baseUrl, auth, mmb)
+}
+
+// RegisterEdgeSigned registers em with a signature bound to it (EdgeAuthHash).
+func RegisterEdgeSigned(baseUrl string, sign func([]byte) (types.Auth, error), em types.EdgeMeta) error {
+	mmb, err := json.Marshal(em)
 	if err != nil {
 		return err
 	}
+	auth, err := sign(EdgeAuthHash(mmb))
+	if err != nil {
+		return err
+	}
+	return registerEdgeRaw(baseUrl, auth, mmb)
+}
 
-	return nil
+func registerEdgeRaw(baseUrl string, auth types.Auth, mmb []byte) error {
+	form := url.Values{}
+	form.Set("txMsg", hex.EncodeToString(mmb))
+
+	_, err := doRequest(context.TODO(), baseUrl, "/v1/edges", "", auth, strings.NewReader(form.Encode()))
+	return err
 }
 
 // EnsureEdge registers the edge exactly once at startup. If this address is already
