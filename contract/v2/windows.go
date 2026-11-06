@@ -173,3 +173,22 @@ func ClaimOpen(start, expire, epoch uint64, lateFill bool) bool {
 	}
 	return epoch < start+uint64(com.DelaySubmit)
 }
+
+// ForgedSlotsFreed reports whether a replica proven forged frees its slot
+// (Piece.freeForgedSlot, probed through Piece.forged): with it, the slot of a
+// fake replica is empty and can be filled again.
+func (c *ContractManage) ForgedSlotsFreed() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.TODO(), readCallTimeout())
+	defer cancel()
+	pi, err := c.NewPiece(ctx)
+	if err != nil {
+		return false, err
+	}
+	if _, err = pi.Forged(&bind.CallOpts{From: com.Base, Context: ctx}, 0); err != nil {
+		if isRevert(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
